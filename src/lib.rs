@@ -16,6 +16,7 @@ mod config;
 mod github;
 mod icons;
 mod lists;
+mod markdown;
 mod model;
 mod net;
 mod notes;
