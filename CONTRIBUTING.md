@@ -11,7 +11,9 @@
 | `src/github.rs` | GitHub REST client: async, shared by the desktop and web builds |
 | `src/net.rs` | Transport: blocking `ureq` on the desktop, `fetch` to the `/gh` proxy on the web; `spawn` runs work in the background and reports to the UI |
 | `src/config.rs` | `.env` parsing (desktop) and `config.json` (web) |
-| `server/` | `repohub-server`: static files, `config.json`, and the `/gh/*` GitHub proxy that holds the token |
+| `src/board.rs` | The Notes whiteboard: model, hand-drawn rendering, gestures, undo/redo, `.excalidraw` read/write |
+| `src/notes.rs`, `src/notes_page.rs` | Notes storage (local folder on desktop, `/api/notes` on the web) and the Notes tab |
+| `server/` | `repohub-server`: static files, `config.json`, the `/gh/*` GitHub proxy that holds the token, and `/api/notes` (drawings in `DATA_DIR`) |
 | `web/index.html` | Page that loads the WebAssembly build (`app.js` and `app_bg.wasm` are build outputs) |
 | `Dockerfile`, `compose.yaml` | Container: builds the web app and the server, runs the server on port 8080 |
 | `.github/workflows/` | CI (tests and builds), image publishing (GHCR), GitHub Pages |
@@ -65,6 +67,15 @@ The server reads its settings from the environment, using the same variables as 
 
 Set `GITHUB_API_URL` to a local server that answers like the GitHub API. Everything else stays
 the same; the clients bypass HTTP proxies for `localhost` and `NO_PROXY` hosts.
+
+### Notes on the whiteboard
+
+- The board works in a fixed world of `board::WORLD` points (1200 × 720), which the canvas scales
+  to the space it has. Gestures arrive in canvas points and are converted with the size in `Drag`.
+- The file format is a subset of Excalidraw's. Unknown element types are skipped on load, so a
+  file saved from excalidraw.com with images or frames loses those elements if it's saved again
+  from RepoHub.
+- `board::tests` drives a full gesture sequence and checks the `.excalidraw` round trip.
 
 ## Guidelines
 

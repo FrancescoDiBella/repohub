@@ -153,6 +153,7 @@ pub fn settings(s: &App, k: &Kit) -> El {
         ("Token (GITHUB_TOKEN)", if cfg.token.is_some() { "set (not shown)".into() } else { "not set: public data only, 60 requests an hour".into() }),
         ("API", cfg.api.clone()),
         ("Pinned (REPOHUB_PINNED)", if cfg.pinned.is_empty() { "the 3 most recently pushed".into() } else { cfg.pinned.join(", ") }),
+        ("Notes", if cfg.notes { notes_where() } else { "not available here (needs the desktop app or Docker)".into() }),
         ("Filters", format!("forks {}, archived {}, at most {} repositories", if cfg.include_forks { "yes" } else { "no" }, if cfg.include_archived { "yes" } else { "no" }, cfg.max_repos)),
     ] {
         conn = conn.child(rule(k)).child(info(k, label, value));
@@ -170,6 +171,10 @@ pub fn settings(s: &App, k: &Kit) -> El {
         .child(conn)
         .child(prefs)
         .child(vis)
+}
+
+fn notes_where() -> String {
+    crate::notes::location()
 }
 
 pub fn repo_settings(s: &App, k: &Kit, r: &Repo) -> El {

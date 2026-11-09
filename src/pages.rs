@@ -163,7 +163,7 @@ fn repo_card(k: &Kit, i: usize, r: &Repo) -> El {
 
 // ---------------------------------------------------------------- repository detail
 
-pub const TABS: [&str; 5] = ["Code", "Issues", "Pull requests", "Actions", "Settings"];
+pub const TABS: [&str; 6] = ["Code", "Issues", "Pull requests", "Actions", "Notes", "Settings"];
 
 pub fn repo_detail(s: &App, k: &Kit, i: usize) -> El {
     let r = &s.data.repos[i];
@@ -180,13 +180,19 @@ pub fn repo_detail(s: &App, k: &Kit, i: usize) -> El {
             .child(open_button(k, "Open on GitHub", &r.url, "open-github"))
             .child(Button::new(format!("Fork · {}", r.forks)).icon(&icons::FORK).control_size(ControlSize::Small).build(k).key("fork"))
             .child(star_button(k, i, r, true, "detail-star".into())));
-    let tabs = SegmentedControl::new(&TABS, Some(s.tab)).label("Section").fit().on_pick(|s: &mut App, t, _| s.tab = t).build(k).key("tabs");
+    let tabs = SegmentedControl::new(&TABS, Some(s.tab)).label("Section").fit().on_pick(move |s: &mut App, t, _| {
+        s.tab = t;
+        if t == 4 {
+            s.load_notes(i);
+        }
+    }).build(k).key("tabs");
     let in_repo = |name: &str| name.eq_ignore_ascii_case(&r.full_name) || name.eq_ignore_ascii_case(&r.name);
     let body = match s.tab {
         0 => code_tab(s, k, r),
         1 => list_of(k, "Open issues", s.data.issues.iter().filter(|x| in_repo(&x.repo)).map(|x| issue_row(k, x)).collect()),
         2 => list_of(k, "Pull requests", s.data.pulls.iter().filter(|x| in_repo(&x.repo)).map(|x| pull_row(k, x, false)).collect()),
         3 => list_of(k, "Workflow runs", s.data.runs.iter().filter(|x| in_repo(&x.repo)).map(|x| run_row(k, x)).collect()),
+        4 => crate::notes_page::notes_tab(s, k, i),
         _ => crate::lists::repo_settings(s, k, r),
     };
     col().w_full().gap(16.0).child(back).child(header).child(tabs).child(body)

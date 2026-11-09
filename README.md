@@ -5,7 +5,8 @@ A dashboard for your own GitHub repositories, written in Rust with
 
 It reads real data from the GitHub REST API: profile, repositories, files, README, languages,
 last commit, pull requests, issues, workflow runs and weekly commits. You can star and unstar
-repositories from the app.
+repositories from the app, and keep **notes**: hand-drawn diagrams and sketches for each
+repository and branch, saved on your computer.
 
 | | |
 | --- | --- |
@@ -62,7 +63,7 @@ The `image` workflow publishes `ghcr.io/francescodibella/repohub` on every push 
 it's published, there is nothing to build:
 
 ```sh
-docker run --rm --env-file .env -p 127.0.0.1:8080:8080 ghcr.io/francescodibella/repohub
+docker run --rm --env-file .env -p 127.0.0.1:8080:8080 -v repohub-notes:/data ghcr.io/francescodibella/repohub
 ```
 
 A new GHCR package starts out private. Either make it public (your GitHub profile → Packages →
@@ -79,6 +80,31 @@ installed automatically.
 cp .env.example .env      # then set GITHUB_USER and/or GITHUB_TOKEN
 cargo run --release       # the first build takes a few minutes
 ```
+
+## Notes
+
+Each repository has a **Notes** tab with a small whiteboard in the spirit of
+[Excalidraw](https://excalidraw.com), built natively with Rune.
+
+![Notes: a diagram drawn in RepoHub](docs/notes.png)
+
+- **Branches:** pick a branch, then name a drawing to create it or open an existing one. Each
+  branch keeps its own drawings.
+- **Shapes:** rectangles, ellipses, diamonds, arrows, lines, freehand strokes and text, with the
+  hand-drawn look Excalidraw is known for.
+- **Style:** six colours, filled shapes and bold strokes.
+- **Editing:** select and drag to move, Delete to remove, Ctrl/⌘+Z to undo and Ctrl/⌘+Shift+Z to
+  redo.
+- **Saving:** every change is saved at once, in Excalidraw's `.excalidraw` format, so a drawing
+  also opens on excalidraw.com (*Open* → pick the file).
+
+Drawings never go to GitHub. They are stored at
+`notes/<owner>/<repo>/<branch>/<name>.excalidraw` inside:
+- the desktop app: `REPOHUB_DATA_DIR`, or the platform's data folder (`~/.local/share/repohub`,
+  `~/Library/Application Support/RepoHub`, `%APPDATA%\RepoHub`);
+- Docker: the `notes` volume (`/data` in the container), which survives rebuilds and updates.
+
+The static GitHub Pages build has nowhere to store them, so the tab explains that instead.
 
 ## Configuration
 
@@ -114,7 +140,8 @@ GitHub Enterprise.
 | Pull requests | pull requests you're involved in: open, draft, merged, closed; click to open | `/search/issues?q=is:pr involves:{u}` |
 | Issues | open issues in your repositories; click to open | `/search/issues?q=is:issue is:open user:{u}` |
 | Actions | latest runs of the most recently pushed repositories | `/repos/{r}/actions/runs` |
-| Settings | connection status and the configuration in use (the token is never shown) | — |
+| Repository → Notes | drawings per branch: create, open, draw, delete | `/repos/{r}/branches` (the drawings stay on your computer) |
+| Settings | connection status, the configuration in use (the token is never shown) and where notes are kept | — |
 
 How it behaves:
 - **Refresh** (toolbar icon, or ⌘R / Ctrl+R) reloads everything.

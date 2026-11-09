@@ -23,14 +23,20 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
  && wasm-bindgen --target web --out-dir /out/web --out-name app target/wasm32-unknown-unknown/release/repohub.wasm \
  && cp web/index.html /out/web/ \
  && cargo build --release --manifest-path server/Cargo.toml \
- && cp server/target/release/repohub-server /out/
+ && cp server/target/release/repohub-server /out/ \
+ && mkdir -p /out/data
 
 FROM debian:bookworm-slim
 # CA certificates for HTTPS to GitHub, taken from the build image (no package manager needed).
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY --from=build /out /app
+COPY --from=build /out/web /app/web
+COPY --from=build /out/repohub-server /app/repohub-server
+# Notes (drawings) live here; compose.yaml mounts a volume so they survive container updates.
+COPY --from=build --chown=65534:65534 /out/data /data
 ENV REPOHUB_ADDR=0.0.0.0:8080 \
-    WEB_DIR=/app/web
+    WEB_DIR=/app/web \
+    DATA_DIR=/data
+VOLUME /data
 EXPOSE 8080
 USER nobody
 CMD ["/app/repohub-server"]

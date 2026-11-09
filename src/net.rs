@@ -106,20 +106,24 @@ mod js {
     use wasm_bindgen::prelude::*;
 
     #[wasm_bindgen(inline_js = "
-export async function gh_fetch(method, url, accept) {
+export async function gh_fetch(method, url, accept, body) {
     try {
-        const r = await fetch(url, { method, headers: { Accept: accept }, credentials: 'same-origin' });
-        const body = await r.text();
-        return [r.status, body, r.headers.get('x-ratelimit-remaining') || '', r.headers.get('x-ratelimit-reset') || ''];
+        const init = { method, headers: { Accept: accept }, credentials: 'same-origin' };
+        if (body) { init.body = body; init.headers['Content-Type'] = 'application/json'; }
+        const r = await fetch(url, init);
+        const text = await r.text();
+        return [r.status, text, r.headers.get('x-ratelimit-remaining') || '', r.headers.get('x-ratelimit-reset') || ''];
     } catch (e) {
         return [0, String(e), '', ''];
     }
 }
 export function now_secs() { return Math.floor(Date.now() / 1000); }
+export function absolute_url(rel) { return new URL(rel, location.href).href; }
 ")]
     extern "C" {
-        pub async fn gh_fetch(method: &str, url: &str, accept: &str) -> JsValue;
+        pub async fn gh_fetch(method: &str, url: &str, accept: &str, body: &str) -> JsValue;
         pub fn now_secs() -> f64;
+        pub fn absolute_url(rel: &str) -> String;
     }
 }
 
@@ -139,17 +143,29 @@ impl Transport {
     }
 
     pub async fn send(&self, method: &str, path: &str, accept: &str) -> Result<Resp, String> {
-        let v = js::gh_fetch(method, &format!("gh{path}"), accept).await;
-        let a = js_sys::Array::from(&v);
-        let status = a.get(0).as_f64().unwrap_or(0.0) as u16;
-        let body = a.get(1).as_string().unwrap_or_default();
-        if status == 0 {
-            return Err(format!("Can't reach the RepoHub server: {body}"));
-        }
-        let remaining = a.get(2).as_string().filter(|s| !s.is_empty());
-        let reset = a.get(3).as_string().and_then(|s| s.parse().ok());
-        Ok(Resp { status, body, remaining, reset })
+        request(method, &format!("gh{path}"), accept, "").await
     }
+}
+
+/// Web only: a request to `url` relative to the page (the RepoHub server).
+#[cfg(target_arch = "wasm32")]
+pub async fn request(method: &str, url: &str, accept: &str, body: &str) -> Result<Resp, String> {
+    let v = js::gh_fetch(method, url, accept, body).await;
+    let a = js_sys::Array::from(&v);
+    let status = a.get(0).as_f64().unwrap_or(0.0) as u16;
+    let body = a.get(1).as_string().unwrap_or_default();
+    if status == 0 {
+        return Err(format!("Can't reach the RepoHub server: {body}"));
+    }
+    let remaining = a.get(2).as_string().filter(|s| !s.is_empty());
+    let reset = a.get(3).as_string().and_then(|s| s.parse().ok());
+    Ok(Resp { status, body, remaining, reset })
+}
+
+/// Web only: `rel` resolved against the page's address.
+#[cfg(target_arch = "wasm32")]
+pub fn absolute(rel: &str) -> String {
+    js::absolute_url(rel)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -161,7 +177,7 @@ pub fn now() -> i64 {
 /// Pages) means the sample data.
 #[cfg(target_arch = "wasm32")]
 pub async fn fetch_config() -> Option<Config> {
-    let v = js::gh_fetch("GET", "config.json", "application/json").await;
+    let v = js::gh_fetch("GET", "config.json", "application/json", "").await;
     let a = js_sys::Array::from(&v);
     if a.get(0).as_f64() != Some(200.0) {
         return None;

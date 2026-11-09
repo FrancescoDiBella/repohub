@@ -10,4 +10,10 @@ services:
     # Published on this computer only: the server holds your token, so don't expose it to the network.
     ports:
       - "127.0.0.1:8080:8080"
+    # Notes (drawings) are kept in this volume, so they survive rebuilds and updates.
+    volumes:
+      - notes:/data
     restart: unless-stopped
+
+volumes:
+  notes:
