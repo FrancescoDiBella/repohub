@@ -1,0 +1,11 @@
+target/
+server/target/
+.env
+.env.*
+!.env.example
+# Built by `wasm-bindgen` (see the Dockerfile / Pages workflow)
+web/app.js
+web/app_bg.wasm
+web/app.d.ts
+web/app_bg.wasm.d.ts
+web/snippets/

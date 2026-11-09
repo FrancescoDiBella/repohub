@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: System libraries for Rune
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
+      # rust-toolchain.toml pins the toolchain; rustup installs it on first use.
+      - name: Toolchain
+        run: rustup show active-toolchain && rustup target add wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            server
+      - name: App tests
+        run: cargo test --release
+      - name: Server tests
+        run: cargo test --release --manifest-path server/Cargo.toml
+      - name: Web build compiles
+        run: cargo build --release --lib --target wasm32-unknown-unknown
