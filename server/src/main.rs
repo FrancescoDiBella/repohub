@@ -14,10 +14,13 @@ use std::path::{Path, PathBuf};
 
 use tiny_http::{Header, Method, Request, Response, Server};
 
+mod notes;
+
 struct Cfg {
     token: Option<String>,
     api: String,
     web_dir: PathBuf,
+    data_dir: PathBuf,
     allowed_hosts: Vec<String>,
     public_json: String,
     agent: ureq::Agent,
@@ -57,7 +60,7 @@ impl Cfg {
         let pinned: Vec<String> = env("REPOHUB_PINNED").map(|v| v.split(',').map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()).collect()).unwrap_or_default();
         let num = |k: &str, d: u64| env(k).and_then(|v| v.parse::<u64>().ok()).unwrap_or(d);
         let public_json = format!(
-            "{{\"user\":{},\"hasToken\":{},\"api\":{},\"title\":{},\"theme\":{},\"pinned\":[{}],\"includeForks\":{},\"includeArchived\":{},\"maxRepos\":{},\"activityRepos\":{},\"demo\":{}}}",
+            "{{\"user\":{},\"hasToken\":{},\"api\":{},\"title\":{},\"theme\":{},\"pinned\":[{}],\"includeForks\":{},\"includeArchived\":{},\"maxRepos\":{},\"activityRepos\":{},\"demo\":{},\"notes\":true}}",
             opt("GITHUB_USER"),
             token.is_some(),
             json_str(&api),
@@ -83,6 +86,7 @@ impl Cfg {
             token,
             api,
             web_dir: env("WEB_DIR").map(PathBuf::from).unwrap_or_else(|| "web".into()),
+            data_dir: env("DATA_DIR").map(PathBuf::from).unwrap_or_else(|| "data".into()),
             allowed_hosts,
             public_json,
             agent,
@@ -228,6 +232,8 @@ fn handle(cfg: &Cfg, req: Request) {
     let url = req.url().to_owned();
     if url.starts_with("/gh/") {
         proxy(cfg, req);
+    } else if url.starts_with("/api/notes") {
+        notes::handle(&cfg.data_dir, req);
     } else if url.split('?').next() == Some("/config.json") {
         let resp = Response::from_string(cfg.public_json.clone()).with_header(h("Content-Type", "application/json")).with_header(h("Cache-Control", "no-store"));
         let _ = req.respond(resp);
@@ -248,10 +254,11 @@ fn main() {
     let port = addr.rsplit(':').next().unwrap_or("8080");
     eprintln!("repohub-server: listening on {addr}. Open http://localhost:{port}");
     eprintln!(
-        "repohub-server: GitHub {} · token {} · static files from {}",
+        "repohub-server: GitHub {} · token {} · static files from {} · notes in {}",
         cfg.api,
         if cfg.token.is_some() { "set" } else { "not set (public data only)" },
-        cfg.web_dir.display()
+        cfg.web_dir.display(),
+        cfg.data_dir.display()
     );
     let server = std::sync::Arc::new(server);
     let workers: Vec<_> = (0..8).map(|_| {

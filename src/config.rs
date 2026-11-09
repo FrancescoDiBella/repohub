@@ -22,6 +22,8 @@ pub struct Config {
     pub activity_repos: usize,
     /// Force the sample data even when credentials are present.
     pub demo: bool,
+    /// Notes (Excalidraw drawings) are available: true when `repohub-server` serves the app.
+    pub notes: bool,
     /// The `.env` file that was loaded, if any.
     pub env_file: Option<String>,
 }
@@ -141,6 +143,8 @@ impl Config {
             max_repos: num("REPOHUB_MAX_REPOS", 100).clamp(1, 1000),
             activity_repos: num("REPOHUB_ACTIVITY_REPOS", 5).clamp(0, 20),
             demo: flag(get("REPOHUB_DEMO"), false),
+            // The desktop app keeps notes in a local folder; the web build needs repohub-server.
+            notes: cfg!(not(target_arch = "wasm32")),
             env_file,
         }
     }
@@ -175,6 +179,7 @@ impl Config {
             max_repos: nu("maxRepos", 100).clamp(1, 1000),
             activity_repos: nu("activityRepos", 5).clamp(0, 20),
             demo: bo("demo", false),
+            notes: bo("notes", false),
             env_file: Some("provided by repohub-server (Docker)".into()),
         })
     }

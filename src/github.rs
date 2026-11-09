@@ -250,6 +250,14 @@ impl Gh {
         d
     }
 
+    /// Branch names, the default branch first.
+    pub async fn branches(&self, full: &str, default: &str) -> Result<Vec<String>, String> {
+        let v = self.get(&format!("/repos/{full}/branches?per_page=100")).await?;
+        let mut names: Vec<String> = v.as_array().cloned().unwrap_or_default().iter().map(|b| s(b, "name")).filter(|n| !n.is_empty()).collect();
+        names.sort_by_key(|n| (n != default, n.to_lowercase()));
+        Ok(names)
+    }
+
     pub async fn set_star(&self, full: &str, on: bool) -> Result<(), String> {
         let r = self.t.send(if on { "PUT" } else { "DELETE" }, &format!("/user/starred/{full}"), JSON).await?;
         if (200..300).contains(&r.status) { Ok(()) } else { Err(self.explain(&r)) }
@@ -282,6 +290,10 @@ pub async fn load_all(cfg: &Config) -> Result<Data, String> {
 
 pub async fn load_detail(cfg: &Config, full: &str) -> Detail {
     Gh::new(cfg).detail(full).await
+}
+
+pub async fn branches(cfg: &Config, full: &str, default: &str) -> Result<Vec<String>, String> {
+    Gh::new(cfg).branches(full, default).await
 }
 
 pub async fn set_star(cfg: &Config, full: &str, on: bool) -> Result<(), String> {

@@ -11,12 +11,15 @@ use rune::{AppHandle, AppSpec, Cx, El, KeyEvent, ScrollSpec, TextEdit, Tx, col, 
 use rune_kit::shell::{self, PaneState, Sidebar, SidebarRow, SidebarSection, SidebarToggle, SplitView, Toolbar};
 use rune_kit::{ControlSize, IconButton, IconButtonVariant, Kit, PaletteSeed};
 
+mod board;
 mod config;
 mod github;
 mod icons;
 mod lists;
 mod model;
 mod net;
+mod notes;
+mod notes_page;
 mod pages;
 mod ui;
 
@@ -59,6 +62,14 @@ pub struct App {
     details: HashMap<String, Detail>,
     status: Status,
     handle: Option<AppHandle<App>>,
+    // Notes (Excalidraw drawings), keyed by repository full name.
+    branches: HashMap<String, Result<Vec<String>, String>>,
+    note_branch: HashMap<String, String>,
+    notes: HashMap<(String, String), notes::NotesView>,
+    note_name: TextEdit,
+    confirm_delete: Option<String>,
+    /// The drawing open in the Notes tab, if any.
+    board: Option<board::Board>,
 }
 
 impl App {
@@ -147,6 +158,115 @@ impl App {
         }
     }
 
+    /// The branch the Notes tab shows for repository `i`: the one picked, else the default branch.
+    fn notes_branch(&self, i: usize) -> Option<(String, String)> {
+        let r = self.data.repos.get(i)?;
+        let b = self.note_branch.get(&r.full_name).cloned().unwrap_or_else(|| r.branch.clone());
+        Some((r.full_name.clone(), b))
+    }
+
+    /// Loads the branch list (once) and the drawings of the selected branch.
+    fn load_notes(&mut self, i: usize) {
+        if !self.cfg.notes {
+            return;
+        }
+        let Some((full, branch)) = self.notes_branch(i) else { return };
+        let default = self.data.repos[i].branch.clone();
+        let Some(h) = self.handle.clone() else { return };
+        if !self.branches.contains_key(&full) {
+            self.branches.insert(full.clone(), Ok(Vec::new()));
+            let (cfg, f) = (self.cfg.clone(), full.clone());
+            let key = full.clone();
+            net::spawn(h.clone(), move || async move { github::branches(&cfg, &f, &default).await }, move |s: &mut App, r| {
+                s.branches.insert(key, r);
+            });
+        }
+        let k = (full.clone(), branch.clone());
+        self.notes.entry(k.clone()).or_default().loading = true;
+        net::spawn(h, move || async move { notes::list(&full, &branch).await }, move |s: &mut App, r| {
+            let v = s.notes.entry(k).or_default();
+            v.loading = false;
+            match r {
+                Ok(items) => {
+                    v.items = items;
+                    v.error = None;
+                }
+                Err(e) => v.error = Some(e),
+            }
+        });
+    }
+
+    fn pick_branch(&mut self, i: usize, branch: String) {
+        if let Some(r) = self.data.repos.get(i) {
+            self.note_branch.insert(r.full_name.clone(), branch);
+            self.confirm_delete = None;
+            self.load_notes(i);
+        }
+    }
+
+    fn delete_note(&mut self, i: usize, name: String) {
+        let Some((full, branch)) = self.notes_branch(i) else { return };
+        self.confirm_delete = None;
+        let Some(h) = self.handle.clone() else { return };
+        net::spawn(h, move || async move { notes::delete(&full, &branch, &name).await }, move |s: &mut App, r| {
+            match r {
+                Ok(()) => s.toast = Some("Drawing deleted".into()),
+                Err(e) => s.toast = Some(e),
+            }
+            s.load_notes(i);
+        });
+    }
+
+    /// Opens drawing `name` of repository `i` (on the selected branch) in the board editor.
+    fn open_board(&mut self, i: usize, name: String, new: bool) {
+        let Some((full, branch)) = self.notes_branch(i) else { return };
+        let mut b = board::Board::new(&full, &branch, &name);
+        if new {
+            self.board = Some(b);
+            return;
+        }
+        b.save = board::SaveState::Loading;
+        self.board = Some(b);
+        let Some(h) = self.handle.clone() else { return };
+        net::spawn(h, move || async move { notes::load(&full, &branch, &name).await }, |s: &mut App, r| {
+            let Some(b) = s.board.as_mut() else { return };
+            match r {
+                Ok(Some(json)) => match b.load_json(&json) {
+                    Ok(()) => b.save = board::SaveState::Saved,
+                    Err(e) => b.save = board::SaveState::Error(e),
+                },
+                Ok(None) => b.save = board::SaveState::Saved,
+                Err(e) => b.save = board::SaveState::Error(e),
+            }
+        });
+    }
+
+    /// Saves the open drawing in the background.
+    fn save_board(&mut self) {
+        let Some(b) = self.board.as_mut() else { return };
+        if b.save == board::SaveState::Loading {
+            return;
+        }
+        b.save = board::SaveState::Saving;
+        let (repo, branch, name, json) = (b.repo.clone(), b.branch.clone(), b.name.clone(), b.to_json());
+        let Some(h) = self.handle.clone() else { return };
+        net::spawn(h, move || async move { notes::save(&repo, &branch, &name, json).await }, |s: &mut App, r| {
+            if let Some(b) = s.board.as_mut() {
+                b.save = match r {
+                    Ok(()) if b.save == board::SaveState::Saving => board::SaveState::Saved,
+                    Ok(()) => b.save.clone(),
+                    Err(e) => board::SaveState::Error(e),
+                };
+            }
+        });
+    }
+
+    /// Closes the editor and refreshes the list it came from.
+    fn close_board(&mut self, i: usize) {
+        self.board = None;
+        self.load_notes(i);
+    }
+
     fn starred_count(&self) -> u32 {
         self.data.repos.iter().map(|r| r.stars).sum()
     }
@@ -168,10 +288,17 @@ fn init() -> App {
         prefs: [cfg.theme == Some(true), true, false, true, true],
         pinned_open: true,
         toast: None,
-        data: if live { Data::default() } else { Data::sample() },
+        // The web build waits for repohub-server's config.json before choosing (see `start`).
+        data: if live || cfg!(target_arch = "wasm32") { Data::default() } else { Data::sample() },
         details: HashMap::new(),
-        status: if live { Status::Loading } else { Status::Sample },
+        status: if live || cfg!(target_arch = "wasm32") { Status::Loading } else { Status::Sample },
         handle: None,
+        branches: HashMap::new(),
+        note_branch: HashMap::new(),
+        notes: HashMap::new(),
+        note_name: TextEdit::new(""),
+        confirm_delete: None,
+        board: None,
         cfg,
     };
     // `REPOHUB_BLOCKING=1` loads synchronously before the first frame (headless snapshots).
@@ -341,6 +468,30 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
 }
 
 fn on_key(s: &mut App, ev: &KeyEvent, _: &mut Tx) -> bool {
+    // The board editor's shortcuts, unless the text tool's field is taking the keys.
+    if let Some(b) = s.board.as_mut()
+        && b.text_at.is_none()
+    {
+        let changed = match &ev.key {
+            rune::Key::Delete | rune::Key::Backspace => b.delete_selected(),
+            rune::Key::Escape => {
+                b.selected = None;
+                return true;
+            }
+            _ if ev.is_command('z') && ev.mods.shift => b.redo(),
+            _ if ev.is_command('z') => b.undo(),
+            _ if ev.is_command('y') => b.redo(),
+            _ => return shortcuts(s, ev),
+        };
+        if changed {
+            s.save_board();
+        }
+        return true;
+    }
+    shortcuts(s, ev)
+}
+
+fn shortcuts(s: &mut App, ev: &KeyEvent) -> bool {
     if shell::is_sidebar_toggle(ev) {
         s.sidebar.toggle();
         return true;
@@ -359,21 +510,26 @@ pub fn start() {
     let h2 = handle.clone();
     handle.update(move |s: &mut App, _| {
         s.handle = Some(h2.clone());
+        #[cfg(not(target_arch = "wasm32"))]
         if s.status == Status::Loading && s.data.repos.is_empty() {
             s.status = Status::Ready; // let refresh() start the first load
             s.refresh();
         }
-        // The web build asks repohub-server for its configuration; a static host has none.
+        // The web build asks repohub-server for its configuration; a static host (GitHub Pages)
+        // has none, and then shows the sample data.
         #[cfg(target_arch = "wasm32")]
-        net::spawn(h2, || net::fetch_config(), |s: &mut App, cfg| {
-            if let Some(cfg) = cfg.filter(|c| c.live()) {
+        net::spawn(h2, || net::fetch_config(), |s: &mut App, cfg| match cfg.filter(|c| c.live()) {
+            Some(cfg) => {
                 if cfg.theme == Some(true) {
                     s.prefs[0] = true;
                 }
                 s.cfg = Arc::new(cfg);
-                s.data = Data::default();
                 s.status = Status::Ready;
                 s.refresh();
+            }
+            None => {
+                s.data = Data::sample();
+                s.status = Status::Sample;
             }
         });
     });
