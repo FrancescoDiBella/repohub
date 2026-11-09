@@ -59,8 +59,9 @@ reach the port uses your token.
 
 ### Prebuilt image
 
-The `image` workflow publishes `ghcr.io/francescodibella/repohub` on every push to `main`. Once
-it's published, there is nothing to build:
+The `image` workflow publishes `ghcr.io/francescodibella/repohub` on every push to `main`, for
+Intel/AMD (`linux/amd64`) and ARM (`linux/arm64`, Apple silicon included). Once it's published,
+there is nothing to build:
 
 ```sh
 docker run --rm --env-file .env -p 127.0.0.1:8080:8080 -v repohub-notes:/data ghcr.io/francescodibella/repohub
