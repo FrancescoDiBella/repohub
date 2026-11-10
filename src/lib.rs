@@ -29,6 +29,7 @@ mod net;
 mod notes;
 mod notes_page;
 mod pages;
+mod prefs;
 mod terminal;
 mod terminal_page;
 mod ui;
@@ -66,9 +67,13 @@ pub struct App {
     filter: usize,
     tab: usize,
     pr_filter: usize,
-    default_vis: usize,
     search: TextEdit,
-    prefs: [bool; 5],
+    /// The theme picked in the app: `None` follows the system.
+    theme: Option<bool>,
+    /// How the Repositories page is ordered: an index into `pages::SORTS`.
+    sort: usize,
+    /// Counts toasts, so a toast's timer only hides its own message.
+    toast_id: u64,
     pinned_open: bool,
     toast: Option<String>,
     cfg: Arc<Config>,
@@ -100,6 +105,26 @@ impl App {
     fn go(&mut self, p: Page) {
         self.page = p;
         self.toast = None;
+    }
+
+    /// Picks the theme (`None`: follow the system) and remembers it.
+    fn set_theme(&mut self, theme: Option<bool>) {
+        self.theme = theme;
+        prefs::save_theme(theme);
+    }
+
+    /// Shows a short message at the bottom of the window; it goes away after a few seconds.
+    fn notify(&mut self, msg: impl Into<String>) {
+        self.toast = Some(msg.into());
+        self.toast_id += 1;
+        let id = self.toast_id;
+        if let Some(h) = self.handle.clone() {
+            net::spawn(h, || net::sleep(4500), move |s: &mut App, _| {
+                if s.toast_id == id {
+                    s.toast = None;
+                }
+            });
+        }
     }
 
     fn open(&mut self, i: usize) {
@@ -163,7 +188,7 @@ impl App {
         r.stars = if on { r.stars + 1 } else { r.stars.saturating_sub(1) };
         if !self.cfg.live() || self.cfg.token.is_none() {
             if self.cfg.live() {
-                self.toast = Some("Star changed here only: GITHUB_TOKEN is needed to save it on GitHub.".into());
+                self.notify("Star changed here only: GITHUB_TOKEN is needed to save it on GitHub.");
             }
             return;
         }
@@ -176,7 +201,7 @@ impl App {
                         r.starred = !on;
                         r.stars = if on { r.stars.saturating_sub(1) } else { r.stars + 1 };
                     }
-                    s.toast = Some(format!("Couldn't change the star: {e}"));
+                    s.notify(format!("Couldn't change the star: {e}"));
                 }
             });
         }
@@ -234,8 +259,8 @@ impl App {
         let Some(h) = self.handle.clone() else { return };
         net::spawn(h, move || async move { notes::delete(&full, &branch, &name).await }, move |s: &mut App, r| {
             match r {
-                Ok(()) => s.toast = Some("Drawing deleted".into()),
-                Err(e) => s.toast = Some(e),
+                Ok(()) => s.notify("Drawing deleted"),
+                Err(e) => s.notify(e),
             }
             s.load_notes(i);
         });
@@ -403,9 +428,10 @@ fn init() -> App {
         filter: 0,
         tab: 0,
         pr_filter: 0,
-        default_vis: 0,
         search: TextEdit::new(""),
-        prefs: [cfg.theme == Some(true), true, false, true, true],
+        theme: prefs::load_theme().unwrap_or(cfg.theme),
+        sort: 0,
+        toast_id: 0,
         pinned_open: true,
         toast: None,
         // The web build waits for repohub-server's config.json before choosing (see `start`).
@@ -550,7 +576,7 @@ fn banner(s: &App, k: &Kit) -> Option<El> {
 }
 
 fn view(s: &App, cx: &mut Cx<App>) -> El {
-    let dark = s.prefs[0] || (s.cfg.theme.is_none() && cx.system_dark());
+    let dark = s.theme.unwrap_or_else(|| cx.system_dark());
     let k = kit(dark);
     let content = match s.page {
         Page::Overview => pages::overview(s, &k),
@@ -567,21 +593,32 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
         inner = inner.child(b);
     }
     let pad = if s.compact { 12.0 } else { 24.0 };
-    let mut page = col().w_full().padding(pad).gap(16.0).items_center().child(inner.child(content));
+    let page = col().w_full().padding(pad).gap(16.0).items_center().child(inner.child(content));
+    let mut main = col().w_full().h_full().shrink().fill(k.c.page)
+        .child(col().key("page").w_full().h_full().shrink().scroll(ScrollSpec { stick_bottom: false }).child(page));
+    // The toast floats over the page, at the bottom; it leaves by itself or with its button.
     if let Some(msg) = &s.toast {
-        page = page.child(row().gap(10.0).px(14.0).py(10.0).radius(k.radius.lg).fill(k.c.bg_inverse)
-            .child(text(msg.clone()).font(k.ty.small).color(k.c.text_inverse)));
+        let close = IconButton::new(&icons::CROSS).variant(IconButtonVariant::GhostMuted).label("Dismiss")
+            .on_press(|s: &mut App| s.toast = None).build(&k).key("toast-close");
+        main = main.child(row().pin(Some(16.0), None, Some(16.0), Some(20.0)).center()
+            .child(row().key("toast").gap(10.0).pl(14.0).pr(6.0).py(6.0).center_y().max_w(560.0).radius(k.radius.lg)
+                .fill(k.c.bg_base).border(1.0, k.c.border_base)
+                .child(ui::ico(&icons::CHECK, 14.0, k.c.success.icon))
+                .child(text(msg.clone()).font(k.ty.small).color(k.c.text_base).wrap().shrink())
+                .child(close)));
     }
-    let main = col().key("page").w_full().h_full().shrink().fill(k.c.page)
-        .scroll(ScrollSpec { stick_bottom: false }).child(page);
-    let theme = IconButton::new(&icons::MOON).variant(IconButtonVariant::GhostMuted).label("Theme")
-        .help("Dark theme").expanded(s.prefs[0]).on_press(|s: &mut App| s.prefs[0] = !s.prefs[0]).build(&k).key("theme");
+    let (theme_icon, theme_help) = if dark { (&icons::SUN, "Switch to the light theme") } else { (&icons::MOON, "Switch to the dark theme") };
+    let theme = IconButton::new(theme_icon).variant(IconButtonVariant::GhostMuted).label(theme_help)
+        .help(theme_help).on_press(move |s: &mut App| s.set_theme(Some(!dark))).build(&k).key("theme");
     let mut trailing = row().gap(4.0).center_y();
     if s.cfg.live() {
         trailing = trailing.child(IconButton::new(&icons::REFRESH).variant(IconButtonVariant::GhostMuted).label("Refresh")
             .help("Refresh from GitHub").disabled(s.status == Status::Loading).on_press(|s: &mut App| s.refresh()).build(&k).key("refresh"));
     }
     let who = if s.data.profile.login.is_empty() { "?".to_owned() } else { s.data.profile.login.clone() };
+    let profile_url = format!("https://github.com/{who}");
+    let profile = ui::user(&k, &who, 26.0).ml(6.0).role("button").label("Your profile on GitHub").key("profile")
+        .on_press_tx(move |_: &mut App, tx| { let _ = tx.open_url(&profile_url); });
     let root = if s.compact {
         let settings = IconButton::new(&icons::GEAR).variant(IconButtonVariant::GhostMuted).label("Settings")
             .expanded(s.page == Page::Settings).on_press(|s: &mut App| s.go(Page::Settings)).build(&k).key("open-settings");
@@ -593,7 +630,7 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
     } else {
         let toolbar = Toolbar::new().title(title(s)).trailing(trailing
             .child(theme)
-            .child(ui::user(&k, &who, 26.0).ml(6.0)));
+            .child(profile));
         SplitView::new(main)
             .sidebar(&s.sidebar, |s: &mut App| &mut s.sidebar, sidebar(s, &k))
             .toolbar(toolbar)
@@ -659,6 +696,13 @@ fn shortcuts(s: &mut App, ev: &KeyEvent) -> bool {
         s.refresh();
         return true;
     }
+    // ⌘/Ctrl+1…5 jump to the main pages, ⌘/Ctrl+, to Settings.
+    for (c, page) in [('1', Page::Overview), ('2', Page::Repos), ('3', Page::Pulls), ('4', Page::Issues), ('5', Page::Actions), (',', Page::Settings)] {
+        if ev.is_command(c) {
+            s.go(page);
+            return true;
+        }
+    }
     false
 }
 
@@ -689,8 +733,8 @@ pub fn start() {
         #[cfg(target_arch = "wasm32")]
         net::spawn(h2, || net::fetch_config(), |s: &mut App, cfg| match cfg.filter(|c| c.live()) {
             Some(cfg) => {
-                if cfg.theme == Some(true) {
-                    s.prefs[0] = true;
+                if prefs::load_theme().is_none() {
+                    s.theme = cfg.theme;
                 }
                 s.cfg = Arc::new(cfg);
                 s.status = Status::Ready;

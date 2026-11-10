@@ -38,11 +38,16 @@ pub fn overview(s: &App, k: &Kit) -> El {
     let d = &s.data;
     let open_prs = d.pulls.iter().filter(|p| matches!(p.state, PullState::Open | PullState::Draft)).count();
     let issues = if d.sample { d.repos.iter().map(|r| r.issues).sum::<u32>() as usize } else { d.issues.len() };
+    let metric = |icon, value: String, caption, tint, page: Page| {
+        ui::metric(k, icon, &value, caption, tint).hover(k.c.hover).press(k.c.pressed)
+            .role("button").label(format!("{value} {caption}")).key(format!("metric-{caption}"))
+            .on_press(move |s: &mut App| s.go(page))
+    };
     let metrics = row().w_full().gap(12.0).flex_wrap()
-        .child(ui::metric(k, &icons::REPO, &d.repos.len().to_string(), "Repositories", k.c.info.icon))
-        .child(ui::metric(k, &icons::STAR, &s.starred_count().to_string(), "Stars received", k.c.warning.icon))
-        .child(ui::metric(k, &icons::PULL, &open_prs.to_string(), "Open pull requests", k.c.success.icon))
-        .child(ui::metric(k, &icons::ISSUE, &issues.to_string(), "Open issues", k.c.danger.icon));
+        .child(metric(&icons::REPO, d.repos.len().to_string(), "Repositories", k.c.info.icon, Page::Repos))
+        .child(metric(&icons::STAR, s.starred_count().to_string(), "Stars received", k.c.warning.icon, Page::Repos))
+        .child(metric(&icons::PULL, open_prs.to_string(), "Open pull requests", k.c.success.icon, Page::Pulls))
+        .child(metric(&icons::ISSUE, issues.to_string(), "Open issues", k.c.danger.icon, Page::Issues));
     let commits: u32 = d.activity.iter().sum();
     let activity = panel(k)
         .child(panel_head(k, "Activity · last 26 weeks", Some(text(format!("{commits} commits")).font(k.ty.small).color(k.c.text_muted))))
@@ -84,6 +89,7 @@ fn compact_repo(k: &Kit, i: usize, r: &Repo) -> El {
 // ---------------------------------------------------------------- repositories
 
 pub const FILTERS: [&str; 4] = ["All", "Public", "Private", "Fork"];
+pub const SORTS: [&str; 3] = ["Recent", "Stars", "Name"];
 
 pub fn repos(s: &App, k: &Kit) -> El {
     let q = s.search.text.to_lowercase();
@@ -98,6 +104,16 @@ pub fn repos(s: &App, k: &Kit) -> El {
         };
         f && (q.is_empty() || r.name.to_lowercase().contains(&q) || r.description.to_lowercase().contains(&q) || r.topics.iter().any(|t| t.contains(&q)))
     }).collect();
+    let mut shown = shown;
+    match s.sort {
+        1 => shown.sort_by(|a, b| all[*b].stars.cmp(&all[*a].stars)),
+        2 => shown.sort_by_key(|i| all[*i].name.to_lowercase()),
+        _ => {} // GitHub's order: most recently pushed first
+    }
+    let sort = row().gap(8.0).center_y()
+        .child(ui::ico(&icons::SORT, 14.0, k.c.icon_muted))
+        .child(SegmentedControl::new(&SORTS, Some(s.sort)).label("Sort by").fit()
+            .on_pick(|s: &mut App, i, _| s.sort = i).build(k).key("sort"));
     let search = TextInput::new(&s.search).placeholder("Search by name, description or topic…").leading_icon(k.glyph.search)
         .on_edit(|s: &mut App| &mut s.search).build(k).key("search").grow(1.0).min_w(200.0);
     let seg = SegmentedControl::new(&FILTERS, Some(s.filter)).label("Filter").fit()
@@ -114,7 +130,7 @@ pub fn repos(s: &App, k: &Kit) -> El {
     }
     col().w_full().gap(16.0)
         .child(heading(k, "Repositories", &format!("{} of {} repositories", shown.len(), all.len()), Some(new_repo_button(k))))
-        .child(row().w_full().gap(12.0).center_y().flex_wrap().child(search).child(seg))
+        .child(row().w_full().gap(12.0).center_y().flex_wrap().child(search).child(seg).child(sort))
         .child(list)
 }
 
@@ -179,7 +195,8 @@ pub fn repo_detail(s: &App, k: &Kit, i: usize) -> El {
                 .child(row().gap(8.0).center_y().child(text(r.name.clone()).font(k.ty.body_medium).color(k.c.text_strong)).child(vis))))
         .child(row().gap(8.0).flex_wrap()
             .child(open_button(k, "Open on GitHub", &r.url, "open-github"))
-            .child(Button::new(format!("Fork · {}", r.forks)).icon(&icons::FORK).control_size(ControlSize::Small).build(k).key("fork"))
+            .child(Button::new(format!("Fork · {}", r.forks)).icon(&icons::FORK).control_size(ControlSize::Small)
+                .on_press_tx({ let u = format!("{}/fork", r.url); move |_: &mut App, tx| { let _ = tx.open_url(&u); } }).build(k).key("fork"))
             .child(star_button(k, i, r, true, "detail-star".into())));
     let tabs = SegmentedControl::new(&TABS, Some(s.tab)).label("Section").fit().on_pick(move |s: &mut App, t, _| {
         s.tab = t;
@@ -199,7 +216,7 @@ pub fn repo_detail(s: &App, k: &Kit, i: usize) -> El {
         2 => list_of(k, "Pull requests", s.data.pulls.iter().filter(|x| in_repo(&x.repo)).map(|x| pull_row(k, x, s.compact)).collect()),
         3 => list_of(k, "Workflow runs", s.data.runs.iter().filter(|x| in_repo(&x.repo)).map(|x| run_row(k, x, s.compact)).collect()),
         4 => crate::notes_page::notes_tab(s, k, i),
-        TERMINAL_TAB => crate::terminal_page::terminal_tab(s, k, i, s.prefs[0] || k.c.page.r + k.c.page.g + k.c.page.b < 1.0),
+        TERMINAL_TAB => crate::terminal_page::terminal_tab(s, k, i, k.c.page.r + k.c.page.g + k.c.page.b < 1.5),
         _ => crate::lists::repo_settings(s, k, r),
     };
     col().w_full().gap(16.0).child(back).child(header).child(tabs).child(body)
@@ -220,10 +237,11 @@ fn list_of(k: &Kit, title: &str, rows: Vec<El>) -> El {
 
 fn code_tab(s: &App, k: &Kit, r: &Repo) -> El {
     let detail = s.details.get(&r.full_name);
-    let branch = Button::new(r.branch.clone()).icon(&icons::BRANCH).control_size(ControlSize::Small).build(k).key("branch");
+    let branch = Button::new(r.branch.clone()).icon(&icons::BRANCH).control_size(ControlSize::Small)
+        .on_press_tx({ let u = format!("{}/branches", r.url); move |_: &mut App, tx| { let _ = tx.open_url(&u); } }).build(k).key("branch");
     let clone_url = format!("{}.git", r.url);
     let clone = Button::new("Copy clone URL").variant(ButtonVariant::Submit).control_size(ControlSize::Small)
-        .on_press_tx(move |s: &mut App, tx| { tx.copy(clone_url.clone()); s.toast = Some("Clone URL copied".into()); })
+        .on_press_tx(move |s: &mut App, tx| { tx.copy(clone_url.clone()); s.notify("Clone URL copied"); })
         .build(k).key("clone");
     let mut files = panel(k);
     match detail {
@@ -241,10 +259,15 @@ fn code_tab(s: &App, k: &Kit, r: &Repo) -> El {
                 files = files.child(col().w_full().padding(16.0).child(text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap()));
             }
             for (name, dir) in d.files.iter().take(40) {
+                // A file or folder opens on GitHub.
+                let url = format!("{}/{}/{}/{}", r.url, if *dir { "tree" } else { "blob" }, r.branch, name);
                 files = files.child(rule(k)).child(
-                    row().w_full().px(16.0).py(9.0).gap(10.0).center_y().hover(k.c.hover)
+                    row().w_full().px(16.0).py(9.0).gap(10.0).center_y().hover(k.c.hover).press(k.c.pressed)
+                        .role("link").label(format!("Open {name} on GitHub")).key(format!("file-{name}"))
+                        .on_press_tx(move |_: &mut App, tx| { let _ = tx.open_url(&url); })
                         .child(ui::ico(if *dir { &icons::FOLDER } else { &icons::FILE }, 16.0, if *dir { k.c.info.icon } else { k.c.icon_muted }))
-                        .child(text(name.clone()).font(k.ty.small).color(k.c.text_base).grow(1.0).shrink()),
+                        .child(text(name.clone()).font(k.ty.small).color(k.c.text_base).grow(1.0).shrink())
+                        .child(ui::ico(&icons::EXTERNAL, 13.0, k.c.icon_faint)),
                 );
             }
         }
