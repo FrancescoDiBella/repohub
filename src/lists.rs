@@ -1,6 +1,6 @@
 //! Pull requests, issues, Actions and settings pages.
 use rune::{El, col, row, text};
-use rune_kit::{Button, ButtonVariant, ControlSize, Kit, SegmentedControl, Switch};
+use rune_kit::{Button, ButtonVariant, ControlSize, Kit, SegmentedControl};
 
 use crate::model::{Checks, Issue, Pull, PullState, Repo, Run};
 use crate::pages::{heading, open_button};
@@ -115,25 +115,11 @@ pub fn actions(s: &App, k: &Kit) -> El {
         .child(listing(k, s.data.runs.iter().map(|r| run_row(k, r, s.compact)).collect(), "No recent runs"))
 }
 
-fn setting(k: &Kit, title: &str, desc: &str, on: bool, i: usize) -> El {
-    row().w_full().px(16.0).py(12.0).gap(16.0).center_y().justify_between()
-        .child(col().grow(1.0).shrink().gap(2.0)
-            .child(text(title.to_owned()).font(k.ty.ui_medium).color(k.c.text_base))
-            .child(text(desc.to_owned()).font(k.ty.text_small).color(k.c.text_muted).wrap()))
-        .child(Switch::new(on).on_toggle(move |s: &mut App| s.prefs[i] = !s.prefs[i]).build(k).key(format!("pref-{i}")))
-}
-
 fn info(k: &Kit, label: &str, value: String) -> El {
     row().w_full().px(16.0).py(10.0).gap(16.0).center_y()
         .child(text(label.to_owned()).font(k.ty.small).color(k.c.text_muted).w(170.0))
         .child(text(value).font(k.ty.small_medium).color(k.c.text_base).grow(1.0).shrink().wrap())
 }
-
-pub const PREFS: [(&str, &str); 3] = [
-    ("Dark theme", "Use the dark palette whatever the system setting (REPOHUB_THEME in .env)."),
-    ("Email notifications", "Get an email for review requests and mentions (UI only)."),
-    ("Show private repositories", "Count private repositories on the public profile (UI only)."),
-];
 
 pub fn settings(s: &App, k: &Kit) -> El {
     let p = &s.data.profile;
@@ -169,19 +155,31 @@ pub fn settings(s: &App, k: &Kit) -> El {
     ] {
         conn = conn.child(rule(k)).child(info(k, label, value));
     }
-    let prefs = PREFS.iter().enumerate().fold(panel(k).child(panel_head(k, "Preferences", None)), |p, (i, (t, d))| {
-        p.child(rule(k)).child(setting(k, t, d, s.prefs[i], i))
-    });
-    let vis = panel(k).padding(16.0).gap(10.0)
-        .child(text("Default visibility for new repositories").font(k.ty.ui_medium).color(k.c.text_base))
-        .child(SegmentedControl::new(&["Public", "Private", "Internal"], Some(s.default_vis)).fit()
-            .on_pick(|s: &mut App, i, _| s.default_vis = i).build(k).key("default-vis"));
+    let pick = match s.theme {
+        None => 0,
+        Some(false) => 1,
+        Some(true) => 2,
+    };
+    let appearance = panel(k).child(panel_head(k, "Appearance", None)).child(rule(k))
+        .child(row().w_full().px(16.0).py(12.0).gap(16.0).center_y().justify_between().flex_wrap()
+            .child(col().grow(1.0).shrink().min_w(200.0).gap(2.0)
+                .child(text("Theme").font(k.ty.ui_medium).color(k.c.text_base))
+                .child(text("System follows your computer's light or dark setting. Your choice is remembered; REPOHUB_THEME in .env only sets the default.")
+                    .font(k.ty.text_small).color(k.c.text_muted).wrap()))
+            .child(SegmentedControl::new(&["System", "Light", "Dark"], Some(pick)).label("Theme").fit()
+                .on_pick(|s: &mut App, i, _| s.set_theme([None, Some(false), Some(true)][i.min(2)])).build(k).key("theme-pick")));
+    let keys = panel(k).child(panel_head(k, "Keyboard shortcuts", None));
+    let keys = [
+        ("⌘/Ctrl + 1 … 5", "Overview, Repositories, Pull requests, Issues, Actions"),
+        ("⌘/Ctrl + ,", "Settings"),
+        ("⌘/Ctrl + R", "Refresh from GitHub"),
+    ].iter().fold(keys, |p, (key, what)| p.child(rule(k)).child(info(k, key, (*what).to_owned())));
     col().w_full().gap(16.0).max_w(760.0)
-        .child(heading(k, "Settings", "Profile, GitHub connection and preferences.", None))
+        .child(heading(k, "Settings", "Profile, appearance and the GitHub connection.", None))
         .child(profile)
+        .child(appearance)
         .child(conn)
-        .child(prefs)
-        .child(vis)
+        .child(keys)
 }
 
 fn notes_where() -> String {

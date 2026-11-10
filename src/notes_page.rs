@@ -136,8 +136,8 @@ fn tool_icon(t: Tool) -> &'static rune::Icon {
 }
 
 /// The board editor: toolbar, canvas and status.
-fn editor(s: &App, k: &Kit, i: usize, b: &Board) -> El {
-    let dark = s.prefs[0] || k.c.page.r + k.c.page.g + k.c.page.b < 1.0;
+fn editor(_s: &App, k: &Kit, i: usize, b: &Board) -> El {
+    let dark = k.c.page.r + k.c.page.g + k.c.page.b < 1.5;
     let ib = |icon: &'static rune::Icon, label: &str, on: bool, key: String| {
         IconButton::new(icon).variant(if on { IconButtonVariant::Contrast } else { IconButtonVariant::GhostMuted })
             .label(label.to_owned()).help(label.to_owned()).build(k).key(key)

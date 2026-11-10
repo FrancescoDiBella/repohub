@@ -37,6 +37,22 @@ where
     });
 }
 
+/// Waits `ms` milliseconds without blocking the UI (call it inside `spawn`).
+pub async fn sleep(ms: u32) {
+    #[cfg(not(target_arch = "wasm32"))]
+    std::thread::sleep(std::time::Duration::from_millis(ms as u64));
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen::JsCast;
+        let promise = js_sys::Promise::new(&mut |resolve, _| {
+            if let Ok(f) = js_sys::Reflect::get(&js_sys::global(), &"setTimeout".into()).and_then(|f| f.dyn_into::<js_sys::Function>()) {
+                let _ = f.call2(&js_sys::global(), &resolve, &wasm_bindgen::JsValue::from(ms));
+            }
+        });
+        let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+    }
+}
+
 // ------------------------------------------------------------------ desktop
 
 #[cfg(not(target_arch = "wasm32"))]
