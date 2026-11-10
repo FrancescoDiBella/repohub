@@ -57,6 +57,26 @@ To reach RepoHub from another device on your network, change `ports` in `compose
 the host name to `REPOHUB_ALLOWED_HOSTS`. Do this only on a network you trust: anyone who can
 reach the port uses your token.
 
+### On your phone
+
+Below 720 points of width RepoHub switches to a phone layout: a top bar, the page in one column
+and a tab bar at the bottom (Overview, Repos, Pulls, Issues, Actions) instead of the sidebar. The
+same happens in a narrow desktop window. Notes work with touch; the terminal stays desktop-only.
+
+![RepoHub on a phone](docs/mobile.png)
+
+The phone opens the same web app the Docker container serves. Two things to know:
+
+- **Browsers only offer WebGPU on HTTPS pages** (or `localhost`), so `http://192.168.x.x:8080`
+  doesn't work from the phone. Put the container behind HTTPS, on a private network. The simplest
+  way is [Tailscale Serve](https://tailscale.com/kb/1312/serve): with Tailscale on the computer and
+  the phone, `tailscale serve 8080` gives a `https://<computer>.<tailnet>.ts.net` address only
+  your devices can open. Add that host name to `REPOHUB_ALLOWED_HOSTS` in `.env`.
+- **Browser support:** Chrome on Android 12 or later, and Safari on iOS 26 or later.
+
+Then use the browser's **Add to Home Screen**: RepoHub opens full screen with its own icon.
+The server holds your token, so never publish the port on the open internet.
+
 ### Prebuilt image
 
 The `image` workflow publishes `ghcr.io/francescodibella/repohub` on every push to `main`, for

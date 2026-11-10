@@ -8,10 +8,10 @@ use crate::ui::{self, panel, panel_head, rule};
 use crate::{App, Page, icons};
 
 pub fn heading(k: &Kit, title: &str, subtitle: &str, action: Option<El>) -> El {
-    let mut r = row().w_full().center_y().justify_between().gap(16.0)
-        .child(col().gap(4.0).shrink()
-            .child(text(title.to_owned()).font(ui::H1).color(k.c.text_strong))
-            .child(text(subtitle.to_owned()).font(k.ty.ui).color(k.c.text_muted)));
+    let mut r = row().w_full().center_y().justify_between().gap(12.0).flex_wrap()
+        .child(col().gap(4.0).grow(1.0).shrink().min_w(200.0)
+            .child(text(title.to_owned()).font(ui::H1).color(k.c.text_strong).wrap())
+            .child(text(subtitle.to_owned()).font(k.ty.ui).color(k.c.text_muted).wrap()));
     if let Some(a) = action {
         r = r.child(a);
     }
@@ -62,8 +62,8 @@ pub fn overview(s: &App, k: &Kit) -> El {
         .child(metrics)
         .child(activity)
         .child(row().w_full().gap(16.0).flex_wrap()
-            .child(col().grow(1.0).min_w(320.0).child(recent))
-            .child(col().grow(1.0).min_w(320.0).child(review)))
+            .child(col().grow(1.0).min_w(if s.compact { 260.0 } else { 320.0 }).child(recent))
+            .child(col().grow(1.0).min_w(if s.compact { 260.0 } else { 320.0 }).child(review)))
 }
 
 fn see_all(k: &Kit, label: &str, page: Page) -> El {
@@ -177,7 +177,7 @@ pub fn repo_detail(s: &App, k: &Kit, i: usize) -> El {
             .child(col().gap(2.0)
                 .child(text(format!("{} /", r.owner)).font(k.ty.text_small).color(k.c.text_muted))
                 .child(row().gap(8.0).center_y().child(text(r.name.clone()).font(k.ty.body_medium).color(k.c.text_strong)).child(vis))))
-        .child(row().gap(8.0)
+        .child(row().gap(8.0).flex_wrap()
             .child(open_button(k, "Open on GitHub", &r.url, "open-github"))
             .child(Button::new(format!("Fork · {}", r.forks)).icon(&icons::FORK).control_size(ControlSize::Small).build(k).key("fork"))
             .child(star_button(k, i, r, true, "detail-star".into())));
@@ -190,12 +190,14 @@ pub fn repo_detail(s: &App, k: &Kit, i: usize) -> El {
             s.open_terminal(i);
         }
     }).build(k).key("tabs");
+    // Seven sections don't fit a phone's width: there the strip scrolls sideways.
+    let tabs = if s.compact { row().w_full().scroll_x().child(tabs) } else { tabs };
     let in_repo = |name: &str| name.eq_ignore_ascii_case(&r.full_name) || name.eq_ignore_ascii_case(&r.name);
     let body = match s.tab {
         0 => code_tab(s, k, r),
         1 => list_of(k, "Open issues", s.data.issues.iter().filter(|x| in_repo(&x.repo)).map(|x| issue_row(k, x)).collect()),
-        2 => list_of(k, "Pull requests", s.data.pulls.iter().filter(|x| in_repo(&x.repo)).map(|x| pull_row(k, x, false)).collect()),
-        3 => list_of(k, "Workflow runs", s.data.runs.iter().filter(|x| in_repo(&x.repo)).map(|x| run_row(k, x)).collect()),
+        2 => list_of(k, "Pull requests", s.data.pulls.iter().filter(|x| in_repo(&x.repo)).map(|x| pull_row(k, x, s.compact)).collect()),
+        3 => list_of(k, "Workflow runs", s.data.runs.iter().filter(|x| in_repo(&x.repo)).map(|x| run_row(k, x, s.compact)).collect()),
         4 => crate::notes_page::notes_tab(s, k, i),
         TERMINAL_TAB => crate::terminal_page::terminal_tab(s, k, i, s.prefs[0] || k.c.page.r + k.c.page.g + k.c.page.b < 1.0),
         _ => crate::lists::repo_settings(s, k, r),
@@ -233,7 +235,7 @@ fn code_tab(s: &App, k: &Kit, r: &Repo) -> El {
                     .child(ui::user(k, &c.author, 22.0))
                     .child(text(c.author.clone()).font(k.ty.small_medium).color(k.c.text_base))
                     .child(text(c.message.clone()).font(k.ty.small).color(k.c.text_muted).grow(1.0).shrink().max_lines(1))
-                    .child(text(format!("{} · {}", c.sha, c.age)).font(k.ty.mono).color(k.c.text_faint)));
+                    .child(text(if s.compact { c.age.clone() } else { format!("{} · {}", c.sha, c.age) }).font(k.ty.mono).color(k.c.text_faint)));
             }
             if let Some(e) = &d.error {
                 files = files.child(col().w_full().padding(16.0).child(text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap()));
@@ -256,7 +258,7 @@ fn code_tab(s: &App, k: &Kit, r: &Repo) -> El {
     let readme_panel = panel(k)
         .child(panel_head(k, "README", Some(ui::ico(&icons::BOOK, 16.0, k.c.icon_muted))))
         .child(rule(k))
-        .child(col().w_full().padding(20.0).child(readme_body));
+        .child(col().w_full().padding(if s.compact { 14.0 } else { 20.0 }).child(readme_body));
     // Language bar from GitHub's byte counts.
     let langs: Vec<(String, u64)> = detail.map(|d| d.languages.clone()).unwrap_or_default();
     let total: u64 = langs.iter().map(|l| l.1).sum::<u64>().max(1);
@@ -278,7 +280,7 @@ fn code_tab(s: &App, k: &Kit, r: &Repo) -> El {
         .child(text("Languages").font(k.ty.ui_medium).color(k.c.text_base))
         .child(if langs.is_empty() { text("—").font(k.ty.small).color(k.c.text_faint) } else { col().w_full().gap(8.0).child(bar).child(legend) });
     row().w_full().gap(16.0).flex_wrap()
-        .child(col().grow(3.0).min_w(380.0).gap(12.0)
+        .child(col().grow(3.0).min_w(if s.compact { 260.0 } else { 380.0 }).gap(12.0)
             .child(row().w_full().justify_between().child(branch).child(clone))
             .child(files)
             .child(readme_panel))
