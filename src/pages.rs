@@ -216,40 +216,6 @@ fn list_of(k: &Kit, title: &str, rows: Vec<El>) -> El {
     p
 }
 
-/// README text as simple blocks: `#` headings, fenced code and paragraphs.
-fn readme(k: &Kit, src: &str) -> El {
-    let mut out = col().w_full().gap(8.0);
-    let mut code = false;
-    let mut code_buf = String::new();
-    for line in src.lines().take(80) {
-        let t = line.trim_end();
-        if t.trim_start().starts_with("```") {
-            if code {
-                out = out.child(text(std::mem::take(&mut code_buf)).font(k.ty.mono).color(k.c.text_base).w_full().padding(12.0).radius(k.radius.md).fill(k.c.layer_01));
-            }
-            code = !code;
-            continue;
-        }
-        if code {
-            if !code_buf.is_empty() { code_buf.push('\n'); }
-            code_buf.push_str(t);
-            continue;
-        }
-        if t.trim().is_empty() || t.trim_start().starts_with('<') || t.trim_start().starts_with("![") {
-            continue;
-        }
-        let e = if let Some(h) = t.strip_prefix("# ") {
-            text(h.to_owned()).font(ui::H2).color(k.c.text_strong)
-        } else if let Some(h) = t.strip_prefix("## ").or_else(|| t.strip_prefix("### ")) {
-            text(h.to_owned()).font(k.ty.body_medium).color(k.c.text_base).pt(6.0)
-        } else {
-            text(t.replace("**", "").replace('`', "")).font(k.ty.body).color(k.c.text_muted).wrap()
-        };
-        out = out.child(e);
-    }
-    out
-}
-
 fn code_tab(s: &App, k: &Kit, r: &Repo) -> El {
     let detail = s.details.get(&r.full_name);
     let branch = Button::new(r.branch.clone()).icon(&icons::BRANCH).control_size(ControlSize::Small).build(k).key("branch");
@@ -282,7 +248,9 @@ fn code_tab(s: &App, k: &Kit, r: &Repo) -> El {
         }
     }
     let readme_body = match detail.and_then(|d| d.readme.as_deref()) {
-        Some(src) => readme(k, src),
+        Some(src) => rune_kit::Markdown::new(crate::markdown::prepare(src, &r.full_name, &r.branch))
+            .on_link_tx(|_: &mut App, url: &str, tx| { let _ = tx.open_url(url); })
+            .build(k).w_full(),
         None => text(if detail.is_some_and(|d| d.loading) { "Loading…" } else { "This repository has no README." }).font(k.ty.ui).color(k.c.text_muted),
     };
     let readme_panel = panel(k)
