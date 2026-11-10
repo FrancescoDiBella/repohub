@@ -6,6 +6,7 @@
 | --- | --- |
 | `src/lib.rs` | App state, background loading, sidebar, toolbar, banners |
 | `src/pages.rs`, `src/lists.rs` | Pages: overview, repositories, repository detail, pull requests, issues, Actions, settings |
+| `src/mobile.rs` | The phone layout (top bar and bottom tab bar) used below `mobile::BREAKPOINT`; pages read `App::compact` |
 | `src/ui.rs`, `src/icons.rs` | Small building blocks and the icon set |
 | `src/model.rs` | Data model, sample data, date and colour helpers |
 | `src/github.rs` | GitHub REST client: async, shared by the desktop and web builds |
@@ -17,6 +18,7 @@
 | `src/clones.rs` | Finding and remembering each repository's local clone |
 | `assets/fonts/` | Inter and IBM Plex Mono (SIL OFL), bundled so mono text is monospaced everywhere |
 | `server/` | `repohub-server`: static files, `config.json`, the `/gh/*` GitHub proxy that holds the token, and `/api/notes` (drawings in `DATA_DIR`) |
+| `web/manifest.webmanifest`, `web/icon.svg` | Add to Home Screen on phones |
 | `web/index.html` | Page that loads the WebAssembly build (`app.js` and `app_bg.wasm` are build outputs) |
 | `Dockerfile`, `compose.yaml` | Container: builds the web app and the server, runs the server on port 8080 |
 | `.github/workflows/` | CI (tests and builds), image publishing (GHCR), GitHub Pages |
@@ -45,6 +47,7 @@ REPOHUB_BLOCKING=1 target/release/repohub --snap out.png --size 1180x760 -- page
 ```
 
 `REPOHUB_BLOCKING=1` loads the data before the first frame, so the snapshot shows it.
+`REPOHUB_COMPACT=1` with `--size 390x844` starts in the phone layout.
 
 ### Web build
 

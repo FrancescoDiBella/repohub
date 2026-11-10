@@ -196,7 +196,7 @@ fn editor(s: &App, k: &Kit, i: usize, b: &Board) -> El {
         SaveState::Saving => ("Saving…".to_owned(), k.c.text_muted),
         SaveState::Error(e) => (format!("Not saved: {e}"), k.c.danger.icon),
     };
-    let head = row().w_full().gap(10.0).center_y()
+    let head = row().w_full().gap(10.0).center_y().flex_wrap()
         .child(Button::new("Drawings").icon(&icons::BACK).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
             .on_press(move |s: &mut App| s.close_board(i)).build(k).key("close-board"))
         .child(ui::ico(&icons::PEN, 16.0, k.c.icon_muted))
@@ -234,6 +234,6 @@ fn editor(s: &App, k: &Kit, i: usize, b: &Board) -> El {
         .child(toolbar)
         .child(canvas.border(1.0, k.c.border_weak))
         .child(row().w_full().justify_between().gap(12.0).flex_wrap()
-            .child(text(hint).font(k.ty.text_small).color(k.c.text_muted))
-            .child(text("Saved as .excalidraw: the file also opens on excalidraw.com.").font(k.ty.text_small).color(k.c.text_faint)))
+            .child(text(hint).font(k.ty.text_small).color(k.c.text_muted).wrap().shrink())
+            .child(text("Saved as .excalidraw: the file also opens on excalidraw.com.").font(k.ty.text_small).color(k.c.text_faint).wrap().shrink()))
 }

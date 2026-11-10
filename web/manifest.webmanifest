@@ -1,0 +1,11 @@
+{
+  "name": "RepoHub",
+  "short_name": "RepoHub",
+  "description": "Your GitHub repositories in one place.",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "background_color": "#0d1117",
+  "theme_color": "#0d1117",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}

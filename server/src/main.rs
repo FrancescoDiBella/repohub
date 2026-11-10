@@ -143,6 +143,7 @@ fn mime(path: &Path) -> &'static str {
         "css" => "text/css",
         "png" => "image/png",
         "svg" => "image/svg+xml",
+        "webmanifest" => "application/manifest+json",
         _ => "application/octet-stream",
     }
 }

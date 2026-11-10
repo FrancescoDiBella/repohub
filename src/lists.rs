@@ -52,21 +52,32 @@ pub fn issue_row(k: &Kit, i: &Issue) -> El {
     link(r.key(format!("issue-{}-{}", i.repo, i.number)), &i.url)
 }
 
-pub fn run_row(k: &Kit, r: &Run) -> El {
+pub fn run_row(k: &Kit, r: &Run, compact: bool) -> El {
     let state = match r.checks {
         Checks::Passing => ("Succeeded", k.c.success.icon),
         Checks::Failing => ("Failed", k.c.danger.icon),
         Checks::Running => ("Running", k.c.warning.icon),
     };
-    let e = row().w_full().px(16.0).py(11.0).gap(12.0).center_y().hover(k.c.hover).press(k.c.pressed)
+    let when = text(format!("{} · {}", r.duration, r.age)).font(k.ty.text_small).color(k.c.text_faint);
+    let mut meta = row().gap(10.0).center_y().flex_wrap()
+        .child(text(r.repo.clone()).font(k.ty.text_small).color(k.c.text_muted))
+        .child(ui::stat(k, &icons::BRANCH, r.branch.clone()));
+    // On a phone the duration moves under the title, so the title keeps its room.
+    let trailing = if compact {
+        meta = meta.child(when);
+        None
+    } else {
+        Some(when.w(140.0))
+    };
+    let mut e = row().w_full().px(16.0).py(11.0).gap(12.0).center_y().hover(k.c.hover).press(k.c.pressed)
         .child(ui::checks(k, r.checks))
         .child(col().grow(1.0).shrink().gap(3.0)
-            .child(text(r.workflow.clone()).font(k.ty.ui_medium).color(k.c.text_base))
-            .child(row().gap(10.0).center_y().flex_wrap()
-                .child(text(r.repo.clone()).font(k.ty.text_small).color(k.c.text_muted))
-                .child(ui::stat(k, &icons::BRANCH, r.branch.clone()))))
-        .child(ui::pill(k, state.0, state.1))
-        .child(text(format!("{} · {}", r.duration, r.age)).font(k.ty.text_small).color(k.c.text_faint).w(140.0));
+            .child(text(r.workflow.clone()).font(k.ty.ui_medium).color(k.c.text_base).wrap())
+            .child(meta))
+        .child(ui::pill(k, state.0, state.1));
+    if let Some(t) = trailing {
+        e = e.child(t);
+    }
     link(e, &r.url)
 }
 
@@ -81,7 +92,7 @@ pub const PR_FILTERS: [&str; 4] = ["Open", "Drafts", "Merged", "Closed"];
 
 pub fn pulls(s: &App, k: &Kit) -> El {
     let want = [PullState::Open, PullState::Draft, PullState::Merged, PullState::Closed][s.pr_filter.min(3)];
-    let rows: Vec<El> = s.data.pulls.iter().filter(|p| p.state == want).map(|p| pull_row(k, p, false)).collect();
+    let rows: Vec<El> = s.data.pulls.iter().filter(|p| p.state == want).map(|p| pull_row(k, p, s.compact)).collect();
     let sub = if s.data.sample { "Pull requests you opened or that wait for your review." } else { "Pull requests you're involved in (author, reviewer, assignee or mentioned). Click one to open it on GitHub." };
     col().w_full().gap(16.0)
         .child(heading(k, "Pull requests", sub, None))
@@ -101,7 +112,7 @@ pub fn actions(s: &App, k: &Kit) -> El {
     let sub = format!("{ok} of {} recent runs succeeded · {} most recently pushed repositories", s.data.runs.len(), s.cfg.activity_repos);
     col().w_full().gap(16.0)
         .child(heading(k, "Actions", &sub, None))
-        .child(listing(k, s.data.runs.iter().map(|r| run_row(k, r)).collect(), "No recent runs"))
+        .child(listing(k, s.data.runs.iter().map(|r| run_row(k, r, s.compact)).collect(), "No recent runs"))
 }
 
 fn setting(k: &Kit, title: &str, desc: &str, on: bool, i: usize) -> El {

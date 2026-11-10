@@ -21,7 +21,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/server/target \
     cargo build --release --lib --target wasm32-unknown-unknown \
  && wasm-bindgen --target web --out-dir /out/web --out-name app target/wasm32-unknown-unknown/release/repohub.wasm \
- && cp web/index.html /out/web/ \
+ && cp web/index.html web/manifest.webmanifest web/icon.svg /out/web/ \
  && cargo build --release --manifest-path server/Cargo.toml \
  && cp server/target/release/repohub-server /out/ \
  && mkdir -p /out/data

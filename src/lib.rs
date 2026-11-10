@@ -23,6 +23,7 @@ mod github;
 mod icons;
 mod lists;
 mod markdown;
+mod mobile;
 mod model;
 mod net;
 mod notes;
@@ -91,6 +92,8 @@ pub struct App {
     term_grid: (u16, u16),
     clone_path: TextEdit,
     term_error: Option<String>,
+    /// The window is phone-sized: the pages use the layout in `mobile`.
+    compact: bool,
 }
 
 impl App {
@@ -421,6 +424,7 @@ fn init() -> App {
         term_grid: (24, 100),
         clone_path: TextEdit::new(""),
         term_error: None,
+        compact: starts_compact(),
         cfg,
     };
     // `REPOHUB_BLOCKING=1` loads synchronously before the first frame (headless snapshots).
@@ -562,7 +566,8 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
     if let Some(b) = banner(s, &k) {
         inner = inner.child(b);
     }
-    let mut page = col().w_full().padding(24.0).gap(16.0).items_center().child(inner.child(content));
+    let pad = if s.compact { 12.0 } else { 24.0 };
+    let mut page = col().w_full().padding(pad).gap(16.0).items_center().child(inner.child(content));
     if let Some(msg) = &s.toast {
         page = page.child(row().gap(10.0).px(14.0).py(10.0).radius(k.radius.lg).fill(k.c.bg_inverse)
             .child(text(msg.clone()).font(k.ty.small).color(k.c.text_inverse)));
@@ -577,19 +582,48 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
             .help("Refresh from GitHub").disabled(s.status == Status::Loading).on_press(|s: &mut App| s.refresh()).build(&k).key("refresh"));
     }
     let who = if s.data.profile.login.is_empty() { "?".to_owned() } else { s.data.profile.login.clone() };
-    let toolbar = Toolbar::new().title(title(s)).trailing(trailing
-        .child(theme)
-        .child(ui::user(&k, &who, 26.0).ml(6.0)));
-    SplitView::new(main)
-        .sidebar(&s.sidebar, |s: &mut App| &mut s.sidebar, sidebar(s, &k))
-        .toolbar(toolbar)
-        .titlebar_inset(cx.titlebar_inset())
-        .sidebar_toggle(SidebarToggle::new().size(ControlSize::Large))
-        .reduced_motion(cx.is_reduced_motion())
-        .build(&k)
-        .on_paste(|s: &mut App, text: &str, _| {
+    let root = if s.compact {
+        let settings = IconButton::new(&icons::GEAR).variant(IconButtonVariant::GhostMuted).label("Settings")
+            .expanded(s.page == Page::Settings).on_press(|s: &mut App| s.go(Page::Settings)).build(&k).key("open-settings");
+        let name = match s.page {
+            Page::Repo(i) => s.data.repos.get(i).map(|r| r.name.clone()).unwrap_or_default(),
+            _ => title(s),
+        };
+        mobile::shell(s, &k, cx.safe_area(), name, trailing.child(theme).child(settings), main.grow(1.0))
+    } else {
+        let toolbar = Toolbar::new().title(title(s)).trailing(trailing
+            .child(theme)
+            .child(ui::user(&k, &who, 26.0).ml(6.0)));
+        SplitView::new(main)
+            .sidebar(&s.sidebar, |s: &mut App| &mut s.sidebar, sidebar(s, &k))
+            .toolbar(toolbar)
+            .titlebar_inset(cx.titlebar_inset())
+            .sidebar_toggle(SidebarToggle::new().size(ControlSize::Large))
+            .reduced_motion(cx.is_reduced_motion())
+            .build(&k)
+    };
+    root.on_paste(|s: &mut App, text: &str, _| {
             s.paste(text);
         })
+        // The window's width picks the layout: phone-sized windows get the one in `mobile`.
+        .on_layout_tx(|s: &mut App, [_, _, w, _], _| {
+            let compact = w < mobile::BREAKPOINT;
+            if s.compact != compact {
+                s.compact = compact;
+            }
+        })
+}
+
+/// The layout to start with, before the first frame is measured (avoids a flash on phones).
+fn starts_compact() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        js_sys::Reflect::get(&js_sys::global(), &"innerWidth".into()).ok().and_then(|v| v.as_f64()).is_some_and(|w| (w as f32) < mobile::BREAKPOINT)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::env::var("REPOHUB_COMPACT").is_ok_and(|v| v == "1")
+    }
 }
 
 fn on_key(s: &mut App, ev: &KeyEvent, _: &mut Tx) -> bool {
