@@ -41,7 +41,7 @@ impl Gh {
     fn explain(&self, r: &Resp) -> String {
         let msg = serde_json::from_str::<Value>(&r.body).ok().map(|v| s(&v, "message")).unwrap_or_default();
         match r.status {
-            401 => "GitHub rejected the token (401): check GITHUB_TOKEN in your .env file.".into(),
+            401 => "GitHub rejected the token (401): check the token in Settings, or GITHUB_TOKEN in your .env file.".into(),
             403 | 429 if r.remaining.as_deref() == Some("0") => {
                 let when = r.reset.map(|t| format!(" Try again in {} minutes.", ((t - self.now) / 60).max(1))).unwrap_or_default();
                 format!("API rate limit reached.{when} With GITHUB_TOKEN the limit goes up to 5,000 requests an hour.")

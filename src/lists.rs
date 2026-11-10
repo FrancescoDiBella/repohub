@@ -1,6 +1,6 @@
 //! Pull requests, issues, Actions and settings pages.
 use rune::{El, col, row, text};
-use rune_kit::{Button, ButtonVariant, ControlSize, Kit, SegmentedControl};
+use rune_kit::{Button, ButtonVariant, ControlSize, Kit, SegmentedControl, TextInput};
 
 use crate::model::{Checks, Issue, Pull, PullState, Repo, Run};
 use crate::pages::{heading, open_button};
@@ -145,7 +145,7 @@ pub fn settings(s: &App, k: &Kit) -> El {
     } else { None }));
     for (label, value) in [
         ("State", source),
-        (".env file", cfg.env_file.clone().unwrap_or_else(|| "not found".into())),
+        ("Settings file", cfg.env_file.clone().unwrap_or_else(|| "none yet".into())),
         ("User (GITHUB_USER)", cfg.user.clone().unwrap_or_else(|| "from the token".into())),
         ("Token (GITHUB_TOKEN)", if cfg.token.is_some() { "set (not shown)".into() } else { "not set: public data only, 60 requests an hour".into() }),
         ("API", cfg.api.clone()),
@@ -155,6 +155,7 @@ pub fn settings(s: &App, k: &Kit) -> El {
     ] {
         conn = conn.child(rule(k)).child(info(k, label, value));
     }
+    let account = account_panel(s, k);
     let pick = match s.theme {
         None => 0,
         Some(false) => 1,
@@ -177,9 +178,48 @@ pub fn settings(s: &App, k: &Kit) -> El {
     col().w_full().gap(16.0).max_w(760.0)
         .child(heading(k, "Settings", "Profile, appearance and the GitHub connection.", None))
         .child(profile)
+        .child(account)
         .child(appearance)
         .child(conn)
         .child(keys)
+}
+
+/// The GitHub account form (desktop): user name and token, saved in the app's settings file.
+fn account_panel(s: &App, k: &Kit) -> El {
+    if cfg!(target_arch = "wasm32") {
+        return rune::el();
+    }
+    let cfg = &s.cfg;
+    let head = panel(k).child(panel_head(k, "GitHub account", Some(open_button(k, "Create a token", "https://github.com/settings/personal-access-tokens/new", "new-token")))).child(rule(k));
+    if cfg.account_locked {
+        let from = cfg.env_file.clone().unwrap_or_else(|| "the environment".into());
+        return head.child(col().w_full().padding(16.0).gap(4.0)
+            .child(text("Set outside the app").font(k.ty.ui_medium).color(k.c.text_base))
+            .child(text(format!("GITHUB_USER or GITHUB_TOKEN comes from {from} or from the environment, and that wins. Change it there, or remove it to manage the account here."))
+                .font(k.ty.text_small).color(k.c.text_muted).wrap()));
+    }
+    let label = |t: &str| text(t.to_owned()).font(k.ty.small).color(k.c.text_muted).w(110.0);
+    let user = TextInput::new(&s.acct_user).placeholder("octocat").label("GitHub user name")
+        .on_edit(|s: &mut App| &mut s.acct_user).on_submit(|s: &mut App, _| s.save_account(false)).build(k).key("acct-user").grow(1.0).min_w(200.0);
+    let token = TextInput::new(&s.acct_token).secure().label("Personal access token")
+        .placeholder(if cfg.token.is_some() { "A token is saved. Type a new one to replace it" } else { "github_pat_… (optional for public data)" })
+        .on_edit(|s: &mut App| &mut s.acct_token).on_submit(|s: &mut App, _| s.save_account(false)).build(k).key("acct-token").grow(1.0).min_w(200.0);
+    let mut buttons = row().gap(8.0).center_y().flex_wrap()
+        .child(Button::new(if cfg.live() { "Save" } else { "Connect" }).variant(ButtonVariant::Submit).control_size(ControlSize::Small)
+            .on_press(|s: &mut App| s.save_account(false)).build(k).key("acct-save"));
+    if cfg.live() {
+        buttons = buttons.child(Button::new("Sign out").variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
+            .on_press(|s: &mut App| s.save_account(true)).build(k).key("acct-sign-out"));
+    }
+    let mut body = col().w_full().padding(16.0).gap(12.0)
+        .child(row().w_full().gap(12.0).center_y().flex_wrap().child(label("User name")).child(user))
+        .child(row().w_full().gap(12.0).center_y().flex_wrap().child(label("Token")).child(token))
+        .child(text("With only a user name RepoHub shows public repositories (60 requests an hour). A token adds private repositories, starring and 5,000 requests an hour: a fine-grained token with read access to Metadata, Contents, Issues, Pull requests and Actions is enough. It is saved on this computer only, in a file only you can read.")
+            .font(k.ty.text_small).color(k.c.text_muted).wrap());
+    if let Some(e) = &s.acct_error {
+        body = body.child(text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap());
+    }
+    head.child(body.child(buttons))
 }
 
 fn notes_where() -> String {

@@ -1,0 +1,93 @@
+# Builds the desktop app for macOS (one app for Apple silicon and Intel), Windows and Linux.
+# - Run it by hand (Actions → Desktop → Run workflow) to get the builds as workflow artifacts.
+# - Push a tag like v0.1.0 to also publish them as a GitHub release.
+# - A pull request that touches the packaging builds them too, as a check.
+name: Desktop
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+  pull_request:
+    paths: ["packaging/**", ".github/workflows/release.yml"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            name: macos
+          - os: windows-latest
+            name: windows
+          - os: ubuntu-22.04
+            name: linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)-dev" >> "$GITHUB_ENV"
+          fi
+      - name: System libraries for Rune (Linux)
+        if: matrix.name == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
+      # rust-toolchain.toml pins the toolchain; rustup installs it on first use.
+      - name: Toolchain
+        run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: desktop-${{ matrix.name }}
+
+      - name: macOS app and disk image
+        if: matrix.name == 'macos'
+        run: packaging/macos/bundle.sh "$VERSION"
+
+      - name: Windows zip
+        if: matrix.name == 'windows'
+        shell: bash
+        run: |
+          cargo build --release --bin repohub
+          mkdir -p dist/RepoHub
+          cp target/release/repohub.exe dist/RepoHub/RepoHub.exe
+          cp .env.example dist/RepoHub/
+          cd dist && 7z a "RepoHub-$VERSION-windows.zip" RepoHub
+
+      - name: Linux archive
+        if: matrix.name == 'linux'
+        run: |
+          cargo build --release --bin repohub
+          mkdir -p "dist/repohub-$VERSION"
+          cp target/release/repohub packaging/linux/repohub.desktop packaging/linux/repohub.png packaging/linux/install.sh "dist/repohub-$VERSION/"
+          tar -C dist -czf "dist/RepoHub-$VERSION-linux-x86_64.tar.gz" "repohub-$VERSION"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RepoHub-${{ matrix.name }}
+          path: |
+            dist/*.dmg
+            dist/*.zip
+            dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
