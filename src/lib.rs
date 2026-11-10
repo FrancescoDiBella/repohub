@@ -96,6 +96,10 @@ pub struct App {
     /// Rows and columns the terminal area fits.
     term_grid: (u16, u16),
     clone_path: TextEdit,
+    // The account form in Settings (desktop).
+    acct_user: TextEdit,
+    acct_token: TextEdit,
+    acct_error: Option<String>,
     term_error: Option<String>,
     /// The window is phone-sized: the pages use the layout in `mobile`.
     compact: bool,
@@ -106,6 +110,51 @@ impl App {
         self.page = p;
         self.toast = None;
     }
+
+    /// Saves the account typed in Settings and loads its data. An empty token field keeps the
+    /// saved token; `sign_out` removes both.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn save_account(&mut self, sign_out: bool) {
+        let user = self.acct_user.text.trim().trim_start_matches('@').to_owned();
+        let typed = self.acct_token.text.trim().to_owned();
+        let (user, token) = if sign_out {
+            (None, None)
+        } else {
+            (Some(user).filter(|u| !u.is_empty()), Some(typed).filter(|t| !t.is_empty()).or_else(|| self.cfg.token.clone()))
+        };
+        if !sign_out && user.is_none() && token.is_none() {
+            self.acct_error = Some("Type your GitHub user name, a token, or both.".into());
+            return;
+        }
+        if let Err(e) = config::save_account(user.as_deref(), token.as_deref()) {
+            self.acct_error = Some(e);
+            return;
+        }
+        let mut cfg = (*self.cfg).clone();
+        cfg.user = user;
+        cfg.token = token;
+        cfg.env_file = Some(config::user_env_file().display().to_string());
+        self.cfg = Arc::new(cfg);
+        self.acct_error = None;
+        self.acct_token.clear();
+        self.details.clear();
+        if sign_out {
+            self.acct_user.clear();
+        }
+        if self.cfg.live() {
+            self.data = Data::default();
+            self.status = Status::Ready;
+            self.refresh();
+            self.notify("Account saved. Loading your repositories…");
+        } else {
+            self.data = Data::sample();
+            self.status = Status::Sample;
+            self.notify("Signed out. Showing the sample data.");
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn save_account(&mut self, _: bool) {}
 
     /// Picks the theme (`None`: follow the system) and remembers it.
     fn set_theme(&mut self, theme: Option<bool>) {
@@ -449,6 +498,9 @@ fn init() -> App {
         term_cell: [7.8, 17.0],
         term_grid: (24, 100),
         clone_path: TextEdit::new(""),
+        acct_user: TextEdit::new(cfg.user.clone().unwrap_or_default()),
+        acct_token: TextEdit::new(""),
+        acct_error: None,
         term_error: None,
         compact: starts_compact(),
         cfg,
@@ -559,9 +611,11 @@ fn banner(s: &App, k: &Kit) -> Option<El> {
     let (msg, tint, action) = match &s.status {
         Status::Loading => ("Loading data from GitHub…".to_owned(), k.c.info.icon, false),
         Status::Error(e) => (e.clone(), k.c.danger.icon, true),
+        Status::Sample if !s.cfg.demo && cfg!(not(target_arch = "wasm32")) => ("This is sample data. Connect your GitHub account to see your repositories.".to_owned(), k.c.warning.icon, false),
         Status::Sample if !s.cfg.demo => ("Sample data. To see your repositories, create a .env file with GITHUB_USER or GITHUB_TOKEN (see .env.example) and run RepoHub with Docker or as the desktop app.".to_owned(), k.c.warning.icon, false),
         _ => return None,
     };
+    let connect = s.status == Status::Sample && cfg!(not(target_arch = "wasm32")) && s.page != Page::Settings;
     let mut r = row().w_full().px(14.0).py(10.0).gap(10.0).center_y().radius(k.radius.lg)
         .fill(tint.alpha(0.12)).border(1.0, tint.alpha(0.45))
         .child(ui::ico(if action { &icons::CROSS } else { &icons::BELL }, 15.0, tint))
@@ -571,6 +625,10 @@ fn banner(s: &App, k: &Kit) -> Option<El> {
             s.status = Status::Ready;
             s.refresh();
         }).build(k).key("retry"));
+    }
+    if connect {
+        r = r.child(rune_kit::Button::new("Connect").variant(rune_kit::ButtonVariant::Submit).control_size(ControlSize::Small)
+            .on_press(|s: &mut App| s.go(Page::Settings)).build(k).key("connect"));
     }
     Some(r.key("banner"))
 }

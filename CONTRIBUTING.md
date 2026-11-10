@@ -11,7 +11,7 @@
 | `src/model.rs` | Data model, sample data, date and colour helpers |
 | `src/github.rs` | GitHub REST client: async, shared by the desktop and web builds |
 | `src/net.rs` | Transport: blocking `ureq` on the desktop, `fetch` to the `/gh` proxy on the web; `spawn` runs work in the background and reports to the UI |
-| `src/config.rs` | `.env` parsing (desktop) and `config.json` (web) |
+| `src/config.rs` | `.env` parsing (desktop: the project file and the app's own settings file, where Settings saves the account) and `config.json` (web) |
 | `src/board.rs` | The Notes whiteboard: model, hand-drawn rendering, gestures, undo/redo, `.excalidraw` read/write |
 | `src/notes.rs`, `src/notes_page.rs` | Notes storage (local folder on desktop, `/api/notes` on the web) and the Notes tab |
 | `src/terminal.rs`, `src/terminal_page.rs` | Embedded terminal (desktop): `portable-pty` runs the login shell, `vt100` keeps the screen; key mapping, colours, the Terminal tab |
@@ -21,7 +21,8 @@
 | `web/manifest.webmanifest`, `web/icon.svg` | Add to Home Screen on phones |
 | `web/index.html` | Page that loads the WebAssembly build (`app.js` and `app_bg.wasm` are build outputs) |
 | `Dockerfile`, `compose.yaml` | Container: builds the web app and the server, runs the server on port 8080 |
-| `.github/workflows/` | CI (tests and builds), image publishing (GHCR), GitHub Pages |
+| `packaging/` | Desktop packaging: the icon, the macOS bundle script and `Info.plist`, the Linux launcher and installer |
+| `.github/workflows/` | CI (tests and builds), image publishing (GHCR), GitHub Pages, desktop builds and releases (`release.yml`) |
 
 ## How data flows
 

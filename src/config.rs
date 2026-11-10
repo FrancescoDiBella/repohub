@@ -28,6 +28,9 @@ pub struct Config {
     pub terminal_commands: Vec<String>,
     /// The `.env` file that was loaded, if any.
     pub env_file: Option<String>,
+    /// True when the user or token comes from the environment or a project `.env`, so the
+    /// account form in Settings can't change it.
+    pub account_locked: bool,
 }
 
 impl std::fmt::Debug for Config {
@@ -49,7 +52,8 @@ fn flag(v: Option<String>, default: bool) -> bool {
     }
 }
 
-/// Finds the `.env` file: `REPOHUB_ENV`, else `.env` in the current folder or one of its parents.
+/// Finds the project `.env` file: `REPOHUB_ENV`, else `.env` in the current folder or one of its
+/// parents.
 #[cfg(not(target_arch = "wasm32"))]
 fn find_env_file() -> Option<std::path::PathBuf> {
     if let Ok(p) = std::env::var("REPOHUB_ENV") {
@@ -68,19 +72,81 @@ fn find_env_file() -> Option<std::path::PathBuf> {
     None
 }
 
-/// Parses `KEY=value` lines (optional `export`, quotes and `#` comments) into the process
-/// environment. Variables already set in the environment are kept.
+/// The settings file the app itself writes (the account saved in Settings): `.env` in the data
+/// folder, e.g. `~/Library/Application Support/RepoHub/.env`. An installed app has no project
+/// folder, so this is where its configuration lives; any `.env.example` setting works in it.
 #[cfg(not(target_arch = "wasm32"))]
-fn load_env_file() -> Option<String> {
-    let path = find_env_file()?;
-    let src = std::fs::read_to_string(&path).ok()?;
+pub fn user_env_file() -> std::path::PathBuf {
+    crate::notes::data_dir().join(".env")
+}
+
+/// Puts a `.env` file's pairs into the process environment; variables already set are kept.
+#[cfg(not(target_arch = "wasm32"))]
+fn load_into_env(path: &std::path::Path) -> bool {
+    let Ok(src) = std::fs::read_to_string(path) else { return false };
     for (k, v) in parse_env(&src) {
         if std::env::var_os(&k).is_none() {
             // SAFETY: called once at startup, before any other thread exists.
             unsafe { std::env::set_var(k, v) };
         }
     }
-    Some(path.display().to_string())
+    true
+}
+
+/// Loads the project `.env`, then the app's own settings file for whatever is still unset.
+/// Returns the files read and whether the account was already set before the app's own file.
+#[cfg(not(target_arch = "wasm32"))]
+fn load_env_files() -> (Option<String>, bool) {
+    let project = find_env_file().filter(|p| load_into_env(p));
+    let set = |k: &str| std::env::var(k).is_ok_and(|v| !v.trim().is_empty());
+    let locked = set("GITHUB_TOKEN") || set("GITHUB_USER");
+    let own = user_env_file();
+    let own = load_into_env(&own).then_some(own);
+    let shown = project.or(own).map(|p| p.display().to_string());
+    (shown, locked)
+}
+
+/// Writes the account to the app's settings file, keeping its other lines. `None` removes a key.
+/// The file holds the token, so on Unix only the user can read it.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn save_account(user: Option<&str>, token: Option<&str>) -> Result<(), String> {
+    let path = user_env_file();
+    let old = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut lines: Vec<String> = old.lines()
+        .filter(|l| {
+            let k = l.trim().strip_prefix("export ").unwrap_or(l.trim());
+            !(k.starts_with("GITHUB_USER=") || k.starts_with("GITHUB_TOKEN="))
+        })
+        .map(str::to_owned).collect();
+    if lines.is_empty() {
+        lines.push("# RepoHub settings. The account is written by the app (Settings); any setting from .env.example works here.".into());
+    }
+    for (k, v) in [("GITHUB_USER", user), ("GITHUB_TOKEN", token)] {
+        if let Some(v) = v.map(str::trim).filter(|v| !v.is_empty()) {
+            if v.contains(['\n', '\r', '"']) {
+                return Err(format!("{k} can't contain quotes or line breaks."));
+            }
+            lines.push(format!("{k}=\"{v}\""));
+        }
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("Couldn't create {}: {e}", dir.display()))?;
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    use std::io::Write;
+    let mut f = opts.open(&path).map_err(|e| format!("Couldn't write {}: {e}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    f.write_all((lines.join("\n") + "\n").as_bytes()).map_err(|e| format!("Couldn't write {}: {e}", path.display()))
 }
 
 /// `KEY=value` pairs from a `.env` file's text.
@@ -115,13 +181,13 @@ pub fn default_commands() -> Vec<String> {
 }
 
 impl Config {
-    /// Reads `.env` (from `REPOHUB_ENV`, else the current folder or one of its parents), then the
-    /// process environment, which wins over the file.
+    /// Reads the project `.env` (from `REPOHUB_ENV`, else the current folder or one of its
+    /// parents) and the app's own settings file, then the process environment, which wins.
     pub fn load() -> Config {
         #[cfg(not(target_arch = "wasm32"))]
-        let env_file = load_env_file();
+        let (env_file, account_locked) = load_env_files();
         #[cfg(target_arch = "wasm32")]
-        let env_file: Option<String> = None;
+        let (env_file, account_locked): (Option<String>, bool) = (None, true);
         let get = |k: &str| -> Option<String> {
             #[cfg(not(target_arch = "wasm32"))]
             {
@@ -156,6 +222,7 @@ impl Config {
                 .map(|v| v.split(';').map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()).collect())
                 .unwrap_or_else(default_commands),
             env_file,
+            account_locked,
         }
     }
 
@@ -192,13 +259,14 @@ impl Config {
             notes: bo("notes", false),
             terminal_commands: default_commands(),
             env_file: Some("provided by repohub-server (Docker)".into()),
+            account_locked: true,
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, parse_env};
+    use super::{Config, parse_env, save_account, user_env_file};
 
     #[test]
     fn web_config() {
@@ -208,6 +276,26 @@ mod tests {
         assert_eq!(c.pinned, vec!["a", "b"]);
         assert_eq!((c.theme, c.max_repos), (Some(true), 20));
         assert!(!Config::from_json(r#"{"hasToken":false}"#).unwrap().live());
+    }
+
+    #[test]
+    fn account_file() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("repohub-account-{}", std::process::id()));
+        // SAFETY: the lock keeps other environment-changing tests out.
+        unsafe { std::env::set_var("REPOHUB_DATA_DIR", &dir) };
+        save_account(Some("octocat"), Some("ghp_x")).unwrap();
+        std::fs::write(user_env_file(), std::fs::read_to_string(user_env_file()).unwrap() + "REPOHUB_TITLE=Mine\n").unwrap();
+        save_account(Some("hubot"), None).unwrap();
+        let pairs = parse_env(&std::fs::read_to_string(user_env_file()).unwrap());
+        assert_eq!(pairs, vec![("REPOHUB_TITLE".to_owned(), "Mine".to_owned()), ("GITHUB_USER".to_owned(), "hubot".to_owned())]);
+        assert!(save_account(Some("a\"b"), None).is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(user_env_file()).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

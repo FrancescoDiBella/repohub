@@ -90,7 +90,43 @@ docker run --rm --env-file .env -p 127.0.0.1:8080:8080 -v repohub-notes:/data gh
 A new GHCR package starts out private. Either make it public (your GitHub profile → Packages →
 repohub → Package settings) or run `docker login ghcr.io` first.
 
-## Run the desktop app
+## Desktop app
+
+A native app for macOS, Windows and Linux: its own window, no browser and no Docker. It is the
+only version with the [terminal](#terminal-desktop-app).
+
+### Install
+
+Download the build for your system from the
+[Releases](https://github.com/FrancescoDiBella/repohub/releases) page:
+
+- **macOS** (Apple silicon and Intel): open `RepoHub-<version>-macos.dmg` and drag RepoHub to
+  Applications. The app isn't notarized by Apple, so the first time right-click it and choose
+  **Open**, or run `xattr -dr com.apple.quarantine /Applications/RepoHub.app`.
+- **Windows**: unzip `RepoHub-<version>-windows.zip` and run `RepoHub.exe`. SmartScreen may ask
+  for confirmation (*More info* → *Run anyway*).
+- **Linux** (x86-64): unpack `RepoHub-<version>-linux-x86_64.tar.gz` and run `./install.sh`, which
+  puts the program in `~/.local/bin` and adds a launcher entry.
+
+There is no release yet? Run the **Desktop** workflow by hand (Actions → Desktop → Run workflow)
+and download its artifacts, or push a tag such as `v0.1.0` to publish one.
+
+### Connect your account
+
+Open **Settings → GitHub account**, type your user name and (optionally) a token, and press
+**Connect**. No `.env` file is needed.
+
+- With only a user name RepoHub shows your public repositories.
+- A token adds private repositories and starring. The **Create a token** button opens the right
+  GitHub page.
+- The account is saved in the app's settings file, which only you can read:
+  `~/Library/Application Support/RepoHub/.env` (macOS), `%APPDATA%\RepoHub\.env` (Windows) or
+  `~/.local/share/repohub/.env` (Linux). Any setting from [`.env.example`](.env.example) works
+  in that file too.
+- A `GITHUB_USER` or `GITHUB_TOKEN` from the environment or a project `.env` wins over the saved
+  account; Settings says so when that happens.
+
+### Build from source
 
 You need [Rust](https://rustup.rs). The toolchain version is pinned in `rust-toolchain.toml` and
 installed automatically.
@@ -98,8 +134,8 @@ installed automatically.
 - Windows: you also need the Visual Studio C++ Build Tools.
 
 ```sh
-cp .env.example .env      # then set GITHUB_USER and/or GITHUB_TOKEN
-cargo run --release       # the first build takes a few minutes
+cargo run --release                   # the first build takes a few minutes
+packaging/macos/bundle.sh 0.1.0       # macOS: builds dist/RepoHub.app and the .dmg
 ```
 
 ## Notes

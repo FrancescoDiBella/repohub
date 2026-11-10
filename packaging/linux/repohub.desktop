@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=RepoHub
+Comment=Your GitHub repositories in one place
+Exec=repohub
+Icon=repohub
+Terminal=false
+Categories=Development;
