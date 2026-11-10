@@ -5,46 +5,56 @@
 //! - images become links to the picture (badges and screenshots aren't downloaded);
 //! - raw HTML (`<p align="center">`, `<img>`, comments) is dropped, keeping any text inside.
 
+/// Where the line-by-line pass is in the document.
+#[derive(Clone, Copy, PartialEq)]
+enum Block {
+    Text,
+    /// Inside a code fence opened with this marker (``` or ~~~).
+    Fence(&'static str),
+    /// Inside an HTML comment that hasn't closed yet.
+    Comment,
+}
+
 /// Turns `src` (a README from `repo` at `branch`) into Markdown the renderer can show.
 pub fn prepare(src: &str, repo: &str, branch: &str) -> String {
     let blob = format!("https://github.com/{repo}/blob/{branch}/");
     let raw = format!("https://github.com/{repo}/raw/{branch}/");
     let mut out = String::with_capacity(src.len());
-    let mut fence: Option<&str> = None;
-    let mut in_comment = false;
+    let mut at = Block::Text;
     for line in src.lines() {
         let t = line.trim_start();
-        // Code fences pass through untouched.
-        if let Some(f) = fence {
-            out.push_str(line);
-            out.push('\n');
-            if t.starts_with(f) {
-                fence = None;
-            }
-            continue;
-        }
-        if t.starts_with("```") || t.starts_with("~~~") {
-            fence = Some(if t.starts_with("```") { "```" } else { "~~~" });
-            out.push_str(line);
-            out.push('\n');
-            continue;
-        }
         let mut l = line.to_owned();
-        if in_comment {
-            match l.find("-->") {
+        match at {
+            // Code fences pass through untouched.
+            Block::Fence(f) => {
+                out.push_str(line);
+                out.push('\n');
+                if t.starts_with(f) {
+                    at = Block::Text;
+                }
+                continue;
+            }
+            Block::Comment => match l.find("-->") {
                 Some(i) => {
                     l = l[i + 3..].to_owned();
-                    in_comment = false;
+                    at = Block::Text;
                 }
                 None => continue,
+            },
+            Block::Text if t.starts_with("```") || t.starts_with("~~~") => {
+                at = Block::Fence(if t.starts_with("```") { "```" } else { "~~~" });
+                out.push_str(line);
+                out.push('\n');
+                continue;
             }
+            Block::Text => {}
         }
         while let Some(i) = l.find("<!--") {
             match l[i..].find("-->") {
                 Some(j) => l.replace_range(i..i + j + 3, ""),
                 None => {
                     l.truncate(i);
-                    in_comment = true;
+                    at = Block::Comment;
                 }
             }
         }

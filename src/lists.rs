@@ -5,6 +5,7 @@ use rune_kit::{Button, ButtonVariant, ControlSize, Kit, SegmentedControl, TextIn
 use crate::model::{Checks, Issue, Pull, PullState, Repo, Run};
 use crate::pages::{heading, open_button};
 use crate::ui::{self, panel, panel_head, rule};
+use crate::state::{Account, Theme};
 use crate::{App, Status, icons};
 
 /// Makes a row open `url` in the browser when clicked.
@@ -88,16 +89,17 @@ fn listing(k: &Kit, rows: Vec<El>, empty: &str) -> El {
     rows.into_iter().enumerate().fold(panel(k), |p, (i, r)| if i == 0 { p.child(r) } else { p.child(rule(k)).child(r) })
 }
 
-pub const PR_FILTERS: [&str; 4] = ["Open", "Drafts", "Merged", "Closed"];
+/// The states the Pull requests page can show, in the order of its tabs.
+pub const PR_STATES: [PullState; 4] = [PullState::Open, PullState::Draft, PullState::Merged, PullState::Closed];
+pub const PR_LABELS: [&str; 4] = ["Open", "Drafts", "Merged", "Closed"];
 
 pub fn pulls(s: &App, k: &Kit) -> El {
-    let want = [PullState::Open, PullState::Draft, PullState::Merged, PullState::Closed][s.pr_filter.min(3)];
-    let rows: Vec<El> = s.data.pulls.iter().filter(|p| p.state == want).map(|p| pull_row(k, p, s.compact)).collect();
+    let rows: Vec<El> = s.data.pulls.iter().filter(|p| p.state == s.pr_filter).map(|p| pull_row(k, p, s.compact)).collect();
     let sub = if s.data.sample { "Pull requests you opened or that wait for your review." } else { "Pull requests you're involved in (author, reviewer, assignee or mentioned). Click one to open it on GitHub." };
     col().w_full().gap(16.0)
         .child(heading(k, "Pull requests", sub, None))
-        .child(SegmentedControl::new(&PR_FILTERS, Some(s.pr_filter)).label("State").fit()
-            .on_pick(|s: &mut App, i, _| s.pr_filter = i).build(k).key("pr-filter"))
+        .child(SegmentedControl::new(&PR_LABELS, PR_STATES.iter().position(|p| *p == s.pr_filter)).label("State").fit()
+            .on_pick(|s: &mut App, i, _| s.pr_filter = PR_STATES[i.min(3)]).build(k).key("pr-filter"))
         .child(listing(k, rows, "No pull requests in this state"))
 }
 
@@ -135,12 +137,12 @@ pub fn settings(s: &App, k: &Kit) -> El {
     let source = match (&s.status, cfg.live()) {
         (Status::Sample, _) if cfg.demo => "Sample data (REPOHUB_DEMO=true)".to_owned(),
         (Status::Sample, _) => "Sample data: no configuration found".to_owned(),
-        (Status::Loading, _) => "Loading…".to_owned(),
-        (Status::Error(e), _) => format!("Error: {e}"),
+        (Status::Starting | Status::Loading, _) => "Loading…".to_owned(),
+        (Status::Failed(e), _) => format!("Error: {e}"),
         (Status::Ready, _) => "GitHub, up to date".to_owned(),
     };
     let mut conn = panel(k).child(panel_head(k, "GitHub connection", if cfg.live() {
-        Some(Button::new("Refresh").icon(&icons::REFRESH).control_size(ControlSize::Small).disabled(s.status == Status::Loading)
+        Some(Button::new("Refresh").icon(&icons::REFRESH).control_size(ControlSize::Small).disabled(s.status.is_busy())
             .on_press(|s: &mut App| s.refresh()).build(k).key("refresh-settings"))
     } else { None }));
     for (label, value) in [
@@ -156,19 +158,14 @@ pub fn settings(s: &App, k: &Kit) -> El {
         conn = conn.child(rule(k)).child(info(k, label, value));
     }
     let account = account_panel(s, k);
-    let pick = match s.theme {
-        None => 0,
-        Some(false) => 1,
-        Some(true) => 2,
-    };
     let appearance = panel(k).child(panel_head(k, "Appearance", None)).child(rule(k))
         .child(row().w_full().px(16.0).py(12.0).gap(16.0).center_y().justify_between().flex_wrap()
             .child(col().grow(1.0).shrink().min_w(200.0).gap(2.0)
                 .child(text("Theme").font(k.ty.ui_medium).color(k.c.text_base))
                 .child(text("System follows your computer's light or dark setting. Your choice is remembered; REPOHUB_THEME in .env only sets the default.")
                     .font(k.ty.text_small).color(k.c.text_muted).wrap()))
-            .child(SegmentedControl::new(&["System", "Light", "Dark"], Some(pick)).label("Theme").fit()
-                .on_pick(|s: &mut App, i, _| s.set_theme([None, Some(false), Some(true)][i.min(2)])).build(k).key("theme-pick")));
+            .child(SegmentedControl::new(&Theme::LABELS, Some(s.theme.index())).label("Theme").fit()
+                .on_pick(|s: &mut App, i, _| s.set_theme(Theme::ALL[i.min(2)])).build(k).key("theme-pick")));
     let keys = panel(k).child(panel_head(k, "Keyboard shortcuts", None));
     let keys = [
         ("⌘/Ctrl + 1 … 5", "Overview, Repositories, Pull requests, Issues, Actions"),
@@ -191,7 +188,8 @@ fn account_panel(s: &App, k: &Kit) -> El {
     }
     let cfg = &s.cfg;
     let head = panel(k).child(panel_head(k, "GitHub account", Some(open_button(k, "Create a token", "https://github.com/settings/personal-access-tokens/new", "new-token")))).child(rule(k));
-    if cfg.account_locked {
+    let account = s.account();
+    if account == Account::Locked {
         let from = cfg.env_file.clone().unwrap_or_else(|| "the environment".into());
         return head.child(col().w_full().padding(16.0).gap(4.0)
             .child(text("Set outside the app").font(k.ty.ui_medium).color(k.c.text_base))
@@ -205,9 +203,9 @@ fn account_panel(s: &App, k: &Kit) -> El {
         .placeholder(if cfg.token.is_some() { "A token is saved. Type a new one to replace it" } else { "github_pat_… (optional for public data)" })
         .on_edit(|s: &mut App| &mut s.acct_token).on_submit(|s: &mut App, _| s.save_account(false)).build(k).key("acct-token").grow(1.0).min_w(200.0);
     let mut buttons = row().gap(8.0).center_y().flex_wrap()
-        .child(Button::new(if cfg.live() { "Save" } else { "Connect" }).variant(ButtonVariant::Submit).control_size(ControlSize::Small)
+        .child(Button::new(if account == Account::SignedIn { "Save" } else { "Connect" }).variant(ButtonVariant::Submit).control_size(ControlSize::Small)
             .on_press(|s: &mut App| s.save_account(false)).build(k).key("acct-save"));
-    if cfg.live() {
+    if account == Account::SignedIn {
         buttons = buttons.child(Button::new("Sign out").variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
             .on_press(|s: &mut App| s.save_account(true)).build(k).key("acct-sign-out"));
     }

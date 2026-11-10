@@ -8,6 +8,7 @@
 | `src/pages.rs`, `src/lists.rs` | Pages: overview, repositories, repository detail, pull requests, issues, Actions, settings |
 | `src/mobile.rs` | The phone layout (top bar and bottom tab bar) used below `mobile::BREAKPOINT`; pages read `App::compact` |
 | `src/ui.rs`, `src/icons.rs` | Small building blocks and the icon set |
+| `src/state.rs` | The state machines: where data comes from, loading, saving, theme, tabs, filters. Drawn in [`docs/STATE.md`](docs/STATE.md) |
 | `src/model.rs` | Data model, sample data, date and colour helpers |
 | `src/github.rs` | GitHub REST client: async, shared by the desktop and web builds |
 | `src/net.rs` | Transport: blocking `ureq` on the desktop, `fetch` to the `/gh` proxy on the web; `spawn` runs work in the background and reports to the UI |
@@ -48,6 +49,7 @@ REPOHUB_BLOCKING=1 target/release/repohub --snap out.png --size 1180x760 -- page
 ```
 
 `REPOHUB_BLOCKING=1` loads the data before the first frame, so the snapshot shows it.
+Add `tab notes` (a section's name) after `page repo`, and `REPOHUB_TRACE=1` to print every state change.
 `REPOHUB_COMPACT=1` with `--size 390x844` starts in the phone layout.
 
 ### Web build
@@ -86,6 +88,8 @@ the same; the clients bypass HTTP proxies for `localhost` and `NO_PROXY` hosts.
 
 ## Guidelines
 
+- State that has more than two values gets a named type in `src/state.rs`, and one method that
+  changes it. No tab numbers, no pairs of booleans.
 - Never commit `.env` or anything that contains a token.
 - Keep the proxy allowlist (`server/src/main.rs`, `allowed`) as narrow as the app needs. Add an
   endpoint there only together with the feature that uses it.

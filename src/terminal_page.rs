@@ -27,9 +27,9 @@ pub fn terminal_tab(s: &App, k: &Kit, i: usize, dark: bool) -> El {
     if let Some(e) = &s.term_error {
         out = out.child(text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap());
     }
-    match (term, known) {
-        (Some(t), _) => out.child(toolbar(s, k, i, &t.cwd.display().to_string(), t.is_running())).child(view(s, k, i, t, dark)),
-        (None, Some(dir)) => {
+    match Panel::of(term, known) {
+        Panel::Shell(t) => out.child(toolbar(s, k, i, &t.cwd.display().to_string(), t.is_running())).child(view(s, k, i, t, dark)),
+        Panel::Found(dir) => {
             let d = dir.clone();
             out.child(panel(k).padding(20.0).gap(12.0)
                 .child(row().gap(10.0).center_y().child(ui::ico(&icons::TERMINAL, 18.0, k.c.icon_muted))
@@ -43,7 +43,32 @@ pub fn terminal_tab(s: &App, k: &Kit, i: usize, dark: bool) -> El {
                         .on_press({ let d = dir.clone(); move |s: &mut App| s.start_terminal(i, d.clone(), Some("claude\r".into())) }).build(k).key("open-claude"))))
                 .child(pick_folder(s, k, i, true))
         }
-        (None, None) => out.child(pick_folder(s, k, i, false)),
+        Panel::Missing => out.child(pick_folder(s, k, i, false)),
+    }
+}
+
+/// What the Terminal tab shows for a repository.
+///
+/// ```text
+/// Missing ──type a folder / clone──▶ Shell (running) ──the shell exits──▶ Shell (exited) ──Restart──▶ Shell (running)
+/// Found ──Open terminal──▶ Shell (running)
+/// ```
+enum Panel<'a> {
+    /// A shell was started here (it may have exited since: `Term::is_running`).
+    Shell(&'a terminal::Term),
+    /// No shell yet, but the local clone is known.
+    Found(std::path::PathBuf),
+    /// No local clone is known: ask for the folder, or offer to clone.
+    Missing,
+}
+
+impl<'a> Panel<'a> {
+    fn of(term: Option<&'a terminal::Term>, clone: Option<std::path::PathBuf>) -> Panel<'a> {
+        match (term, clone) {
+            (Some(t), _) => Panel::Shell(t),
+            (None, Some(dir)) => Panel::Found(dir),
+            (None, None) => Panel::Missing,
+        }
     }
 }
 
