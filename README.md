@@ -108,8 +108,10 @@ Download the build for your system from the
 - **Linux** (x86-64): unpack `RepoHub-<version>-linux-x86_64.tar.gz` and run `./install.sh`, which
   puts the program in `~/.local/bin` and adds a launcher entry.
 
-There is no release yet? Run the **Desktop** workflow by hand (Actions → Desktop → Run workflow)
-and download its artifacts, or push a tag such as `v0.1.0` to publish one.
+Every push to `main` rebuilds the three packages and replaces the
+[**Latest build**](https://github.com/FrancescoDiBella/repohub/releases/tag/latest) pre-release,
+so the newest app is always there without doing anything. Pushing a tag such as `v0.1.0`
+publishes a numbered release next to it.
 
 ### Connect your account
 

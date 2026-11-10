@@ -1,18 +1,28 @@
 # Builds the desktop app for macOS (one app for Apple silicon and Intel), Windows and Linux.
-# - Run it by hand (Actions → Desktop → Run workflow) to get the builds as workflow artifacts.
-# - Push a tag like v0.1.0 to also publish them as a GitHub release.
-# - A pull request that touches the packaging builds them too, as a check.
+# - Every push to main rebuilds them and replaces the "Latest build" pre-release, so the newest
+#   app is always at .../releases/tag/latest with no manual step.
+# - Pushing a tag like v0.1.0 publishes them as a versioned GitHub release.
+# - A pull request that touches the packaging builds them too, as a check (nothing is published).
+# - It can also be run by hand (Actions → Desktop → Run workflow), which only makes artifacts.
 name: Desktop
 
 on:
   push:
+    branches: [main]
     tags: ["v*"]
+    # Documentation alone doesn't change the app.
+    paths-ignore: ["**.md", "docs/**"]
   workflow_dispatch:
   pull_request:
     paths: ["packaging/**", ".github/workflows/release.yml"]
 
 permissions:
   contents: write
+
+# A newer push to main replaces the build of an older one.
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}
 
 jobs:
   build:
@@ -78,6 +88,7 @@ jobs:
             dist/*.tar.gz
           if-no-files-found: error
 
+  # A versioned release, from a v* tag.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
@@ -91,3 +102,23 @@ jobs:
         with:
           files: dist/*
           generate_release_notes: true
+
+  # The rolling pre-release: always the newest build of main.
+  latest:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Replace the "Latest build" pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release delete latest --cleanup-tag --yes || true
+          gh release create latest dist/* --prerelease --target "$GITHUB_SHA" \
+            --title "Latest build" \
+            --notes "Built automatically from main at ${GITHUB_SHA::7}. It is replaced on every push; for a fixed version use a numbered release."
