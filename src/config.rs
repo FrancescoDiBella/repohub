@@ -24,6 +24,8 @@ pub struct Config {
     pub demo: bool,
     /// Notes (Excalidraw drawings) are available: true when `repohub-server` serves the app.
     pub notes: bool,
+    /// Buttons above the terminal, each typing one command (`REPOHUB_TERMINAL_COMMANDS`, `;`-separated).
+    pub terminal_commands: Vec<String>,
     /// The `.env` file that was loaded, if any.
     pub env_file: Option<String>,
 }
@@ -107,6 +109,11 @@ pub fn parse_env(src: &str) -> Vec<(String, String)> {
     out
 }
 
+/// The terminal's default command buttons.
+pub fn default_commands() -> Vec<String> {
+    ["claude", "git status", "git pull", "git log --oneline -15"].iter().map(|s| s.to_string()).collect()
+}
+
 impl Config {
     /// Reads `.env` (from `REPOHUB_ENV`, else the current folder or one of its parents), then the
     /// process environment, which wins over the file.
@@ -145,6 +152,9 @@ impl Config {
             demo: flag(get("REPOHUB_DEMO"), false),
             // The desktop app keeps notes in a local folder; the web build needs repohub-server.
             notes: cfg!(not(target_arch = "wasm32")),
+            terminal_commands: get("REPOHUB_TERMINAL_COMMANDS")
+                .map(|v| v.split(';').map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()).collect())
+                .unwrap_or_else(default_commands),
             env_file,
         }
     }
@@ -180,6 +190,7 @@ impl Config {
             activity_repos: nu("activityRepos", 5).clamp(0, 20),
             demo: bo("demo", false),
             notes: bo("notes", false),
+            terminal_commands: default_commands(),
             env_file: Some("provided by repohub-server (Docker)".into()),
         })
     }

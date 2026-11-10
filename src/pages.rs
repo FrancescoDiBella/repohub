@@ -163,7 +163,8 @@ fn repo_card(k: &Kit, i: usize, r: &Repo) -> El {
 
 // ---------------------------------------------------------------- repository detail
 
-pub const TABS: [&str; 6] = ["Code", "Issues", "Pull requests", "Actions", "Notes", "Settings"];
+pub const TABS: [&str; 7] = ["Code", "Issues", "Pull requests", "Actions", "Notes", "Terminal", "Settings"];
+pub const TERMINAL_TAB: usize = 5;
 
 pub fn repo_detail(s: &App, k: &Kit, i: usize) -> El {
     let r = &s.data.repos[i];
@@ -185,6 +186,9 @@ pub fn repo_detail(s: &App, k: &Kit, i: usize) -> El {
         if t == 4 {
             s.load_notes(i);
         }
+        if t == TERMINAL_TAB {
+            s.open_terminal(i);
+        }
     }).build(k).key("tabs");
     let in_repo = |name: &str| name.eq_ignore_ascii_case(&r.full_name) || name.eq_ignore_ascii_case(&r.name);
     let body = match s.tab {
@@ -193,6 +197,7 @@ pub fn repo_detail(s: &App, k: &Kit, i: usize) -> El {
         2 => list_of(k, "Pull requests", s.data.pulls.iter().filter(|x| in_repo(&x.repo)).map(|x| pull_row(k, x, false)).collect()),
         3 => list_of(k, "Workflow runs", s.data.runs.iter().filter(|x| in_repo(&x.repo)).map(|x| run_row(k, x)).collect()),
         4 => crate::notes_page::notes_tab(s, k, i),
+        TERMINAL_TAB => crate::terminal_page::terminal_tab(s, k, i, s.prefs[0] || k.c.page.r + k.c.page.g + k.c.page.b < 1.0),
         _ => crate::lists::repo_settings(s, k, r),
     };
     col().w_full().gap(16.0).child(back).child(header).child(tabs).child(body)

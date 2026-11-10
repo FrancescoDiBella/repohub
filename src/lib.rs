@@ -4,6 +4,9 @@
 //! The desktop app is configured by a `.env` file (see `.env.example`); the web build gets its
 //! configuration and a token-adding proxy from `repohub-server` (the Docker image). Without either
 //! it shows built-in sample data.
+// Desktop-only helpers (local files, the terminal) aren't called from the web build.
+#![cfg_attr(target_arch = "wasm32", allow(dead_code))]
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -12,6 +15,9 @@ use rune_kit::shell::{self, PaneState, Sidebar, SidebarRow, SidebarSection, Side
 use rune_kit::{ControlSize, IconButton, IconButtonVariant, Kit, PaletteSeed};
 
 mod board;
+#[cfg(not(target_arch = "wasm32"))]
+mod clones;
+mod clones_shim;
 mod config;
 mod github;
 mod icons;
@@ -22,9 +28,15 @@ mod net;
 mod notes;
 mod notes_page;
 mod pages;
+mod terminal;
+mod terminal_page;
 mod ui;
 
 use config::Config;
+
+/// Tests that change process environment variables hold this, so they don't race.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 use model::{Data, Detail, PullState};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -71,6 +83,14 @@ pub struct App {
     confirm_delete: Option<String>,
     /// The drawing open in the Notes tab, if any.
     board: Option<board::Board>,
+    // Terminal tab (desktop): one shell per repository, opened in its local clone.
+    terms: HashMap<String, terminal::Term>,
+    /// Width of one character and height of one line of the terminal font, measured on screen.
+    term_cell: [f32; 2],
+    /// Rows and columns the terminal area fits.
+    term_grid: (u16, u16),
+    clone_path: TextEdit,
+    term_error: Option<String>,
 }
 
 impl App {
@@ -268,6 +288,102 @@ impl App {
         self.load_notes(i);
     }
 
+    /// Starts a shell for repository `i` in `dir` (its clone, or where a clone will go).
+    fn start_terminal(&mut self, i: usize, dir: std::path::PathBuf, first: Option<String>) {
+        let Some(r) = self.data.repos.get(i) else { return };
+        let full = r.full_name.clone();
+        let Some(h) = self.handle.clone() else { return };
+        let pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let on_output = move || {
+            if !pending.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                let p = pending.clone();
+                h.update(move |_: &mut App, _| p.store(false, std::sync::atomic::Ordering::SeqCst));
+            }
+        };
+        let (rows, cols) = self.term_grid;
+        match terminal::Term::spawn(&dir, rows, cols, on_output) {
+            Ok(mut t) => {
+                if let Some(cmd) = first {
+                    t.write(cmd.as_bytes());
+                }
+                self.terms.insert(full, t);
+                self.term_error = None;
+            }
+            Err(e) => self.term_error = Some(e),
+        }
+    }
+
+    /// Opens the terminal in the repository's known clone, if any.
+    fn open_terminal(&mut self, i: usize) {
+        let Some(r) = self.data.repos.get(i) else { return };
+        if self.terms.get(&r.full_name).is_some_and(|t| t.is_running()) {
+            return;
+        }
+        if let Some(dir) = clones_shim::find(&r.full_name) {
+            self.start_terminal(i, dir, None);
+        }
+    }
+
+    /// Uses the folder typed in the field as repository `i`'s clone.
+    fn use_folder(&mut self, i: usize) {
+        let Some(r) = self.data.repos.get(i) else { return };
+        let full = r.full_name.clone();
+        let dir = clones_shim::expand(self.clone_path.text.trim());
+        if !dir.is_dir() {
+            self.term_error = Some(format!("{} isn't a folder on this computer.", dir.display()));
+            return;
+        }
+        if let Err(e) = clones_shim::remember(&full, &dir) {
+            self.term_error = Some(e);
+            return;
+        }
+        self.clone_path.clear();
+        self.terms.remove(&full);
+        self.start_terminal(i, dir, None);
+    }
+
+    /// Clones repository `i` into the default folder, in its terminal, and remembers where.
+    fn clone_repo(&mut self, i: usize) {
+        let Some(r) = self.data.repos.get(i) else { return };
+        let (full, name, url) = (r.full_name.clone(), r.name.clone(), r.url.clone());
+        let parent = clones_shim::default_parent();
+        if let Err(e) = std::fs::create_dir_all(&parent) {
+            self.term_error = Some(format!("Couldn't create {}: {e}", parent.display()));
+            return;
+        }
+        let _ = clones_shim::remember(&full, &parent.join(&name));
+        self.terms.remove(&full);
+        self.start_terminal(i, parent, Some(format!("git clone {url}.git && cd {name}\r")));
+    }
+
+    /// Types `text` into repository `i`'s terminal.
+    fn term_type(&mut self, i: usize, text: &str) {
+        if let Some(t) = self.data.repos.get(i).and_then(|r| self.terms.get_mut(&r.full_name)) {
+            t.write(text.as_bytes());
+        }
+    }
+
+    fn term_type_bytes(&mut self, i: usize, bytes: &[u8]) {
+        if let Some(t) = self.data.repos.get(i).and_then(|r| self.terms.get_mut(&r.full_name)) {
+            t.write(bytes);
+        }
+    }
+
+    /// Pastes into the terminal of the repository on screen, when its Terminal tab is open.
+    fn paste(&mut self, text: &str) -> bool {
+        let Page::Repo(i) = self.page else { return false };
+        if self.tab != pages::TERMINAL_TAB {
+            return false;
+        }
+        match self.data.repos.get(i).and_then(|r| self.terms.get_mut(&r.full_name)) {
+            Some(t) => {
+                t.paste(text);
+                true
+            }
+            None => false,
+        }
+    }
+
     fn starred_count(&self) -> u32 {
         self.data.repos.iter().map(|r| r.stars).sum()
     }
@@ -300,6 +416,11 @@ fn init() -> App {
         note_name: TextEdit::new(""),
         confirm_delete: None,
         board: None,
+        terms: HashMap::new(),
+        term_cell: [7.8, 17.0],
+        term_grid: (24, 100),
+        clone_path: TextEdit::new(""),
+        term_error: None,
         cfg,
     };
     // `REPOHUB_BLOCKING=1` loads synchronously before the first frame (headless snapshots).
@@ -466,6 +587,9 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
         .sidebar_toggle(SidebarToggle::new().size(ControlSize::Large))
         .reduced_motion(cx.is_reduced_motion())
         .build(&k)
+        .on_paste(|s: &mut App, text: &str, _| {
+            s.paste(text);
+        })
 }
 
 fn on_key(s: &mut App, ev: &KeyEvent, _: &mut Tx) -> bool {
@@ -504,9 +628,19 @@ fn shortcuts(s: &mut App, ev: &KeyEvent) -> bool {
     false
 }
 
+/// Inter for the interface and IBM Plex Mono for code and the terminal (both SIL OFL, see
+/// `assets/fonts`). The mono slot prefers the system's monospaced font (SF Mono on macOS).
+const FONTS: &[&[u8]] = &[
+    include_bytes!("../assets/fonts/Inter-Regular.ttf"),
+    include_bytes!("../assets/fonts/Inter-Medium.ttf"),
+    include_bytes!("../assets/fonts/Inter-SemiBold.ttf"),
+    include_bytes!("../assets/fonts/IBMPlexMono-Regular.ttf"),
+];
+const FAMILIES: (&str, &str) = ("Inter", "ui-monospace, IBM Plex Mono");
+
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen::prelude::wasm_bindgen(start))]
 pub fn start() {
-    let app = rune::App::new(AppSpec { on_key: Some(on_key), ..AppSpec::new("RepoHub", (1180.0, 760.0), init, view) });
+    let app = rune::App::new(AppSpec { on_key: Some(on_key), fonts: FONTS, families: FAMILIES, ..AppSpec::new("RepoHub", (1180.0, 760.0), init, view) });
     let handle = app.handle();
     let h2 = handle.clone();
     handle.update(move |s: &mut App, _| {

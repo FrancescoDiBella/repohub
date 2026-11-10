@@ -125,6 +125,9 @@ mod local {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub use local::data_dir;
+
 /// Where the desktop app keeps notes, for the Settings page.
 pub fn location() -> String {
     #[cfg(not(target_arch = "wasm32"))]
@@ -237,6 +240,7 @@ mod tests {
 
     #[test]
     fn local_round_trip() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("repohub-notes-{}", std::process::id()));
         // SAFETY: single-threaded test setup.
         unsafe { std::env::set_var("REPOHUB_DATA_DIR", &dir) };

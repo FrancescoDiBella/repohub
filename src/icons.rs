@@ -48,3 +48,5 @@ icon!(FILL, "rh-fill", r#"<rect x="3" y="3.5" width="10" height="9" rx="1.5" fil
 icon!(BOLD, "rh-bold", r#"<path d="M3 12.5C6 9.5 10 6 13 3.5" stroke="currentColor" stroke-width="3" stroke-linecap="round" fill="none"/>"#);
 icon!(UNDO, "rh-undo", r#"<path d="M5.5 4L2.75 6.75L5.5 9.5M3 6.75H9.5A3.25 3.25 0 0 1 9.5 13.25H6.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" fill="none"/>"#);
 icon!(REDO, "rh-redo", r#"<path d="M10.5 4L13.25 6.75L10.5 9.5M13 6.75H6.5A3.25 3.25 0 0 0 6.5 13.25H9.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" fill="none"/>"#);
+icon!(TERMINAL, "rh-terminal", r#"<rect x="2" y="3" width="12" height="10" rx="1.75" stroke="currentColor" stroke-width="1.2" fill="none"/><path d="M4.75 6.25L6.75 8L4.75 9.75M8.25 10H11" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>"#);
+icon!(SPARK, "rh-spark", r#"<path d="M8 2L9.4 6.6L14 8L9.4 9.4L8 14L6.6 9.4L2 8L6.6 6.6Z" fill="currentColor"/>"#);

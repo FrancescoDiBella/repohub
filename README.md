@@ -107,6 +107,29 @@ Drawings never go to GitHub. They are stored at
 
 The static GitHub Pages build has nowhere to store them, so the tab explains that instead.
 
+## Terminal (desktop app)
+
+Each repository has a **Terminal** tab: your login shell in a real pseudo-terminal, opened in the
+repository's **local clone**, so `claude`, `git`, `npm`, `cargo` and the rest run with the right
+working directory and your usual environment. Full-screen programs (Claude Code, vim, htop) work,
+with colours, scrollback (mouse wheel) and paste.
+
+![Terminal tab running git in the repository's clone](docs/terminal.png)
+
+- **Finding the clone:** RepoHub looks for a checkout named after the repository in
+  `REPOHUB_REPOS_DIR` (comma-separated folders) or in `~/Developer`, `~/Projects`, `~/code`,
+  `~/src`, `~/GitHub`, `~/repos` and `~/Documents/GitHub`. You can also type the folder, or press
+  **Clone into …** to clone it there. A folder you pick is remembered.
+- **Command buttons:** one click types `claude`, `git status`, `git pull` or `git log`. Set your
+  own list with `REPOHUB_TERMINAL_COMMANDS` (`;`-separated). **Open with claude** starts Claude Code
+  right away.
+- **Keys:** click the terminal to type. Ctrl+C, arrows, Tab, Ctrl+R… go to the shell;
+  Ctrl/⌘+V pastes.
+
+The terminal is in the desktop app only. A web page can't start programs on your computer. In
+Docker a shell would run inside the container, without your tools, credentials or files, and
+anyone who could reach the port would get it.
+
 ## Configuration
 
 Settings live in `.env`. It is ignored by git (`.gitignore`) and by Docker builds
