@@ -88,7 +88,13 @@ fn toolbar(s: &App, k: &Kit, i: usize, cwd: &str, running: bool) -> El {
             }
             s.start_terminal(i, std::path::PathBuf::from(&dir), None);
         }).build(k).key("term-restart");
-    let folder = format!("file://{cwd}");
+    let folder = format!("file://{}", cwd.replace('%', "%25").replace(' ', "%20").replace('#', "%23").replace('\\', "/"));
+    let copy = Button::new("Copy screen").variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
+        .on_press_tx(move |s: &mut App, tx| {
+            if let Some(t) = s.data.repos.get(i).and_then(|r| s.terms.get(&r.full_name)) {
+                tx.copy(t.text());
+            }
+        }).build(k).key("term-copy");
     let open = Button::new("Open folder").icon(&icons::FOLDER).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
         .on_press_tx(move |_: &mut App, tx| { let _ = tx.open_url(&folder); }).build(k).key("term-folder");
     col().w_full().gap(8.0)
@@ -96,6 +102,7 @@ fn toolbar(s: &App, k: &Kit, i: usize, cwd: &str, running: bool) -> El {
             .child(ui::ico(&icons::FOLDER, 14.0, k.c.info.icon))
             .child(text(cwd.to_owned()).font(k.ty.mono).color(k.c.text_base).grow(1.0).shrink().max_lines(1))
             .child(if running { ui::pill(k, "Running", k.c.success.icon) } else { ui::pill(k, "Exited", k.c.text_faint) })
+            .child(copy)
             .child(open)
             .child(restart))
         .child(cmds)
@@ -132,7 +139,9 @@ fn view(s: &App, k: &Kit, i: usize, t: &terminal::Term, dark: bool) -> El {
         .on_layout_tx(move |s: &mut App, [_, _, w, h], _| {
             let [cw, lh] = s.term_cell;
             let grid = (((h - 20.0) / lh).floor().max(2.0) as u16, ((w - 20.0) / cw).floor().max(10.0) as u16);
-            s.term_grid = grid;
+            if s.term_grid != grid {
+                s.term_grid = grid;
+            }
             if let Some(t) = s.data.repos.get(i).and_then(|r| s.terms.get_mut(&r.full_name)) {
                 t.resize(grid.0, grid.1);
             }
@@ -155,5 +164,5 @@ fn view(s: &App, k: &Kit, i: usize, t: &terminal::Term, dark: bool) -> El {
     }
     col().w_full().gap(6.0)
         .child(area)
-        .child(text("Click the terminal to type. Paste with Ctrl/⌘+V; Ctrl+C stops the running command.").font(k.ty.text_small).color(k.c.text_faint))
+        .child(text("Click the terminal to type. Paste with Ctrl/⌘+V; Ctrl+C stops the running command; Copy screen copies what is shown.").font(k.ty.text_small).color(k.c.text_faint))
 }

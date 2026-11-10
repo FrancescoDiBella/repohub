@@ -30,8 +30,12 @@ pub fn key_bytes(ev: &rune::KeyEvent) -> Option<Vec<u8>> {
     let app = |s: &str| Some(s.as_bytes().to_vec());
     match &ev.key {
         Key::Text(t) if m.ctrl && !m.alt && t.len() == 1 => ctrl_byte(t.chars().next()?),
-        Key::Text(t) if m.alt => Some([b"\x1b".as_slice(), t.as_bytes()].concat()),
+        // Alt+letter is Meta (ESC prefix). Any other character typed with Alt/Option or AltGr is
+        // just that character: @ # [ ] { } on Italian, German and other layouts.
+        Key::Text(t) if m.alt && t.len() == 1 && t.as_bytes()[0].is_ascii_alphanumeric() => Some([b"\x1b".as_slice(), t.as_bytes()].concat()),
         Key::Text(t) => Some(t.as_bytes().to_vec()),
+        // Off macOS, Ctrl+V pastes (the app's paste handler types the clipboard into the shell).
+        Key::Command('v' | 'V') if m.cmd && !cfg!(target_os = "macos") => None,
         // Off macOS, Ctrl+letter arrives as Command: those are terminal control keys.
         Key::Command(c) if m.ctrl => ctrl_byte(*c),
         Key::Enter => app("\r"),
@@ -222,6 +226,13 @@ mod native {
             !self.exited.load(Ordering::SeqCst)
         }
 
+        /// The text on screen, one line per row, without trailing spaces or blank lines.
+        pub fn text(&self) -> String {
+            let Ok(p) = self.parser.lock() else { return String::new() };
+            let lines: Vec<String> = p.screen().contents().lines().map(|l| l.trim_end().to_owned()).collect();
+            lines.join("\n").trim_end().to_owned()
+        }
+
         /// The current screen, as runs of same-looking cells.
         pub fn screen(&self, dark: bool) -> Screen {
             let Ok(p) = self.parser.lock() else { return Screen::default() };
@@ -301,6 +312,9 @@ impl Term {
     pub fn screen(&self, _: bool) -> Screen {
         Screen::default()
     }
+    pub fn text(&self) -> String {
+        String::new()
+    }
 }
 
 #[cfg(test)]
@@ -318,6 +332,9 @@ mod tests {
         assert_eq!(key_bytes(&ev(Key::Command('c'), true)), Some(vec![3]));
         assert_eq!(key_bytes(&ev(Key::Enter, false)), Some(b"\r".to_vec()));
         assert_eq!(key_bytes(&ev(Key::Up, false)), Some(b"\x1b[A".to_vec()));
+        let alt = |t: &str| KeyEvent { key: Key::Text(t.into()), mods: rune::Mods { alt: true, ..Default::default() } };
+        assert_eq!(key_bytes(&alt("@")), Some(b"@".to_vec()));
+        assert_eq!(key_bytes(&alt("b")), Some(b"\x1bb".to_vec()));
         assert_eq!(indexed(196, true), rgb(0xff0000));
     }
 
@@ -337,6 +354,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         assert!(text.contains("repohub-42"), "screen was:\n{text}");
+        assert!(t.text().contains("repohub-42"));
         assert!(text.contains(dir.to_string_lossy().trim_end_matches('/')), "screen was:\n{text}");
     }
 }
