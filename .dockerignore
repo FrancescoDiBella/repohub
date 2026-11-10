@@ -5,3 +5,5 @@ server/target/
 !.env.example
 web/*
 !web/index.html
+!web/manifest.webmanifest
+!web/icon.svg
