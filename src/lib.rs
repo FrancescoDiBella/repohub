@@ -30,6 +30,7 @@ mod notes;
 mod notes_page;
 mod pages;
 mod prefs;
+mod state;
 mod terminal;
 mod terminal_page;
 mod ui;
@@ -41,7 +42,7 @@ use config::Config;
 pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 use model::{Data, Detail, PullState};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
     Overview,
     Repos,
@@ -52,37 +53,34 @@ pub enum Page {
     Settings,
 }
 
-#[derive(Clone, PartialEq, Eq)]
-pub enum Status {
-    /// Showing the sample data (no configuration, demo mode or web build).
-    Sample,
-    Loading,
-    Ready,
-    Error(String),
-}
+pub use state::Status;
+use state::{Load, Refresh, RepoFilter, RepoSort, RepoTab, Save, Theme, Toast, ToastKind};
 
 pub struct App {
     sidebar: PaneState,
     page: Page,
-    filter: usize,
-    tab: usize,
-    pr_filter: usize,
+    filter: RepoFilter,
+    /// The section of the repository page. Change it with `set_tab`, which runs what a section
+    /// needs on entry and tidies up the one it leaves.
+    tab: RepoTab,
+    /// The Pull requests page shows the pull requests in this state.
+    pr_filter: PullState,
     search: TextEdit,
-    /// The theme picked in the app: `None` follows the system.
-    theme: Option<bool>,
-    /// How the Repositories page is ordered: an index into `pages::SORTS`.
-    sort: usize,
+    theme: Theme,
+    sort: RepoSort,
     /// Counts toasts, so a toast's timer only hides its own message.
     toast_id: u64,
     pinned_open: bool,
-    toast: Option<String>,
+    toast: Option<Toast>,
     cfg: Arc<Config>,
     data: Data,
-    details: HashMap<String, Detail>,
+    /// Repository details by full name; a missing entry hasn't been asked for.
+    details: HashMap<String, Load<Detail>>,
+    /// Where the data comes from. Change it with `set_status`.
     status: Status,
     handle: Option<AppHandle<App>>,
     // Notes (Excalidraw drawings), keyed by repository full name.
-    branches: HashMap<String, Result<Vec<String>, String>>,
+    branches: HashMap<String, Load<Vec<String>>>,
     note_branch: HashMap<String, String>,
     notes: HashMap<(String, String), notes::NotesView>,
     note_name: TextEdit,
@@ -106,9 +104,61 @@ pub struct App {
 }
 
 impl App {
+    /// Opens a page. Leaving a repository's section closes what belonged to it.
     fn go(&mut self, p: Page) {
+        if self.page != p {
+            state::trace("page", &self.page, &p);
+            self.leave_tab();
+        }
         self.page = p;
         self.toast = None;
+    }
+
+    /// Tidies up the repository section on screen before another one (or another page) shows:
+    /// the open drawing is closed (its last edits are written first), and pending confirmations
+    /// and error messages don't follow you to the next place.
+    fn leave_tab(&mut self) {
+        self.flush_board();
+        self.board = None;
+        self.confirm_delete = None;
+        self.term_error = None;
+    }
+
+    /// Switches the repository page of repository `i` to `tab`.
+    fn set_tab(&mut self, i: usize, tab: RepoTab) {
+        if self.tab != tab {
+            state::trace("tab", &self.tab, &tab);
+            self.leave_tab();
+        }
+        self.tab = tab;
+        match tab {
+            RepoTab::Notes => self.load_notes(i),
+            RepoTab::Terminal => self.open_terminal(i),
+            _ => {}
+        }
+    }
+
+    fn set_status(&mut self, status: Status) {
+        if self.status != status {
+            state::trace("status", &self.status.name(), &status.name());
+        }
+        self.status = status;
+    }
+
+    /// True when the board editor is on screen (and so takes its keyboard shortcuts).
+    fn editing_board(&self) -> bool {
+        self.board.is_some() && self.tab == RepoTab::Notes && matches!(self.page, Page::Repo(_))
+    }
+
+    /// Who owns the account setting: the environment, nobody yet, or the form in Settings.
+    fn account(&self) -> state::Account {
+        if self.cfg.account_locked {
+            state::Account::Locked
+        } else if self.cfg.live() {
+            state::Account::SignedIn
+        } else {
+            state::Account::SignedOut
+        }
     }
 
     /// Saves the account typed in Settings and loads its data. An empty token field keeps the
@@ -143,12 +193,12 @@ impl App {
         }
         if self.cfg.live() {
             self.data = Data::default();
-            self.status = Status::Ready;
+            self.set_status(Status::Starting);
             self.refresh();
             self.notify("Account saved. Loading your repositories…");
         } else {
             self.data = Data::sample();
-            self.status = Status::Sample;
+            self.set_status(Status::Sample);
             self.notify("Signed out. Showing the sample data.");
         }
     }
@@ -156,20 +206,30 @@ impl App {
     #[cfg(target_arch = "wasm32")]
     fn save_account(&mut self, _: bool) {}
 
-    /// Picks the theme (`None`: follow the system) and remembers it.
-    fn set_theme(&mut self, theme: Option<bool>) {
+    /// Picks the theme and remembers it.
+    fn set_theme(&mut self, theme: Theme) {
+        state::trace("theme", &self.theme, &theme);
         self.theme = theme;
         prefs::save_theme(theme);
     }
 
     /// Shows a short message at the bottom of the window; it goes away after a few seconds.
     fn notify(&mut self, msg: impl Into<String>) {
-        self.toast = Some(msg.into());
+        self.show_toast(msg.into(), ToastKind::Done, 4500);
+    }
+
+    /// Like `notify`, for something that went wrong: marked as a problem and shown longer.
+    fn notify_problem(&mut self, msg: impl Into<String>) {
+        self.show_toast(msg.into(), ToastKind::Problem, 8000);
+    }
+
+    fn show_toast(&mut self, text: String, kind: ToastKind, ms: u32) {
         self.toast_id += 1;
         let id = self.toast_id;
+        self.toast = Some(Toast { id, text, kind });
         if let Some(h) = self.handle.clone() {
-            net::spawn(h, || net::sleep(4500), move |s: &mut App, _| {
-                if s.toast_id == id {
+            net::spawn(h, move || net::sleep(ms), move |s: &mut App, _| {
+                if s.toast.as_ref().is_some_and(|t| t.id == id) {
                     s.toast = None;
                 }
             });
@@ -177,17 +237,17 @@ impl App {
     }
 
     fn open(&mut self, i: usize) {
-        self.tab = 0;
         self.go(Page::Repo(i));
+        self.set_tab(i, RepoTab::Code);
         self.load_detail(i);
     }
 
     /// Reloads everything from GitHub in the background.
     fn refresh(&mut self) {
-        if !self.cfg.live() || self.status == Status::Loading {
+        if !self.cfg.live() || !self.status.can_load() {
             return;
         }
-        self.status = Status::Loading;
+        self.set_status(Status::Loading);
         if let Some(h) = self.handle.clone() {
             let cfg = self.cfg.clone();
             net::spawn(h, move || async move { github::load_all(&cfg).await }, |s: &mut App, r| s.apply(r));
@@ -199,12 +259,12 @@ impl App {
             Ok(d) => {
                 self.data = d;
                 self.details.clear();
-                self.status = Status::Ready;
+                self.set_status(Status::Ready);
                 if let Page::Repo(i) = self.page {
                     if i < self.data.repos.len() { self.load_detail(i) } else { self.page = Page::Repos }
                 }
             }
-            Err(e) => self.status = Status::Error(e),
+            Err(e) => self.set_status(Status::Failed(e)),
         }
     }
 
@@ -213,18 +273,18 @@ impl App {
         let full = r.full_name.clone();
         if self.data.sample {
             let d = model::sample_detail(r);
-            self.details.insert(full, d);
+            self.details.insert(full, Load::Ready(d));
             return;
         }
         if self.details.contains_key(&full) {
             return;
         }
-        self.details.insert(full.clone(), Detail { loading: true, ..Default::default() });
+        self.details.insert(full.clone(), Load::Loading);
         if let Some(h) = self.handle.clone() {
             let cfg = self.cfg.clone();
             let key = full.clone();
             net::spawn(h, move || async move { github::load_detail(&cfg, &full).await }, move |s: &mut App, d| {
-                s.details.insert(key, d);
+                s.details.insert(key, Load::Ready(d));
             });
         }
     }
@@ -250,7 +310,7 @@ impl App {
                         r.starred = !on;
                         r.stars = if on { r.stars.saturating_sub(1) } else { r.stars + 1 };
                     }
-                    s.notify(format!("Couldn't change the star: {e}"));
+                    s.notify_problem(format!("Couldn't change the star: {e}"));
                 }
             });
         }
@@ -272,24 +332,23 @@ impl App {
         let default = self.data.repos[i].branch.clone();
         let Some(h) = self.handle.clone() else { return };
         if !self.branches.contains_key(&full) {
-            self.branches.insert(full.clone(), Ok(Vec::new()));
+            self.branches.insert(full.clone(), Load::Loading);
             let (cfg, f) = (self.cfg.clone(), full.clone());
             let key = full.clone();
             net::spawn(h.clone(), move || async move { github::branches(&cfg, &f, &default).await }, move |s: &mut App, r| {
-                s.branches.insert(key, r);
+                s.branches.insert(key, r.into());
             });
         }
         let k = (full.clone(), branch.clone());
-        self.notes.entry(k.clone()).or_default().loading = true;
+        self.notes.entry(k.clone()).or_default().state = Refresh::Loading;
         net::spawn(h, move || async move { notes::list(&full, &branch).await }, move |s: &mut App, r| {
             let v = s.notes.entry(k).or_default();
-            v.loading = false;
             match r {
                 Ok(items) => {
                     v.items = items;
-                    v.error = None;
+                    v.state = Refresh::Fresh;
                 }
-                Err(e) => v.error = Some(e),
+                Err(e) => v.state = Refresh::Failed(e),
             }
         });
     }
@@ -309,7 +368,7 @@ impl App {
         net::spawn(h, move || async move { notes::delete(&full, &branch, &name).await }, move |s: &mut App, r| {
             match r {
                 Ok(()) => s.notify("Drawing deleted"),
-                Err(e) => s.notify(e),
+                Err(e) => s.notify_problem(e),
             }
             s.load_notes(i);
         });
@@ -323,44 +382,62 @@ impl App {
             self.board = Some(b);
             return;
         }
-        b.save = board::SaveState::Loading;
+        b.save = Save::Loading;
         self.board = Some(b);
         let Some(h) = self.handle.clone() else { return };
         net::spawn(h, move || async move { notes::load(&full, &branch, &name).await }, |s: &mut App, r| {
             let Some(b) = s.board.as_mut() else { return };
-            match r {
-                Ok(Some(json)) => match b.load_json(&json) {
-                    Ok(()) => b.save = board::SaveState::Saved,
-                    Err(e) => b.save = board::SaveState::Error(e),
-                },
-                Ok(None) => b.save = board::SaveState::Saved,
-                Err(e) => b.save = board::SaveState::Error(e),
+            let loaded = match r {
+                Ok(Some(json)) => b.load_json(&json),
+                Ok(None) => Ok(()),
+                Err(e) => Err(e),
+            };
+            b.save.loaded(loaded);
+        });
+    }
+
+    /// The open drawing changed: write it, or queue the write behind the one that is running
+    /// (see [`Save`]). One write runs at a time, so an older one can't land after a newer one.
+    fn save_board(&mut self) {
+        if self.board.as_mut().is_some_and(|b| b.save.edit()) {
+            self.write_board();
+        }
+    }
+
+    fn write_board(&mut self) {
+        let Some(b) = self.board.as_ref() else { return };
+        let (repo, branch, name, json) = (b.repo.clone(), b.branch.clone(), b.name.clone(), b.to_json());
+        let Some(h) = self.handle.clone() else { return };
+        let id = (repo.clone(), branch.clone(), name.clone());
+        net::spawn(h, move || async move { notes::save(&repo, &branch, &name, json).await }, move |s: &mut App, r| {
+            // Only the drawing this write belongs to hears about it.
+            let same = s.board.as_ref().is_some_and(|b| (b.repo.as_str(), b.branch.as_str(), b.name.as_str()) == (id.0.as_str(), id.1.as_str(), id.2.as_str()));
+            if same && s.board.as_mut().is_some_and(|b| b.save.written(r)) {
+                s.write_board();
             }
         });
     }
 
-    /// Saves the open drawing in the background.
-    fn save_board(&mut self) {
-        let Some(b) = self.board.as_mut() else { return };
-        if b.save == board::SaveState::Loading {
+    /// Before the editor goes away: edits still waiting behind a running write (or after a failed
+    /// one) are written now.
+    fn flush_board(&mut self) {
+        let Some(b) = self.board.as_ref() else { return };
+        if !b.save.pending() {
             return;
         }
-        b.save = board::SaveState::Saving;
         let (repo, branch, name, json) = (b.repo.clone(), b.branch.clone(), b.name.clone(), b.to_json());
-        let Some(h) = self.handle.clone() else { return };
-        net::spawn(h, move || async move { notes::save(&repo, &branch, &name, json).await }, |s: &mut App, r| {
-            if let Some(b) = s.board.as_mut() {
-                b.save = match r {
-                    Ok(()) if b.save == board::SaveState::Saving => board::SaveState::Saved,
-                    Ok(()) => b.save.clone(),
-                    Err(e) => board::SaveState::Error(e),
-                };
-            }
-        });
+        if let Some(h) = self.handle.clone() {
+            net::spawn(h, move || async move { notes::save(&repo, &branch, &name, json).await }, |s: &mut App, r| {
+                if let Err(e) = r {
+                    s.notify_problem(format!("The last change to the drawing wasn't saved: {e}"));
+                }
+            });
+        }
     }
 
     /// Closes the editor and refreshes the list it came from.
     fn close_board(&mut self, i: usize) {
+        self.flush_board();
         self.board = None;
         self.load_notes(i);
     }
@@ -449,7 +526,7 @@ impl App {
     /// Pastes into the terminal of the repository on screen, when its Terminal tab is open.
     fn paste(&mut self, text: &str) -> bool {
         let Page::Repo(i) = self.page else { return false };
-        if self.tab != pages::TERMINAL_TAB {
+        if self.tab != RepoTab::Terminal {
             return false;
         }
         match self.data.repos.get(i).and_then(|r| self.terms.get_mut(&r.full_name)) {
@@ -474,19 +551,19 @@ fn init() -> App {
     let mut s = App {
         sidebar: PaneState::new(248.0).range(180.0, 360.0),
         page: Page::Overview,
-        filter: 0,
-        tab: 0,
-        pr_filter: 0,
+        filter: RepoFilter::All,
+        tab: RepoTab::Code,
+        pr_filter: PullState::Open,
         search: TextEdit::new(""),
         theme: prefs::load_theme().unwrap_or(cfg.theme),
-        sort: 0,
+        sort: RepoSort::Recent,
         toast_id: 0,
         pinned_open: true,
         toast: None,
         // The web build waits for repohub-server's config.json before choosing (see `start`).
         data: if live || cfg!(target_arch = "wasm32") { Data::default() } else { Data::sample() },
         details: HashMap::new(),
-        status: if live || cfg!(target_arch = "wasm32") { Status::Loading } else { Status::Sample },
+        status: if live || cfg!(target_arch = "wasm32") { Status::Starting } else { Status::Sample },
         handle: None,
         branches: HashMap::new(),
         note_branch: HashMap::new(),
@@ -508,13 +585,14 @@ fn init() -> App {
     // `REPOHUB_BLOCKING=1` loads synchronously before the first frame (headless snapshots).
     #[cfg(not(target_arch = "wasm32"))]
     if live && std::env::var("REPOHUB_BLOCKING").is_ok_and(|v| v == "1") {
+        s.set_status(Status::Loading);
         let r = pollster::block_on(github::load_all(&s.cfg));
         s.apply(r);
         if let Some(i) = arg("page").filter(|p| p == "repo").map(|_| 0)
             && let Some(r) = s.data.repos.get(i)
         {
             let full = r.full_name.clone();
-            s.details.insert(full.clone(), pollster::block_on(github::load_detail(&s.cfg, &full)));
+            s.details.insert(full.clone(), Load::Ready(pollster::block_on(github::load_detail(&s.cfg, &full))));
         }
     }
     // `-- page repos|repo|pulls|issues|actions|settings` opens a page (for headless stills).
@@ -530,7 +608,8 @@ fn init() -> App {
     if s.data.sample && matches!(s.page, Page::Repo(_)) {
         s.load_detail(0);
     }
-    if let Some(t) = arg("tab").and_then(|t| t.parse().ok()) {
+    // `-- tab notes` (a name or a number) picks the repository page's section.
+    if let Some(t) = arg("tab").and_then(|t| RepoTab::parse(&t)) {
         s.tab = t;
     }
     if let Some(q) = arg("search") {
@@ -609,8 +688,8 @@ fn title(s: &App) -> String {
 /// A banner above the page for loading, errors and sample data.
 fn banner(s: &App, k: &Kit) -> Option<El> {
     let (msg, tint, action) = match &s.status {
-        Status::Loading => ("Loading data from GitHub…".to_owned(), k.c.info.icon, false),
-        Status::Error(e) => (e.clone(), k.c.danger.icon, true),
+        Status::Starting | Status::Loading => ("Loading data from GitHub…".to_owned(), k.c.info.icon, false),
+        Status::Failed(e) => (e.clone(), k.c.danger.icon, true),
         Status::Sample if !s.cfg.demo && cfg!(not(target_arch = "wasm32")) => ("This is sample data. Connect your GitHub account to see your repositories.".to_owned(), k.c.warning.icon, false),
         Status::Sample if !s.cfg.demo => ("Sample data. To see your repositories, create a .env file with GITHUB_USER or GITHUB_TOKEN (see .env.example) and run RepoHub with Docker or as the desktop app.".to_owned(), k.c.warning.icon, false),
         _ => return None,
@@ -621,10 +700,7 @@ fn banner(s: &App, k: &Kit) -> Option<El> {
         .child(ui::ico(if action { &icons::CROSS } else { &icons::BELL }, 15.0, tint))
         .child(text(msg).font(k.ty.small).color(k.c.text_base).wrap().grow(1.0).shrink());
     if action {
-        r = r.child(rune_kit::Button::new("Retry").control_size(ControlSize::Small).on_press(|s: &mut App| {
-            s.status = Status::Ready;
-            s.refresh();
-        }).build(k).key("retry"));
+        r = r.child(rune_kit::Button::new("Retry").control_size(ControlSize::Small).on_press(|s: &mut App| s.refresh()).build(k).key("retry"));
     }
     if connect {
         r = r.child(rune_kit::Button::new("Connect").variant(rune_kit::ButtonVariant::Submit).control_size(ControlSize::Small)
@@ -634,7 +710,8 @@ fn banner(s: &App, k: &Kit) -> Option<El> {
 }
 
 fn view(s: &App, cx: &mut Cx<App>) -> El {
-    let dark = s.theme.unwrap_or_else(|| cx.system_dark());
+    let system_dark = cx.system_dark();
+    let dark = s.theme.is_dark(system_dark);
     let k = kit(dark);
     let content = match s.page {
         Page::Overview => pages::overview(s, &k),
@@ -655,23 +732,28 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
     let mut main = col().w_full().h_full().shrink().fill(k.c.page)
         .child(col().key("page").w_full().h_full().shrink().scroll(ScrollSpec { stick_bottom: false }).child(page));
     // The toast floats over the page, at the bottom; it leaves by itself or with its button.
-    if let Some(msg) = &s.toast {
+    if let Some(toast) = &s.toast {
+        let (icon, tint) = match toast.kind {
+            ToastKind::Done => (&icons::CHECK, k.c.success.icon),
+            ToastKind::Problem => (&icons::CROSS, k.c.danger.icon),
+        };
         let close = IconButton::new(&icons::CROSS).variant(IconButtonVariant::GhostMuted).label("Dismiss")
             .on_press(|s: &mut App| s.toast = None).build(&k).key("toast-close");
         main = main.child(row().pin(Some(16.0), None, Some(16.0), Some(20.0)).center()
             .child(row().key("toast").gap(10.0).pl(14.0).pr(6.0).py(6.0).center_y().max_w(560.0).radius(k.radius.lg)
-                .fill(k.c.bg_base).border(1.0, k.c.border_base)
-                .child(ui::ico(&icons::CHECK, 14.0, k.c.success.icon))
-                .child(text(msg.clone()).font(k.ty.small).color(k.c.text_base).wrap().shrink())
+                .fill(k.c.bg_base).border(1.0, if toast.kind == ToastKind::Problem { tint.alpha(0.6) } else { k.c.border_base })
+                .role(if toast.kind == ToastKind::Problem { "alert" } else { "status" })
+                .child(ui::ico(icon, 14.0, tint))
+                .child(text(toast.text.clone()).font(k.ty.small).color(k.c.text_base).wrap().shrink())
                 .child(close)));
     }
     let (theme_icon, theme_help) = if dark { (&icons::SUN, "Switch to the light theme") } else { (&icons::MOON, "Switch to the dark theme") };
     let theme = IconButton::new(theme_icon).variant(IconButtonVariant::GhostMuted).label(theme_help)
-        .help(theme_help).on_press(move |s: &mut App| s.set_theme(Some(!dark))).build(&k).key("theme");
+        .help(theme_help).on_press(move |s: &mut App| s.set_theme(s.theme.toggled(system_dark))).build(&k).key("theme");
     let mut trailing = row().gap(4.0).center_y();
     if s.cfg.live() {
         trailing = trailing.child(IconButton::new(&icons::REFRESH).variant(IconButtonVariant::GhostMuted).label("Refresh")
-            .help("Refresh from GitHub").disabled(s.status == Status::Loading).on_press(|s: &mut App| s.refresh()).build(&k).key("refresh"));
+            .help("Refresh from GitHub").disabled(s.status.is_busy()).on_press(|s: &mut App| s.refresh()).build(&k).key("refresh"));
     }
     let who = if s.data.profile.login.is_empty() { "?".to_owned() } else { s.data.profile.login.clone() };
     let profile_url = format!("https://github.com/{who}");
@@ -723,13 +805,16 @@ fn starts_compact() -> bool {
 
 fn on_key(s: &mut App, ev: &KeyEvent, _: &mut Tx) -> bool {
     // The board editor's shortcuts, unless the text tool's field is taking the keys.
-    if let Some(b) = s.board.as_mut()
-        && b.text_at.is_none()
+    // They apply only while the editor is on screen: an open drawing left behind on another
+    // page must not swallow Delete or ⌘Z there.
+    if s.editing_board()
+        && let Some(b) = s.board.as_mut()
+        && !b.is_typing()
     {
         let changed = match &ev.key {
             rune::Key::Delete | rune::Key::Backspace => b.delete_selected(),
             rune::Key::Escape => {
-                b.selected = None;
+                b.deselect();
                 return true;
             }
             _ if ev.is_command('z') && ev.mods.shift => b.redo(),
@@ -782,9 +867,8 @@ pub fn start() {
     handle.update(move |s: &mut App, _| {
         s.handle = Some(h2.clone());
         #[cfg(not(target_arch = "wasm32"))]
-        if s.status == Status::Loading && s.data.repos.is_empty() {
-            s.status = Status::Ready; // let refresh() start the first load
-            s.refresh();
+        if s.status == Status::Starting {
+            s.refresh(); // the first load, when the app starts with an account
         }
         // The web build asks repohub-server for its configuration; a static host (GitHub Pages)
         // has none, and then shows the sample data.
@@ -795,12 +879,11 @@ pub fn start() {
                     s.theme = cfg.theme;
                 }
                 s.cfg = Arc::new(cfg);
-                s.status = Status::Ready;
                 s.refresh();
             }
             None => {
                 s.data = Data::sample();
-                s.status = Status::Sample;
+                s.set_status(Status::Sample);
             }
         });
     });

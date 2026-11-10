@@ -18,9 +18,9 @@ pub struct Note {
 /// The notes list for one repository and branch.
 #[derive(Clone, Debug, Default)]
 pub struct NotesView {
-    pub loading: bool,
-    pub error: Option<String>,
+    /// What the list last showed; kept on screen while it reloads.
     pub items: Vec<Note>,
+    pub state: crate::state::Refresh,
 }
 
 /// Percent-encodes a query value.

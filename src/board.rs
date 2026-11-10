@@ -146,12 +146,23 @@ fn seg_dist(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
     ((p[0] - cx).powi(2) + (p[1] - cy).powi(2)).sqrt()
 }
 
+/// What the pointer and keyboard are doing on the canvas.
+///
+/// ```text
+/// Idle ──press with a shape tool──▶ Creating ──release──▶ Idle (shape kept, or dropped if tiny)
+/// Idle ──press on a shape (Select)──▶ Moving ──release──▶ Idle
+/// Idle ──press (Text)──▶ Typing ──Enter / another press / another tool──▶ Idle
+/// ```
 #[derive(Clone, Debug, PartialEq)]
-pub enum SaveState {
-    Loading,
-    Saved,
-    Saving,
-    Error(String),
+enum Mode {
+    Idle,
+    /// Dragging out the last element of `elements`.
+    Creating,
+    /// Dragging the selected element; `original` is how it was, `moved` once it really moved
+    /// (and the undo step was recorded).
+    Moving { original: Element, moved: bool },
+    /// Typing a text that will be placed at this point.
+    Typing { at: [f32; 2] },
 }
 
 /// A pointer gesture on the canvas, in the canvas' local points (see [`Drag`]).
@@ -186,11 +197,9 @@ pub struct Board {
     pub color: usize,
     pub filled: bool,
     pub bold: bool,
-    pub save: SaveState,
-    pub text_at: Option<[f32; 2]>,
+    pub save: crate::state::Save,
     pub text_edit: TextEdit,
-    grab: Option<(Element, bool)>,
-    creating: bool,
+    mode: Mode,
     next: u32,
 }
 
@@ -221,11 +230,9 @@ impl Board {
             color: 0,
             filled: false,
             bold: false,
-            save: SaveState::Saved,
-            text_at: None,
+            save: crate::state::Save::Saved,
             text_edit: TextEdit::new(""),
-            grab: None,
-            creating: false,
+            mode: Mode::Idle,
             next: 1,
         }
     }
@@ -279,6 +286,39 @@ impl Board {
         (0..self.elements.len()).rev().find(|&i| self.elements[i].hit(p))
     }
 
+    /// Where the text being typed will go, while the text tool is typing.
+    pub fn typing_at(&self) -> Option<[f32; 2]> {
+        match self.mode {
+            Mode::Typing { at } => Some(at),
+            _ => None,
+        }
+    }
+
+    pub fn is_typing(&self) -> bool {
+        self.typing_at().is_some()
+    }
+
+    /// Starts typing a text at `at` (a point in the board's world).
+    pub fn start_typing(&mut self, at: [f32; 2]) {
+        self.selected = None;
+        self.mode = Mode::Typing { at };
+        self.text_edit = TextEdit::new("");
+        self.text_edit.focused = true;
+    }
+
+    /// Picks a tool. Whatever was in progress (typing, a drag) is dropped.
+    pub fn set_tool(&mut self, tool: Tool) {
+        self.tool = tool;
+        self.mode = Mode::Idle;
+        if tool != Tool::Select {
+            self.selected = None;
+        }
+    }
+
+    pub fn deselect(&mut self) {
+        self.selected = None;
+    }
+
     /// Applies a pointer gesture on the canvas (`d` in the canvas' local points). Returns true
     /// when the drawing changed and should be saved.
     pub fn on_drag(&mut self, d: Gesture) -> bool {
@@ -287,18 +327,15 @@ impl Board {
         let start = [d.start_x * sx, d.start_y * sy];
         match d.phase {
             Phase::Down => {
-                self.text_at = None;
+                self.mode = Mode::Idle;
                 match self.tool {
                     Tool::Select => {
                         self.selected = self.hit(p);
-                        self.grab = self.selected.map(|i| (self.elements[i].clone(), false));
+                        if let Some(i) = self.selected {
+                            self.mode = Mode::Moving { original: self.elements[i].clone(), moved: false };
+                        }
                     }
-                    Tool::Text => {
-                        self.selected = None;
-                        self.text_at = Some(p);
-                        self.text_edit = TextEdit::new("");
-                        self.text_edit.focused = true;
-                    }
+                    Tool::Text => self.start_typing(p),
                     tool => {
                         self.snapshot();
                         let (id, seed) = self.new_id();
@@ -332,13 +369,13 @@ impl Board {
                             seed,
                         });
                         self.selected = None;
-                        self.creating = true;
+                        self.mode = Mode::Creating;
                     }
                 }
                 false
             }
             Phase::Move => {
-                if self.creating {
+                if self.mode == Mode::Creating {
                     if let Some(e) = self.elements.last_mut() {
                         match e.kind {
                             Kind::Arrow | Kind::Line => e.points[1] = [p[0] - e.x, p[1] - e.y],
@@ -357,19 +394,19 @@ impl Board {
                             }
                         }
                     }
-                } else if let (Some(i), Some((orig, moved))) = (self.selected, self.grab.as_mut()) {
+                } else if let (Some(i), Mode::Moving { original, moved }) = (self.selected, &mut self.mode) {
                     let (dx, dy) = (p[0] - start[0], p[1] - start[1]);
                     if !*moved && dx.hypot(dy) > 1.0 {
                         *moved = true;
                         let before = {
                             let mut v = self.elements.clone();
-                            v[i] = orig.clone();
+                            v[i] = original.clone();
                             v
                         };
                         self.undo.push(before);
                         self.redo.clear();
                     }
-                    let (ox, oy) = (orig.x, orig.y);
+                    let (ox, oy) = (original.x, original.y);
                     if let Some(e) = self.elements.get_mut(i) {
                         e.x = ox + dx;
                         e.y = oy + dy;
@@ -378,7 +415,12 @@ impl Board {
                 false
             }
             Phase::Up => {
-                if std::mem::take(&mut self.creating) {
+                // Releasing ends a drag; typing goes on until the text is committed.
+                if self.is_typing() {
+                    return false;
+                }
+                let mode = std::mem::replace(&mut self.mode, Mode::Idle);
+                if mode == Mode::Creating {
                     let Some(e) = self.elements.last_mut() else { return false };
                     let [x0, y0, x1, y1] = e.bbox();
                     let tiny = match e.kind {
@@ -397,14 +439,15 @@ impl Board {
                     self.selected = Some(self.elements.len() - 1);
                     return true;
                 }
-                matches!(self.grab.take(), Some((_, true)))
+                matches!(mode, Mode::Moving { moved: true, .. })
             }
         }
     }
 
-    /// Adds the text being typed at `text_at`. Returns true when something was added.
+    /// Adds the text being typed. Returns true when something was added.
     pub fn commit_text(&mut self) -> bool {
-        let Some(at) = self.text_at.take() else { return false };
+        let Some(at) = self.typing_at() else { return false };
+        self.mode = Mode::Idle;
         let t = self.text_edit.text.trim().to_owned();
         self.text_edit = TextEdit::new("");
         if t.is_empty() {
@@ -667,7 +710,7 @@ pub fn canvas_view<S: 'static>(
         }
         board = board.child(lines);
     }
-    if let Some(at) = b.text_at {
+    if let Some(at) = b.typing_at() {
         let field = text_input(&b.text_edit, TextStyle::new((20.0 * scale).max(10.0), 500.0))
             .single_line().placeholder("Type, then Enter", if dark { Color::WHITE.alpha(0.4) } else { Color::BLACK.alpha(0.35) })
             .color(if dark { hex("#e6edf3") } else { hex(&b_stroke(b)) })
@@ -715,7 +758,15 @@ mod tests {
         assert!(!b.on_drag(drag(Phase::Up, 501.0, 501.0, 500.0, 500.0)));
         assert_eq!(b.elements.len(), 1);
         // Text and arrow, then the Excalidraw round trip.
-        b.text_at = Some([400.0, 400.0]);
+        // A click with the text tool starts typing, and releasing the button keeps it.
+        b.tool = Tool::Text;
+        b.on_drag(drag(Phase::Down, 400.0, 400.0, 400.0, 400.0));
+        assert!(!b.on_drag(drag(Phase::Up, 400.0, 400.0, 400.0, 400.0)));
+        assert_eq!(b.typing_at(), Some([400.0, 400.0]));
+        b.text_edit = TextEdit::new("Hello");
+        b.set_tool(Tool::Select);
+        assert!(!b.is_typing() && !b.commit_text(), "picking a tool drops the text being typed");
+        b.start_typing([400.0, 400.0]);
         b.text_edit = TextEdit::new("Hello");
         assert!(b.commit_text());
         b.tool = Tool::Arrow;

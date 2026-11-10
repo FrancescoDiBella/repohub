@@ -5,6 +5,7 @@ use rune_kit::{Badge, BadgeVariant, Button, ButtonVariant, ControlSize, Kit, Seg
 use crate::lists::{issue_row, pull_row, run_row};
 use crate::model::{PullState, Repo, lang_hue};
 use crate::ui::{self, panel, panel_head, rule};
+use crate::state::{Load, RepoFilter, RepoSort, RepoTab};
 use crate::{App, Page, icons};
 
 pub fn heading(k: &Kit, title: &str, subtitle: &str, action: Option<El>) -> El {
@@ -88,36 +89,28 @@ fn compact_repo(k: &Kit, i: usize, r: &Repo) -> El {
 
 // ---------------------------------------------------------------- repositories
 
-pub const FILTERS: [&str; 4] = ["All", "Public", "Private", "Fork"];
-pub const SORTS: [&str; 3] = ["Recent", "Stars", "Name"];
 
 pub fn repos(s: &App, k: &Kit) -> El {
     let q = s.search.text.to_lowercase();
     let all = &s.data.repos;
     let shown: Vec<usize> = (0..all.len()).filter(|&i| {
         let r = &all[i];
-        let f = match s.filter {
-            1 => !r.private,
-            2 => r.private,
-            3 => r.fork,
-            _ => true,
-        };
-        f && (q.is_empty() || r.name.to_lowercase().contains(&q) || r.description.to_lowercase().contains(&q) || r.topics.iter().any(|t| t.contains(&q)))
+        s.filter.matches(r.private, r.fork) && (q.is_empty() || r.name.to_lowercase().contains(&q) || r.description.to_lowercase().contains(&q) || r.topics.iter().any(|t| t.contains(&q)))
     }).collect();
     let mut shown = shown;
     match s.sort {
-        1 => shown.sort_by(|a, b| all[*b].stars.cmp(&all[*a].stars)),
-        2 => shown.sort_by_key(|i| all[*i].name.to_lowercase()),
-        _ => {} // GitHub's order: most recently pushed first
+        RepoSort::Recent => {} // GitHub's order: most recently pushed first
+        RepoSort::Stars => shown.sort_by(|a, b| all[*b].stars.cmp(&all[*a].stars)),
+        RepoSort::Name => shown.sort_by_key(|i| all[*i].name.to_lowercase()),
     }
     let sort = row().gap(8.0).center_y()
         .child(ui::ico(&icons::SORT, 14.0, k.c.icon_muted))
-        .child(SegmentedControl::new(&SORTS, Some(s.sort)).label("Sort by").fit()
-            .on_pick(|s: &mut App, i, _| s.sort = i).build(k).key("sort"));
+        .child(SegmentedControl::new(&RepoSort::LABELS, Some(s.sort.index())).label("Sort by").fit()
+            .on_pick(|s: &mut App, i, _| s.sort = RepoSort::from_index(i)).build(k).key("sort"));
     let search = TextInput::new(&s.search).placeholder("Search by name, description or topic…").leading_icon(k.glyph.search)
         .on_edit(|s: &mut App| &mut s.search).build(k).key("search").grow(1.0).min_w(200.0);
-    let seg = SegmentedControl::new(&FILTERS, Some(s.filter)).label("Filter").fit()
-        .on_pick(|s: &mut App, i, _| s.filter = i).build(k).key("filter");
+    let seg = SegmentedControl::new(&RepoFilter::LABELS, Some(s.filter.index())).label("Filter").fit()
+        .on_pick(|s: &mut App, i, _| s.filter = RepoFilter::from_index(i)).build(k).key("filter");
     let mut list = col().w_full().gap(12.0);
     for &i in &shown {
         list = list.child(repo_card(k, i, &all[i]));
@@ -179,8 +172,6 @@ fn repo_card(k: &Kit, i: usize, r: &Repo) -> El {
 
 // ---------------------------------------------------------------- repository detail
 
-pub const TABS: [&str; 7] = ["Code", "Issues", "Pull requests", "Actions", "Notes", "Terminal", "Settings"];
-pub const TERMINAL_TAB: usize = 5;
 
 pub fn repo_detail(s: &App, k: &Kit, i: usize) -> El {
     let r = &s.data.repos[i];
@@ -198,26 +189,19 @@ pub fn repo_detail(s: &App, k: &Kit, i: usize) -> El {
             .child(Button::new(format!("Fork · {}", r.forks)).icon(&icons::FORK).control_size(ControlSize::Small)
                 .on_press_tx({ let u = format!("{}/fork", r.url); move |_: &mut App, tx| { let _ = tx.open_url(&u); } }).build(k).key("fork"))
             .child(star_button(k, i, r, true, "detail-star".into())));
-    let tabs = SegmentedControl::new(&TABS, Some(s.tab)).label("Section").fit().on_pick(move |s: &mut App, t, _| {
-        s.tab = t;
-        if t == 4 {
-            s.load_notes(i);
-        }
-        if t == TERMINAL_TAB {
-            s.open_terminal(i);
-        }
-    }).build(k).key("tabs");
+    let tabs = SegmentedControl::new(&RepoTab::LABELS, Some(s.tab.index())).label("Section").fit()
+        .on_pick(move |s: &mut App, t, _| s.set_tab(i, RepoTab::from_index(t))).build(k).key("tabs");
     // Seven sections don't fit a phone's width: there the strip scrolls sideways.
     let tabs = if s.compact { row().w_full().scroll_x().child(tabs) } else { tabs };
     let in_repo = |name: &str| name.eq_ignore_ascii_case(&r.full_name) || name.eq_ignore_ascii_case(&r.name);
     let body = match s.tab {
-        0 => code_tab(s, k, r),
-        1 => list_of(k, "Open issues", s.data.issues.iter().filter(|x| in_repo(&x.repo)).map(|x| issue_row(k, x)).collect()),
-        2 => list_of(k, "Pull requests", s.data.pulls.iter().filter(|x| in_repo(&x.repo)).map(|x| pull_row(k, x, s.compact)).collect()),
-        3 => list_of(k, "Workflow runs", s.data.runs.iter().filter(|x| in_repo(&x.repo)).map(|x| run_row(k, x, s.compact)).collect()),
-        4 => crate::notes_page::notes_tab(s, k, i),
-        TERMINAL_TAB => crate::terminal_page::terminal_tab(s, k, i, k.c.page.r + k.c.page.g + k.c.page.b < 1.5),
-        _ => crate::lists::repo_settings(s, k, r),
+        RepoTab::Code => code_tab(s, k, r),
+        RepoTab::Issues => list_of(k, "Open issues", s.data.issues.iter().filter(|x| in_repo(&x.repo)).map(|x| issue_row(k, x)).collect()),
+        RepoTab::Pulls => list_of(k, "Pull requests", s.data.pulls.iter().filter(|x| in_repo(&x.repo)).map(|x| pull_row(k, x, s.compact)).collect()),
+        RepoTab::Actions => list_of(k, "Workflow runs", s.data.runs.iter().filter(|x| in_repo(&x.repo)).map(|x| run_row(k, x, s.compact)).collect()),
+        RepoTab::Notes => crate::notes_page::notes_tab(s, k, i),
+        RepoTab::Terminal => crate::terminal_page::terminal_tab(s, k, i, k.c.page.r + k.c.page.g + k.c.page.b < 1.5),
+        RepoTab::Settings => crate::lists::repo_settings(s, k, r),
     };
     col().w_full().gap(16.0).child(back).child(header).child(tabs).child(body)
 }
@@ -236,7 +220,8 @@ fn list_of(k: &Kit, title: &str, rows: Vec<El>) -> El {
 }
 
 fn code_tab(s: &App, k: &Kit, r: &Repo) -> El {
-    let detail = s.details.get(&r.full_name);
+    let load = s.details.get(&r.full_name);
+    let detail = load.and_then(Load::ready);
     let branch = Button::new(r.branch.clone()).icon(&icons::BRANCH).control_size(ControlSize::Small)
         .on_press_tx({ let u = format!("{}/branches", r.url); move |_: &mut App, tx| { let _ = tx.open_url(&u); } }).build(k).key("branch");
     let clone_url = format!("{}.git", r.url);
@@ -244,10 +229,12 @@ fn code_tab(s: &App, k: &Kit, r: &Repo) -> El {
         .on_press_tx(move |s: &mut App, tx| { tx.copy(clone_url.clone()); s.notify("Clone URL copied"); })
         .build(k).key("clone");
     let mut files = panel(k);
-    match detail {
+    let loading = load.is_some_and(Load::is_loading);
+    match load {
         None => files = files.child(col().w_full().padding(24.0).items_center().child(text("Open the repository to load its files").font(k.ty.ui).color(k.c.text_muted))),
-        Some(d) if d.loading => files = files.child(col().w_full().padding(24.0).items_center().child(text("Loading files…").font(k.ty.ui).color(k.c.text_muted))),
-        Some(d) => {
+        Some(Load::Loading) => files = files.child(col().w_full().padding(24.0).items_center().child(text("Loading files…").font(k.ty.ui).color(k.c.text_muted))),
+        Some(Load::Failed(e)) => files = files.child(col().w_full().padding(16.0).child(text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap())),
+        Some(Load::Ready(d)) => {
             if let Some(c) = &d.commit {
                 files = files.child(row().w_full().px(16.0).py(10.0).gap(10.0).center_y().fill(k.c.layer_01).radius(k.radius.lg)
                     .child(ui::user(k, &c.author, 22.0))
@@ -276,7 +263,7 @@ fn code_tab(s: &App, k: &Kit, r: &Repo) -> El {
         Some(src) => rune_kit::Markdown::new(crate::markdown::prepare(src, &r.full_name, &r.branch))
             .on_link_tx(|_: &mut App, url: &str, tx| { let _ = tx.open_url(url); })
             .build(k).w_full(),
-        None => text(if detail.is_some_and(|d| d.loading) { "Loading…" } else { "This repository has no README." }).font(k.ty.ui).color(k.c.text_muted),
+        None => text(if loading { "Loading…" } else { "This repository has no README." }).font(k.ty.ui).color(k.c.text_muted),
     };
     let readme_panel = panel(k)
         .child(panel_head(k, "README", Some(ui::ico(&icons::BOOK, 16.0, k.c.icon_muted))))

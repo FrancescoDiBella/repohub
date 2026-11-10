@@ -92,7 +92,7 @@ pub struct Commit {
 /// What a repository's Code tab shows; loaded when the repository is opened.
 #[derive(Clone, Debug, Default)]
 pub struct Detail {
-    pub loading: bool,
+    /// Something couldn't be loaded; what could is still here.
     pub error: Option<String>,
     /// (name, is directory)
     pub files: Vec<(String, bool)>,
@@ -205,7 +205,6 @@ pub fn duration(secs: i64) -> String {
 pub fn sample_detail(r: &Repo) -> Detail {
     let files = [(".github", true), ("bunny", true), ("css", true), ("js", true), ("repohub", true), ("README.md", false), ("index.html", false)];
     Detail {
-        loading: false,
         error: None,
         files: files.iter().map(|(n, d)| (n.to_string(), *d)).collect(),
         readme: Some(format!("# {}\n\n{}\n\n## Quick start\n\ngit clone {}.git", r.name, r.description, r.url)),

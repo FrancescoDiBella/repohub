@@ -3,23 +3,15 @@
 //! The desktop app keeps them in `<data dir>/prefs.json`, the web build in the browser's
 //! `localStorage`. A saved choice wins over `REPOHUB_THEME`, which is only the default.
 
-/// The saved theme: `None` when nothing was chosen yet, `Some(None)` for "follow the system",
-/// `Some(Some(true))` for dark.
-pub fn load_theme() -> Option<Option<bool>> {
-    match read()?.as_str() {
-        "dark" => Some(Some(true)),
-        "light" => Some(Some(false)),
-        "system" => Some(None),
-        _ => None,
-    }
+use crate::state::Theme;
+
+/// The saved theme; `None` when nothing was chosen yet (then `REPOHUB_THEME` decides).
+pub fn load_theme() -> Option<Theme> {
+    Theme::parse(&read()?)
 }
 
-pub fn save_theme(theme: Option<bool>) {
-    write(match theme {
-        Some(true) => "dark",
-        Some(false) => "light",
-        None => "system",
-    });
+pub fn save_theme(theme: Theme) {
+    write(theme.name());
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -72,10 +64,10 @@ mod tests {
         // SAFETY: the lock keeps other environment-changing tests out.
         unsafe { std::env::set_var("REPOHUB_DATA_DIR", &dir) };
         assert_eq!(load_theme(), None);
-        save_theme(Some(false));
-        assert_eq!(load_theme(), Some(Some(false)));
-        save_theme(None);
-        assert_eq!(load_theme(), Some(None));
+        save_theme(Theme::Light);
+        assert_eq!(load_theme(), Some(Theme::Light));
+        save_theme(Theme::System);
+        assert_eq!(load_theme(), Some(Theme::System));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

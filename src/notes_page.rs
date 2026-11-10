@@ -2,7 +2,8 @@
 use rune::{El, col, el, row, text};
 use rune_kit::{Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, TextInput};
 
-use crate::board::{self, Board, SaveState, Tool};
+use crate::board::{self, Board, Tool};
+use crate::state::{Load, Refresh, Save};
 use crate::notes::{self, valid_name};
 use crate::ui::{self, panel, panel_head, rule};
 use crate::{App, icons};
@@ -27,7 +28,7 @@ pub fn notes_tab(s: &App, k: &Kit, i: usize) -> El {
     let mut picker = row().w_full().gap(6.0).center_y().flex_wrap()
         .child(text("Branch").font(k.ty.small_medium).color(k.c.text_muted).pr(4.0));
     match s.branches.get(&full) {
-        Some(Ok(list)) if !list.is_empty() => {
+        Some(Load::Ready(list)) if !list.is_empty() => {
             for b in list.iter().take(40) {
                 let on = *b == branch;
                 let name = b.clone();
@@ -41,9 +42,11 @@ pub fn notes_tab(s: &App, k: &Kit, i: usize) -> El {
                 picker = picker.child(text(format!("+{} more", list.len() - 40)).font(k.ty.small).color(k.c.text_faint));
             }
         }
-        Some(Err(e)) => picker = picker.child(text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap()),
-        _ => picker = picker.child(text(branch.clone()).font(k.ty.small_medium).color(k.c.text_base))
+        Some(Load::Failed(e)) => picker = picker.child(text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap()),
+        Some(Load::Loading) | None => picker = picker.child(text(branch.clone()).font(k.ty.small_medium).color(k.c.text_base))
             .child(text("Loading branches…").font(k.ty.small).color(k.c.text_faint)),
+        // GitHub listed no branches (an empty repository): the default branch is the only choice.
+        Some(Load::Ready(_)) => picker = picker.child(text(branch.clone()).font(k.ty.small_medium).color(k.c.text_base)),
     }
     // New drawing: a name, then the editor opens in a new tab.
     let name_ok = valid_name(s.note_name.text.trim());
@@ -69,17 +72,17 @@ pub fn notes_tab(s: &App, k: &Kit, i: usize) -> El {
     // The list for this branch.
     let view = s.notes.get(&(full.clone(), branch.clone()));
     let refresh = Button::new("Refresh").icon(&icons::REFRESH).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
-        .disabled(view.is_some_and(|v| v.loading))
+        .disabled(view.is_some_and(|v| v.state == Refresh::Loading))
         .on_press(move |s: &mut App| s.load_notes(i)).build(k).key("notes-refresh");
     let mut list = panel(k).child(panel_head(k, &format!("Drawings on {branch}"), Some(refresh)));
     match view {
         None => list = list.child(rule(k)).child(col().w_full().padding(24.0).items_center().child(text("Loading…").font(k.ty.ui).color(k.c.text_muted))),
-        Some(v) if v.loading && v.items.is_empty() => list = list.child(rule(k)).child(col().w_full().padding(24.0).items_center().child(text("Loading…").font(k.ty.ui).color(k.c.text_muted))),
+        Some(v) if v.state == Refresh::Loading && v.items.is_empty() => list = list.child(rule(k)).child(col().w_full().padding(24.0).items_center().child(text("Loading…").font(k.ty.ui).color(k.c.text_muted))),
         Some(v) => {
-            if let Some(e) = &v.error {
+            if let Refresh::Failed(e) = &v.state {
                 list = list.child(rule(k)).child(col().w_full().padding(16.0).child(text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap()));
             }
-            if v.items.is_empty() && v.error.is_none() {
+            if v.items.is_empty() && v.state == Refresh::Fresh {
                 list = list.child(rule(k)).child(col().w_full().padding(28.0).gap(4.0).items_center()
                     .child(text("No drawings on this branch yet").font(k.ty.ui_medium).color(k.c.text_base))
                     .child(text("Name one above and press New drawing.").font(k.ty.small).color(k.c.text_muted)));
@@ -147,11 +150,7 @@ fn editor(_s: &App, k: &Kit, i: usize, b: &Board) -> El {
         tools = tools.child(ib(tool_icon(t), t.label(), b.tool == t, format!("tool-{}", t.label()))
             .on_press(move |s: &mut App| {
                 if let Some(b) = s.board.as_mut() {
-                    b.tool = t;
-                    b.text_at = None;
-                    if t != Tool::Select {
-                        b.selected = None;
-                    }
+                    b.set_tool(t);
                 }
             }));
     }
@@ -191,10 +190,10 @@ fn editor(_s: &App, k: &Kit, i: usize, b: &Board) -> El {
         .fill(k.c.bg_base).border(1.0, k.c.border_weak)
         .child(tools).child(sep()).child(colors).child(sep()).child(toggles).child(sep()).child(edits);
     let (status, tint) = match &b.save {
-        SaveState::Loading => ("Loading…".to_owned(), k.c.text_muted),
-        SaveState::Saved => ("Saved on this computer".to_owned(), k.c.success.icon),
-        SaveState::Saving => ("Saving…".to_owned(), k.c.text_muted),
-        SaveState::Error(e) => (format!("Not saved: {e}"), k.c.danger.icon),
+        Save::Loading => ("Loading…".to_owned(), k.c.text_muted),
+        Save::Saved => ("Saved on this computer".to_owned(), k.c.success.icon),
+        Save::Saving { .. } => ("Saving…".to_owned(), k.c.text_muted),
+        Save::Failed(e) => (format!("Not saved: {e}"), k.c.danger.icon),
     };
     let head = row().w_full().gap(10.0).center_y().flex_wrap()
         .child(Button::new("Drawings").icon(&icons::BACK).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)

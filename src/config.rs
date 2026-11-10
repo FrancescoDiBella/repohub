@@ -12,7 +12,7 @@ pub struct Config {
     pub api: String,
     pub title: String,
     /// `Some(true)` dark, `Some(false)` light, `None` follows the system.
-    pub theme: Option<bool>,
+    pub theme: crate::state::Theme,
     /// Repository names (or `owner/name`) shown under "Pinned".
     pub pinned: Vec<String>,
     pub include_forks: bool,
@@ -205,11 +205,7 @@ impl Config {
             user: get("GITHUB_USER"),
             api: get("GITHUB_API_URL").unwrap_or_else(|| "https://api.github.com".into()).trim_end_matches('/').to_owned(),
             title: get("REPOHUB_TITLE").unwrap_or_else(|| "RepoHub".into()),
-            theme: match get("REPOHUB_THEME").as_deref() {
-                Some("dark") => Some(true),
-                Some("light") => Some(false),
-                _ => None,
-            },
+            theme: get("REPOHUB_THEME").and_then(|t| crate::state::Theme::parse(&t)).unwrap_or_default(),
             pinned: get("REPOHUB_PINNED").map(|v| v.split(',').map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()).collect()).unwrap_or_default(),
             include_forks: flag(get("REPOHUB_INCLUDE_FORKS"), true),
             include_archived: flag(get("REPOHUB_INCLUDE_ARCHIVED"), false),
@@ -245,11 +241,7 @@ impl Config {
             user: st("user"),
             api: st("api").unwrap_or_else(|| "https://api.github.com".into()),
             title: st("title").unwrap_or_else(|| "RepoHub".into()),
-            theme: match st("theme").as_deref() {
-                Some("dark") => Some(true),
-                Some("light") => Some(false),
-                _ => None,
-            },
+            theme: st("theme").and_then(|t| crate::state::Theme::parse(&t)).unwrap_or_default(),
             pinned: v.get("pinned").and_then(|p| p.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_owned)).collect()).unwrap_or_default(),
             include_forks: bo("includeForks", true),
             include_archived: bo("includeArchived", false),
@@ -274,7 +266,7 @@ mod tests {
         assert_eq!(c.user.as_deref(), Some("octocat"));
         assert!(c.live() && c.token.is_some());
         assert_eq!(c.pinned, vec!["a", "b"]);
-        assert_eq!((c.theme, c.max_repos), (Some(true), 20));
+        assert_eq!((c.theme, c.max_repos), (crate::state::Theme::Dark, 20));
         assert!(!Config::from_json(r#"{"hasToken":false}"#).unwrap().live());
     }
 
