@@ -164,7 +164,11 @@ pub fn settings(s: &App, k: &Kit) -> El {
             crate::state::Orgs::Off => "none: only your own repositories".into(),
             crate::state::Orgs::Only(l) => l.join(", "),
         }),
-        ("Pinned (REPOHUB_PINNED)", if cfg.pinned.is_empty() { "the 3 most recently pushed".into() } else { cfg.pinned.join(", ") }),
+        ("Pinned", match (&s.pins, cfg.pinned.is_empty()) {
+            (Some(p), _) => format!("{} chosen in the app (pin or unpin from a repository)", p.len()),
+            (None, true) => "the 3 most recently pushed (REPOHUB_PINNED is empty)".into(),
+            (None, false) => format!("{} (REPOHUB_PINNED)", cfg.pinned.join(", ")),
+        }),
         ("Notes", if cfg.notes { notes_where() } else { "not available here (needs the desktop app or Docker)".into() }),
         ("Filters", format!("forks {}, archived {}, at most {} repositories", if cfg.include_forks { "yes" } else { "no" }, if cfg.include_archived { "yes" } else { "no" }, cfg.max_repos)),
     ] {

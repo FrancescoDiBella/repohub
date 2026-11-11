@@ -156,6 +156,13 @@ cargo run --release                   # the first build takes a few minutes
 packaging/macos/bundle.sh 0.1.0       # macOS: builds dist/RepoHub.app and the .dmg
 ```
 
+## Pinned repositories
+
+The sidebar's **Pinned** section (also in the status-bar menu) starts with `REPOHUB_PINNED` or,
+without it, the three most recently pushed repositories. Pin or unpin any repository with the pin
+on its card, **Pin** on its page or ⌘K → *Pin …*. The first change starts from what the sidebar
+shows, and your pins are remembered from then on (they win over `REPOHUB_PINNED`).
+
 ## Organizations
 
 The repositories of the organizations you belong to show next to yours, ordered by last push.

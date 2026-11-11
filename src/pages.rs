@@ -136,7 +136,7 @@ pub fn repos(s: &App, k: &Kit) -> El {
     let me = s.data.profile.login.clone();
     let mut list = col().w_full().gap(12.0);
     for &i in &shown {
-        list = list.child(repo_card(k, i, &all[i], !all[i].owner.eq_ignore_ascii_case(&me)));
+        list = list.child(repo_card(k, i, &all[i], !all[i].owner.eq_ignore_ascii_case(&me), s.is_pinned(i)));
     }
     if shown.is_empty() {
         let msg = if all.is_empty() { "No repositories to show" } else { "No repositories match your search" };
@@ -149,6 +149,20 @@ pub fn repos(s: &App, k: &Kit) -> El {
         .child(owners)
         .child(row().w_full().gap(12.0).center_y().flex_wrap().child(search).child(seg).child(sort))
         .child(list)
+}
+
+/// Pins or unpins a repository in the sidebar. `labelled`: a text button (the repository's
+/// page); otherwise an icon (cards).
+fn pin_button(k: &Kit, i: usize, r: &Repo, pinned: bool, labelled: bool) -> El {
+    let (icon, help) = if pinned { (&icons::PIN_ON, "Unpin from the sidebar") } else { (&icons::PIN, "Pin to the sidebar") };
+    let key = format!("pin-btn-{}", r.full_name);
+    if labelled {
+        return Button::new(if pinned { "Pinned" } else { "Pin" }).icon(icon).control_size(ControlSize::Small)
+            .variant(if pinned { ButtonVariant::Contrast } else { ButtonVariant::Neutral })
+            .on_press(move |s: &mut App| s.toggle_pin(i)).build(k).key(key);
+    }
+    rune_kit::IconButton::new(icon).variant(if pinned { rune_kit::IconButtonVariant::Ghost } else { rune_kit::IconButtonVariant::GhostMuted })
+        .label(help).help(help).on_press(move |s: &mut App| s.toggle_pin(i)).build(k).key(key)
 }
 
 fn star_button(k: &Kit, i: usize, r: &Repo, with_count: bool, key: String) -> El {
@@ -165,7 +179,7 @@ fn star_button(k: &Kit, i: usize, r: &Repo, with_count: bool, key: String) -> El
 }
 
 /// A repository in the list; `show_owner` prefixes the name with its organization.
-fn repo_card(k: &Kit, i: usize, r: &Repo, show_owner: bool) -> El {
+fn repo_card(k: &Kit, i: usize, r: &Repo, show_owner: bool, pinned: bool) -> El {
     let vis = if r.private { Badge::new("Private").variant(BadgeVariant::Subtle).build(k) } else { Badge::new("Public").build(k) };
     let mut title = row().gap(8.0).center_y().flex_wrap();
     if show_owner {
@@ -194,7 +208,9 @@ fn repo_card(k: &Kit, i: usize, r: &Repo, show_owner: bool) -> El {
             .child(col().grow(1.0).shrink().gap(6.0)
                 .child(title)
                 .child(text(desc).font(k.ty.ui).color(k.c.text_muted).wrap()))
-            .child(star_button(k, i, r, false, format!("star-{}", r.full_name))))
+            .child(row().gap(4.0).center_y()
+                .child(pin_button(k, i, r, pinned, false))
+                .child(star_button(k, i, r, false, format!("star-{}", r.full_name)))))
         .child(topics)
         .child(foot)
 }
@@ -217,6 +233,7 @@ pub fn repo_detail(s: &App, k: &Kit, i: usize) -> El {
             .child(open_button(k, "Open on GitHub", &r.url, "open-github"))
             .child(Button::new(format!("Fork · {}", r.forks)).icon(&icons::FORK).control_size(ControlSize::Small)
                 .on_press_tx({ let u = format!("{}/fork", r.url); move |_: &mut App, tx| { let _ = tx.open_url(&u); } }).build(k).key("fork"))
+            .child(pin_button(k, i, r, s.is_pinned(i), true))
             .child(star_button(k, i, r, true, "detail-star".into())));
     let tabs = SegmentedControl::new(&RepoTab::LABELS, Some(s.tab.index())).label("Section").fit()
         .on_pick(move |s: &mut App, t, _| s.set_tab(i, RepoTab::from_index(t))).build(k).key("tabs");
