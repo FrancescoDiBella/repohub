@@ -38,6 +38,8 @@ pub enum Command {
     Theme(Theme),
     OpenUrl(String),
     CopyClone(String),
+    CheckUpdate,
+    InstallUpdate,
     /// The Repositories page for one owner.
     Owner(crate::state::OwnerFilter),
 }
@@ -103,6 +105,11 @@ pub fn entries(s: &App) -> Vec<Entry> {
     }
     if s.cfg.live() {
         out.push(Entry { keys: &[MOD, "R"], ..entry("Refresh from GitHub", "Action", &icons::REFRESH, Command::Refresh) });
+    }
+    match &s.update {
+        crate::update::Update::Available(r) => out.push(entry(format!("Install the new version and restart ({})", r.short()), "Update", &icons::REFRESH, Command::InstallUpdate)),
+        u if u.can_check() => out.push(entry("Check for updates", "Update", &icons::REFRESH, Command::CheckUpdate)),
+        _ => {}
     }
     for (t, label) in Theme::ALL.iter().zip(Theme::LABELS) {
         if *t != s.theme {
@@ -210,6 +217,8 @@ pub fn run(s: &mut App, cmd: Command, tx: &mut Tx) {
             let _ = tx.open_url(&u);
         }
         Command::Owner(o) => s.show_owner(o),
+        Command::CheckUpdate => s.check_update(true),
+        Command::InstallUpdate => s.install_update(),
         Command::CopyClone(u) => {
             tx.copy(u);
             s.notify("Clone URL copied");

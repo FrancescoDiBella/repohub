@@ -39,6 +39,7 @@ mod terminal;
 mod terminal_page;
 mod tray;
 mod ui;
+mod update;
 
 use config::Config;
 
@@ -144,6 +145,11 @@ pub struct App {
     tick_at: f64,
     load_clock: Option<f64>,
     loaded_clock: Option<f64>,
+    /// Updating the app itself (see `update`), whether its banner was put off, and Rune's clock
+    /// at the last check.
+    update: update::Update,
+    update_later: bool,
+    update_checked: Option<f64>,
     /// The command palette, while it's open (⌘K / Ctrl+K).
     palette: Option<palette::Palette>,
     /// The status-bar widget, and the menu it shows now.
@@ -227,7 +233,86 @@ impl App {
             state::trace("refresh", &"due", &self.cfg.refresh_every());
             self.refresh();
         }
+        // A new Latest build is looked for every 6 hours.
+        if self.update_checked.is_some_and(|c| self.clock - c >= 6.0 * 3600.0) {
+            self.check_update(false);
+        }
         self.sync_tray();
+    }
+
+    /// Asks GitHub for the Latest build. `asked`: the user pressed Check, so say the outcome.
+    fn check_update(&mut self, asked: bool) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if !self.update.can_check() {
+                return;
+            }
+            let Some(h) = self.handle.clone() else { return };
+            self.update = update::Update::Checking;
+            self.update_checked = Some(self.clock);
+            net::spawn(h, || async { update::check() }, move |s: &mut App, r| {
+                s.update = match r {
+                    Ok(rel) if update::build().is_some_and(|b| update::is_newer(&rel, b, update::built_at())) => {
+                        if asked {
+                            s.notify(format!("A new version is ready ({})", rel.short()));
+                        }
+                        update::Update::Available(rel)
+                    }
+                    Ok(_) => {
+                        if asked {
+                            s.notify("RepoHub is up to date");
+                        }
+                        update::Update::Current
+                    }
+                    Err(e) => {
+                        if asked {
+                            s.notify_problem(e.clone());
+                        }
+                        update::Update::Failed(e)
+                    }
+                };
+                s.sync_tray();
+            });
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = asked;
+    }
+
+    /// Downloads the new version, checks it, puts it in place and restarts into it.
+    fn install_update(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let Some(rel) = self.update.available().cloned() else { return };
+            let Some(h) = self.handle.clone() else { return };
+            self.update = update::Update::Downloading { release: rel.clone(), percent: 0 };
+            let progress = h.clone();
+            net::spawn(h, move || async move {
+                let bytes = update::download(&rel.url, rel.size, |pct| {
+                    progress.update(move |s: &mut App, _| {
+                        if let update::Update::Downloading { percent, .. } = &mut s.update {
+                            *percent = pct;
+                        }
+                    });
+                })?;
+                let sums = rel.sums.as_deref().ok_or("This build has no checksums (SHA256SUMS), so it isn't installed. Download it from the Releases page.")?;
+                let sums = String::from_utf8_lossy(&update::download(sums, 0, |_| {})?).into_owned();
+                update::verify(&bytes, &rel.asset, &sums)?;
+                let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+                let target = update::install(&bytes, &rel.asset, &exe)?;
+                update::relaunch(&target)
+            }, |s: &mut App, r: Result<(), String>| match r {
+                Ok(()) => {
+                    s.update = update::Update::Installing;
+                    if let Some(h) = &s.handle {
+                        h.quit();
+                    }
+                }
+                Err(e) => {
+                    s.notify_problem(e.clone());
+                    s.update = update::Update::Failed(e);
+                }
+            });
+        }
     }
 
     /// Shows the status-bar widget (desktop windows; see `tray`).
@@ -279,6 +364,7 @@ impl App {
                 self.open_form(i, Compose::Issue);
             },
             tray::Action::Refresh => self.refresh(),
+            tray::Action::Update => self.install_update(),
             tray::Action::Quit => if let Some(h) = &self.handle { h.quit() },
         }
         if show && let Some(h) = &self.handle {
@@ -1017,6 +1103,9 @@ fn init() -> App {
         tray: None,
         tray_menu: Vec::new(),
         palette: None,
+        update: update::Update::initial(),
+        update_later: false,
+        update_checked: None,
         loaded_at: None,
         last_load: None,
         now: net::now(),
@@ -1168,6 +1257,32 @@ fn title(s: &App) -> String {
     }
 }
 
+/// A banner when a new version is ready, or while it downloads.
+fn update_banner(s: &App, k: &Kit) -> Option<El> {
+    use rune_kit::{Button, ButtonVariant};
+    let (msg, actions) = match &s.update {
+        update::Update::Available(r) if !s.update_later => (
+            format!("A new version of RepoHub is ready (built {} from {}).", model::ago(r.published, s.now.max(r.published)), r.short()),
+            true,
+        ),
+        update::Update::Downloading { percent, .. } => (format!("Downloading the new version… {percent}%"), false),
+        update::Update::Installing => ("Installing the new version; RepoHub restarts in a moment.".into(), false),
+        _ => return None,
+    };
+    let tint = k.c.success.icon;
+    let mut r = row().w_full().px(14.0).py(10.0).gap(10.0).center_y().radius(k.radius.lg).key("update-banner")
+        .fill(tint.alpha(0.12)).border(1.0, tint.alpha(0.45))
+        .child(ui::ico(&icons::REFRESH, 15.0, tint))
+        .child(text(msg).font(k.ty.small).color(k.c.text_base).wrap().grow(1.0).shrink());
+    if actions {
+        r = r.child(Button::new("Later").variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
+                .on_press(|s: &mut App| s.update_later = true).build(k).key("update-later"))
+            .child(Button::new("Install and restart").variant(ButtonVariant::Submit).control_size(ControlSize::Small)
+                .on_press(|s: &mut App| s.install_update()).build(k).key("update-install"));
+    }
+    Some(r)
+}
+
 /// A banner above the page for loading, errors and sample data.
 fn banner(s: &App, k: &Kit) -> Option<El> {
     let (msg, tint, action) = match &s.status {
@@ -1207,6 +1322,9 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
         Page::Settings => lists::settings(s, &k),
     };
     let mut inner = col().w_full().max_w(1080.0).gap(16.0);
+    if let Some(b) = update_banner(s, &k) {
+        inner = inner.child(b);
+    }
     if let Some(b) = banner(s, &k) {
         inner = inner.child(b);
     }
@@ -1390,6 +1508,10 @@ pub fn start() {
     handle.update(move |s: &mut App, _| {
         s.handle = Some(h2.clone());
         s.start_tray();
+        // Clear what an earlier update left, then look for a newer build.
+        #[cfg(not(target_arch = "wasm32"))]
+        update::cleanup();
+        s.check_update(false);
         #[cfg(not(target_arch = "wasm32"))]
         if s.status == Status::Starting {
             s.refresh(); // the first load, when the app starts with an account

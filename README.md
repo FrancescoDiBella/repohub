@@ -113,6 +113,21 @@ Every push to `main` rebuilds the three packages and replaces the
 so the newest app is always there without doing anything. Pushing a tag such as `v0.1.0`
 publishes a numbered release next to it.
 
+### Updates
+
+From the first build that includes it, the app updates itself from the
+[Latest build](https://github.com/FrancescoDiBella/repohub/releases/tag/latest):
+
+- It checks GitHub at start and every 6 hours (**Settings → App version → Check now**, or ⌘K →
+  *Check for updates*, any time).
+- When a newer build is out, a banner (and the status-bar menu) offers **Install and restart**.
+  The package for your system is downloaded, checked against the release's `SHA256SUMS`, put in
+  place of the running app, and the new version starts.
+- macOS replaces `RepoHub.app` where it is (it needs to be in a folder you can write to, such as
+  Applications); Windows replaces `RepoHub.exe`; Linux replaces the `repohub` program.
+- `REPOHUB_UPDATES=off` turns the checks off. Builds from source update with `git pull`, the
+  Docker version with `docker compose pull`.
+
 ### Connect your account
 
 Open **Settings → GitHub account**, type your user name and (optionally) a token, and press

@@ -111,7 +111,7 @@ impl Transport {
 /// True when NO_PROXY (or a loopback host) says to reach `api` directly. The HTTP client reads
 /// HTTPS_PROXY by itself but not NO_PROXY.
 #[cfg(not(target_arch = "wasm32"))]
-fn bypass_proxy(api: &str) -> bool {
+pub(crate) fn bypass_proxy(api: &str) -> bool {
     let host = api.split("://").nth(1).unwrap_or(api).split(['/', ':']).next().unwrap_or("").to_ascii_lowercase();
     if host == "localhost" || host.starts_with("127.") || host == "[::1]" {
         return true;

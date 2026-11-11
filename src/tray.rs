@@ -39,6 +39,7 @@ pub enum Action {
     OpenRepo(String),
     NewIssue(String),
     Refresh,
+    Update,
     Quit,
 }
 
@@ -57,6 +58,7 @@ pub fn parse(id: &str) -> Option<Action> {
         "repo" if !arg.is_empty() => Action::OpenRepo(arg.to_owned()),
         "new-issue" if !arg.is_empty() => Action::NewIssue(arg.to_owned()),
         "refresh" => Action::Refresh,
+        "update" => Action::Update,
         "quit" => Action::Quit,
         _ => return None,
     })
@@ -75,10 +77,16 @@ pub fn menu(s: &App) -> Vec<Entry> {
     let mut m = vec![
         Entry::item("open", format!("Open {}", s.cfg.title)),
         Entry::sep(),
+    ];
+    if let Some(r) = s.update.available() {
+        m.push(Entry::item("update", format!("Install the new version and restart ({})", r.short())));
+        m.push(Entry::sep());
+    }
+    m.extend([
         Entry::item("go:pulls", if prs == 0 { "No open pull requests".into() } else { plural(prs, "open pull request", "open pull requests") }),
         Entry::item("go:issues", if d.issues.is_empty() { "No open issues".into() } else { plural(d.issues.len(), "open issue", "open issues") }),
         Entry::item("go:actions", if failed == 0 { "Recent runs passed".into() } else { plural(failed, "failed run", "failed runs") }),
-    ];
+    ]);
     let pinned = crate::pinned(s);
     if !pinned.is_empty() {
         m.push(Entry::sep());
