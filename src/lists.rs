@@ -179,6 +179,7 @@ pub fn settings(s: &App, k: &Kit) -> El {
                     .font(k.ty.text_small).color(k.c.text_muted).wrap()))
             .child(SegmentedControl::new(&Theme::LABELS, Some(s.theme.index())).label("Theme").fit()
                 .on_pick(|s: &mut App, i, _| s.set_theme(Theme::ALL[i.min(2)])).build(k).key("theme-pick")));
+    let version = version_panel(s, k);
     let keys = panel(k).child(panel_head(k, "Keyboard shortcuts", None));
     let keys = [
         ("⌘/Ctrl + K", "Search and commands: jump to any repository or page, run any action"),
@@ -192,6 +193,7 @@ pub fn settings(s: &App, k: &Kit) -> El {
         .child(account)
         .child(appearance)
         .child(conn)
+        .child(version)
         .child(keys)
 }
 
@@ -232,6 +234,41 @@ fn account_panel(s: &App, k: &Kit) -> El {
         body = body.child(text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap());
     }
     head.child(body.child(buttons))
+}
+
+/// The app's build and its updates.
+fn version_panel(s: &App, k: &Kit) -> El {
+    use crate::update::{self, Update};
+    let build = match (update::build(), update::built_at()) {
+        (Some(b), Some(t)) => format!("{} · built {}", &b[..b.len().min(7)], crate::model::ago(t, s.now.max(t))),
+        (Some(b), None) => b[..b.len().min(7)].to_owned(),
+        (None, _) => format!("{} · built from source", env!("CARGO_PKG_VERSION")),
+    };
+    let (state, ink) = match &s.update {
+        Update::Unavailable(why) => ((*why).to_owned(), k.c.text_muted),
+        Update::Idle => ("Not checked yet.".into(), k.c.text_muted),
+        Update::Checking => ("Checking the Latest build on GitHub…".into(), k.c.text_muted),
+        Update::Current => ("Up to date with the Latest build.".into(), k.c.success.icon),
+        Update::Available(r) => (format!("A new version is ready: {} (built {}).", r.short(), crate::model::ago(r.published, s.now.max(r.published))), k.c.success.icon),
+        Update::Downloading { percent, .. } => (format!("Downloading… {percent}%"), k.c.text_muted),
+        Update::Installing => ("Installing; RepoHub restarts in a moment.".into(), k.c.text_muted),
+        Update::Failed(e) => (e.clone(), k.c.danger.icon),
+    };
+    let mut buttons = row().gap(8.0);
+    if s.update.can_check() {
+        buttons = buttons.child(Button::new("Check now").icon(&icons::REFRESH).control_size(ControlSize::Small)
+            .on_press(|s: &mut App| s.check_update(true)).build(k).key("update-check"));
+    }
+    if s.update.available().is_some() {
+        buttons = buttons.child(Button::new("Install and restart").variant(ButtonVariant::Submit).control_size(ControlSize::Small)
+            .on_press(|s: &mut App| s.install_update()).build(k).key("update-install-settings"));
+    }
+    panel(k).child(panel_head(k, "App version", Some(buttons))).child(rule(k))
+        .child(info(k, "This build", build))
+        .child(rule(k))
+        .child(row().w_full().px(16.0).py(10.0).gap(16.0).center_y()
+            .child(text("Updates").font(k.ty.small).color(k.c.text_muted).w(170.0))
+            .child(text(state).font(k.ty.small_medium).color(ink).grow(1.0).shrink().wrap()))
 }
 
 /// "7 minutes", "less than a minute".

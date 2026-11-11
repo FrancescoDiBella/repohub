@@ -27,6 +27,8 @@ ureq = { version = "2.12", default-features = false, features = ["tls", "native-
 pollster = "0.4"
 portable-pty = "0.9"
 vt100 = "0.18"
+# Checks downloaded updates against the release's SHA256SUMS.
+sha2 = "0.10"
 
 # The menu bar item on macOS (Rune's tray covers Windows and Linux).
 [target.'cfg(target_os = "macos")'.dependencies]
