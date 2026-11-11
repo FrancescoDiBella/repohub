@@ -193,6 +193,20 @@ Drawings never go to GitHub. They are stored at
 
 The static GitHub Pages build has nowhere to store them, so the tab explains that instead.
 
+## Status bar (desktop app)
+
+RepoHub puts an icon in the macOS menu bar and the Windows notification area (and a Linux tray,
+where one runs). Its menu has:
+
+- **Open RepoHub**; how many pull requests and issues are open and how many runs failed, each
+  opening its page;
+- the pinned repositories, each opening in RepoHub;
+- **New issue in …** for the repository on screen (or the first pinned one);
+- **Refresh** and **Quit RepoHub**.
+
+On macOS and Windows, closing the window keeps RepoHub in the status bar; quit it from the menu
+(or ⌘Q on macOS). `REPOHUB_TRAY=0` turns the icon off, and closing the window then quits.
+
 ## Claude (desktop app)
 
 Each repository has a **Claude** tab: a chat with [Claude Code](https://claude.ai/code) running in

@@ -36,6 +36,7 @@ mod prefs;
 mod state;
 mod terminal;
 mod terminal_page;
+mod tray;
 mod ui;
 
 use config::Config;
@@ -126,6 +127,10 @@ pub struct App {
     term_error: Option<String>,
     /// The window is phone-sized: the pages use the layout in `mobile`.
     compact: bool,
+    /// The status-bar widget, and the menu it shows now.
+    #[cfg(not(target_arch = "wasm32"))]
+    tray: Option<tray::Native>,
+    tray_menu: Vec<tray::Entry>,
 }
 
 impl App {
@@ -137,6 +142,7 @@ impl App {
         }
         self.page = p;
         self.toast = None;
+        self.sync_tray();
     }
 
     /// Tidies up the repository section on screen before another one (or another page) shows:
@@ -170,6 +176,63 @@ impl App {
             state::trace("status", &self.status.name(), &status.name());
         }
         self.status = status;
+        self.sync_tray();
+    }
+
+    /// Shows the status-bar widget (desktop windows; see `tray`).
+    fn start_tray(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if !tray::wanted() || self.tray.is_some() {
+                return;
+            }
+            let Some(h) = self.handle.clone() else { return };
+            let entries = tray::menu(self);
+            match tray::create(h, &entries, &tray::tooltip(self)) {
+                Ok(t) => {
+                    self.tray = Some(t);
+                    self.tray_menu = entries;
+                }
+                Err(e) => eprintln!("repohub: no status-bar icon: {e}"),
+            }
+        }
+    }
+
+    /// Pushes the widget's menu again when what it shows changed.
+    fn sync_tray(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.tray.is_some() {
+            let entries = tray::menu(self);
+            if entries != self.tray_menu {
+                if let Some(t) = &self.tray {
+                    t.update(&entries, &tray::tooltip(self));
+                }
+                self.tray_menu = entries;
+            }
+        }
+    }
+
+    /// A pick from the widget's menu (or a click on its icon: `open`).
+    fn tray_action(&mut self, id: &str) {
+        let Some(action) = tray::parse(id) else { return };
+        let repo = |s: &App, full: &str| s.data.repos.iter().position(|r| r.full_name == full);
+        let show = !matches!(action, tray::Action::Refresh | tray::Action::Quit);
+        match action {
+            tray::Action::Open => {}
+            tray::Action::Go(p) => self.go(p),
+            tray::Action::OpenRepo(full) => if let Some(i) = repo(self, &full) { self.open(i) },
+            tray::Action::NewIssue(full) => if let Some(i) = repo(self, &full) {
+                if self.page != Page::Repo(i) {
+                    self.open(i);
+                }
+                self.open_form(i, Compose::Issue);
+            },
+            tray::Action::Refresh => self.refresh(),
+            tray::Action::Quit => if let Some(h) = &self.handle { h.quit() },
+        }
+        if show && let Some(h) = &self.handle {
+            h.open();
+        }
     }
 
     /// True when the board editor is on screen (and so takes its keyboard shortcuts).
@@ -469,6 +532,11 @@ impl App {
 
     /// Shows what a write changed at once, without waiting for GitHub's lists to catch up.
     fn apply_done(&mut self, i: usize, done: github::Done) {
+        self.apply_done_inner(i, done);
+        self.sync_tray();
+    }
+
+    fn apply_done_inner(&mut self, i: usize, done: github::Done) {
         let repo = self.data.repos.get(i).map(|r| r.full_name.clone()).unwrap_or_default();
         match done {
             github::Done::Issue(c) => {
@@ -887,6 +955,9 @@ fn init() -> App {
         acct_error: None,
         term_error: None,
         compact: starts_compact(),
+        #[cfg(not(target_arch = "wasm32"))]
+        tray: None,
+        tray_menu: Vec::new(),
         cfg,
     };
     // `REPOHUB_BLOCKING=1` loads synchronously before the first frame (headless snapshots).
@@ -1111,6 +1182,16 @@ fn starts_compact() -> bool {
     }
 }
 
+/// The window closed: RepoHub stays in the status bar, unless its icon couldn't be shown.
+fn on_close(s: &mut App, tx: &mut Tx) {
+    #[cfg(not(target_arch = "wasm32"))]
+    if s.tray.is_none() {
+        tx.quit();
+    }
+    #[cfg(target_arch = "wasm32")]
+    let _ = (s, tx);
+}
+
 fn on_key(s: &mut App, ev: &KeyEvent, _: &mut Tx) -> bool {
     // The board editor's shortcuts, unless the text tool's field is taking the keys.
     // They apply only while the editor is on screen: an open drawing left behind on another
@@ -1169,11 +1250,16 @@ const FAMILIES: (&str, &str) = ("Inter", "ui-monospace, IBM Plex Mono");
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen::prelude::wasm_bindgen(start))]
 pub fn start() {
-    let app = rune::App::new(AppSpec { on_key: Some(on_key), fonts: FONTS, families: FAMILIES, ..AppSpec::new("RepoHub", (1180.0, 760.0), init, view) });
+    let mut app = rune::App::new(AppSpec { on_key: Some(on_key), fonts: FONTS, families: FAMILIES, ..AppSpec::new("RepoHub", (1180.0, 760.0), init, view) });
+    // With the status-bar widget, closing the window keeps RepoHub there (macOS, Windows).
+    if tray::keeps_running() {
+        app = app.keep_running().on_close(on_close);
+    }
     let handle = app.handle();
     let h2 = handle.clone();
     handle.update(move |s: &mut App, _| {
         s.handle = Some(h2.clone());
+        s.start_tray();
         #[cfg(not(target_arch = "wasm32"))]
         if s.status == Status::Starting {
             s.refresh(); // the first load, when the app starts with an account
