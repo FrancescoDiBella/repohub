@@ -2,7 +2,8 @@
 # - Every push to main rebuilds them and replaces the "Latest build" pre-release, so the newest
 #   app is always at .../releases/tag/latest with no manual step.
 # - Pushing a tag like v0.1.0 publishes them as a versioned GitHub release.
-# - A pull request that touches the packaging builds them too, as a check (nothing is published).
+# - A pull request that touches the app or the packaging builds them too, as a check (nothing is
+#   published): the terminal, Claude and status-bar code only compiles on macOS and Windows there.
 # - It can also be run by hand (Actions → Desktop → Run workflow), which only makes artifacts.
 name: Desktop
 
@@ -14,7 +15,7 @@ on:
     paths-ignore: ["**.md", "docs/**"]
   workflow_dispatch:
   pull_request:
-    paths: ["packaging/**", ".github/workflows/release.yml"]
+    paths: ["src/**", "assets/**", "Cargo.toml", "Cargo.lock", "packaging/**", ".github/workflows/release.yml"]
 
 permissions:
   contents: write
