@@ -117,9 +117,19 @@ fn host_only(h: &str) -> String {
     h.split(':').next().unwrap_or("").to_owned()
 }
 
-/// Which proxied API calls are allowed: the read endpoints RepoHub uses, and starring.
+/// Which proxied API calls are allowed: the read endpoints RepoHub uses, starring, and the few
+/// writes the app makes (create an issue, a branch or a pull request, close an issue, merge a
+/// pull request). Nothing that deletes or rewrites.
 fn allowed(method: &Method, path: &str) -> bool {
     let p = path.split('?').next().unwrap_or("");
+    if p.contains("..") {
+        return false;
+    }
+    // ["repos", owner, repo, rest…]
+    let seg: Vec<&str> = p.trim_start_matches('/').split('/').collect();
+    let repo = seg.len() >= 3 && seg[0] == "repos" && !seg[1].is_empty() && !seg[2].is_empty();
+    let rest = if repo { &seg[3..] } else { &[][..] };
+    let number = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
     match method {
         Method::Get => {
             p == "/user"
@@ -129,7 +139,10 @@ fn allowed(method: &Method, path: &str) -> bool {
                 || p.starts_with("/users/")
                 || (p.starts_with("/repos/") && !p.contains(".."))
         }
+        Method::Put if repo && rest.len() == 3 && rest[0] == "pulls" && number(rest[1]) && rest[2] == "merge" => true,
         Method::Put | Method::Delete => p.starts_with("/user/starred/") && p.matches('/').count() == 4,
+        Method::Post => repo && matches!(rest, ["issues"] | ["pulls"] | ["git", "refs"]),
+        Method::Patch => repo && rest.len() == 2 && rest[0] == "issues" && number(rest[1]),
         _ => false,
     }
 }
@@ -192,7 +205,14 @@ fn proxy(cfg: &Cfg, mut req: Request) {
     if let Some(t) = &cfg.token {
         r = r.set("Authorization", &format!("Bearer {t}"));
     }
-    let result = if method == "PUT" { r.set("Content-Length", "0").send_string("") } else { r.call() };
+    // Writes carry a JSON body; a body-less PUT (starring) still needs a length.
+    let result = if !body.is_empty() {
+        r.set("Content-Type", "application/json").send_bytes(&body)
+    } else if method == "PUT" {
+        r.set("Content-Length", "0").send_string("")
+    } else {
+        r.call()
+    };
     let resp = match result {
         Ok(resp) | Err(ureq::Error::Status(_, resp)) => resp,
         Err(e) => {
@@ -287,6 +307,19 @@ mod tests {
         assert!(allowed(&Method::Put, "/user/starred/o/r"));
         assert!(!allowed(&Method::Delete, "/repos/o/r"));
         assert!(!allowed(&Method::Post, "/user/repos"));
+        // The app's writes, and nothing next to them.
+        assert!(allowed(&Method::Post, "/repos/o/r/issues"));
+        assert!(allowed(&Method::Post, "/repos/o/r/pulls"));
+        assert!(allowed(&Method::Post, "/repos/o/r/git/refs"));
+        assert!(allowed(&Method::Patch, "/repos/o/r/issues/12"));
+        assert!(allowed(&Method::Put, "/repos/o/r/pulls/7/merge"));
+        assert!(!allowed(&Method::Post, "/repos/o/r/issues/12/comments"));
+        assert!(!allowed(&Method::Patch, "/repos/o/r"));
+        assert!(!allowed(&Method::Patch, "/repos/o/r/issues/x"));
+        assert!(!allowed(&Method::Patch, "/repos/o/r/git/refs/heads/main"));
+        assert!(!allowed(&Method::Delete, "/repos/o/r/git/refs/heads/main"));
+        assert!(!allowed(&Method::Put, "/repos/o/r/contents/README.md"));
+        assert!(!allowed(&Method::Post, "/repos/o/r/../x/issues"));
         assert!(!allowed(&Method::Get, "/orgs/x/members"));
         assert!(!allowed(&Method::Put, "/user/starred/o/r/extra"));
     }

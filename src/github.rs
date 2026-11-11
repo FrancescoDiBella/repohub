@@ -2,7 +2,7 @@
 //! [`net::Transport`]; the functions here are async and run in the background (see `net::spawn`).
 use std::collections::HashSet;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::config::Config;
 use crate::net::{self, Resp, Transport};
@@ -39,13 +39,22 @@ impl Gh {
     }
 
     fn explain(&self, r: &Resp) -> String {
-        let msg = serde_json::from_str::<Value>(&r.body).ok().map(|v| s(&v, "message")).unwrap_or_default();
+        let v = serde_json::from_str::<Value>(&r.body).ok();
+        let mut msg = v.as_ref().map(|v| s(v, "message")).unwrap_or_default();
+        // Validation errors (422) carry the reason in `errors`: "A pull request already exists…".
+        if let Some(detail) = v.as_ref().and_then(|v| v.get("errors")).and_then(Value::as_array).and_then(|e| e.first())
+            .map(|e| if e.is_string() { e.as_str().unwrap_or("").to_owned() } else { Some(s(e, "message")).filter(|m| !m.is_empty()).unwrap_or_else(|| format!("{} {}", s(e, "field"), s(e, "code"))) })
+            .filter(|d| !d.trim().is_empty())
+        {
+            msg = format!("{msg}: {}", detail.trim());
+        }
         match r.status {
             401 => "GitHub rejected the token (401): check the token in Settings, or GITHUB_TOKEN in your .env file.".into(),
             403 | 429 if r.remaining.as_deref() == Some("0") => {
                 let when = r.reset.map(|t| format!(" Try again in {} minutes.", ((t - self.now) / 60).max(1))).unwrap_or_default();
                 format!("API rate limit reached.{when} With GITHUB_TOKEN the limit goes up to 5,000 requests an hour.")
             }
+            403 => format!("GitHub refused (403): {msg}. The token needs write access to this repository (Contents, Issues and Pull requests)."),
             404 => format!("Not found (404): {msg}. Check GITHUB_USER or the token's permissions."),
             code if msg.is_empty() => format!("GitHub API error {code}."),
             code => format!("GitHub error {code}: {msg}"),
@@ -66,6 +75,15 @@ impl Gh {
         match r.status {
             200..=299 => Ok(Some(r.body)),
             404 => Ok(None),
+            _ => Err(self.explain(&r)),
+        }
+    }
+
+    /// Sends a JSON body and returns the JSON answer (writes: POST, PATCH, PUT).
+    async fn write(&self, method: &str, path: &str, body: Value) -> Result<Value, String> {
+        let r = self.t.send_body(method, path, JSON, &body.to_string()).await?;
+        match r.status {
+            200..=299 => Ok(serde_json::from_str(&r.body).unwrap_or(Value::Null)),
             _ => Err(self.explain(&r)),
         }
     }
@@ -219,9 +237,11 @@ impl Gh {
         if weeks.len() >= 26 { weeks[weeks.len() - 26..].to_vec() } else { vec![0; 26] }
     }
 
-    pub async fn detail(&self, full: &str) -> Detail {
+    /// Files, README and last commit of `full` at branch `at`; languages for the whole repository.
+    pub async fn detail(&self, full: &str, at: &str) -> Detail {
         let mut d = Detail::default();
-        match self.get(&format!("/repos/{full}/contents")).await {
+        let at = enc(at);
+        match self.get(&format!("/repos/{full}/contents?ref={at}")).await {
             Ok(v) => {
                 let mut files: Vec<(String, bool)> = v.as_array().cloned().unwrap_or_default().iter().map(|f| (s(f, "name"), s(f, "type") == "dir")).collect();
                 files.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase())));
@@ -230,13 +250,13 @@ impl Gh {
             Err(e) => d.error = Some(e),
         }
         // The whole README (up to 200 KB), so Copy copies all of it.
-        d.readme = self.get_raw(&format!("/repos/{full}/readme")).await.ok().flatten().map(|t| t.chars().take(200_000).collect());
+        d.readme = self.get_raw(&format!("/repos/{full}/readme?ref={at}")).await.ok().flatten().map(|t| t.chars().take(200_000).collect());
         if let Ok(v) = self.get(&format!("/repos/{full}/languages")).await {
             let mut langs: Vec<(String, u64)> = v.as_object().map(|o| o.iter().map(|(k, v)| (k.clone(), v.as_u64().unwrap_or(0))).collect()).unwrap_or_default();
             langs.sort_by(|a, b| b.1.cmp(&a.1));
             d.languages = langs;
         }
-        if let Ok(v) = self.get(&format!("/repos/{full}/commits?per_page=1")).await
+        if let Ok(v) = self.get(&format!("/repos/{full}/commits?sha={at}&per_page=1")).await
             && let Some(c) = v.as_array().and_then(|a| a.first())
         {
             let commit = c.get("commit").cloned().unwrap_or(Value::Null);
@@ -257,6 +277,36 @@ impl Gh {
         let mut names: Vec<String> = v.as_array().cloned().unwrap_or_default().iter().map(|b| s(b, "name")).filter(|n| !n.is_empty()).collect();
         names.sort_by_key(|n| (n != default, n.to_lowercase()));
         Ok(names)
+    }
+
+    pub async fn create_issue(&self, full: &str, title: &str, body: &str) -> Result<Created, String> {
+        let v = self.write("POST", &format!("/repos/{full}/issues"), json!({ "title": title, "body": body })).await?;
+        Ok(Created { number: n(&v, "number"), url: s(&v, "html_url") })
+    }
+
+    /// Creates branch `name` at the tip of branch `from`.
+    pub async fn create_branch(&self, full: &str, name: &str, from: &str) -> Result<(), String> {
+        let tip = self.get(&format!("/repos/{full}/git/ref/heads/{}", enc_path(from))).await?;
+        let sha = tip.get("object").map(|o| s(o, "sha")).unwrap_or_default();
+        if sha.is_empty() {
+            return Err(format!("Couldn't find the last commit of {from}."));
+        }
+        self.write("POST", &format!("/repos/{full}/git/refs"), json!({ "ref": format!("refs/heads/{name}"), "sha": sha })).await.map(|_| ())
+    }
+
+    pub async fn create_pull(&self, full: &str, p: &NewPull) -> Result<Created, String> {
+        let v = self.write("POST", &format!("/repos/{full}/pulls"), json!({
+            "title": p.title, "body": p.body, "head": p.head, "base": p.base, "draft": p.draft,
+        })).await?;
+        Ok(Created { number: n(&v, "number"), url: s(&v, "html_url") })
+    }
+
+    pub async fn close_issue(&self, full: &str, number: u32) -> Result<(), String> {
+        self.write("PATCH", &format!("/repos/{full}/issues/{number}"), json!({ "state": "closed", "state_reason": "completed" })).await.map(|_| ())
+    }
+
+    pub async fn merge_pull(&self, full: &str, number: u32, method: &str) -> Result<(), String> {
+        self.write("PUT", &format!("/repos/{full}/pulls/{number}/merge"), json!({ "merge_method": method })).await.map(|_| ())
     }
 
     pub async fn set_star(&self, full: &str, on: bool) -> Result<(), String> {
@@ -289,8 +339,79 @@ pub async fn load_all(cfg: &Config) -> Result<Data, String> {
     Ok(Data { profile, repos, pulls, issues, runs, activity, sample: false })
 }
 
-pub async fn load_detail(cfg: &Config, full: &str) -> Detail {
-    Gh::new(cfg).detail(full).await
+pub async fn load_detail(cfg: &Config, full: &str, at: &str) -> Detail {
+    Gh::new(cfg).detail(full, at).await
+}
+
+/// What GitHub created: its number and page.
+#[derive(Clone, Debug)]
+pub struct Created {
+    pub number: u32,
+    pub url: String,
+}
+
+/// A pull request to open.
+#[derive(Clone, Debug)]
+pub struct NewPull {
+    pub title: String,
+    pub body: String,
+    pub head: String,
+    pub base: String,
+    pub draft: bool,
+}
+
+/// One of the writes RepoHub makes on GitHub. Running it returns a message for the toast.
+#[derive(Clone, Debug)]
+pub enum Write {
+    Issue { title: String, body: String },
+    Branch { name: String, from: String },
+    Pull(NewPull),
+    CloseIssue(u32),
+    Merge { number: u32, method: &'static str },
+}
+
+/// What a finished write changed, for updating the screen without waiting for a reload.
+#[derive(Clone, Debug)]
+pub enum Done {
+    Issue(Created),
+    Branch(String),
+    Pull(Created),
+    Closed(u32),
+    Merged(u32),
+}
+
+pub async fn run(cfg: &Config, full: &str, w: Write) -> Result<Done, String> {
+    let gh = Gh::new(cfg);
+    match w {
+        Write::Issue { title, body } => gh.create_issue(full, &title, &body).await.map(Done::Issue),
+        Write::Branch { name, from } => gh.create_branch(full, &name, &from).await.map(|_| Done::Branch(name)),
+        Write::Pull(p) => gh.create_pull(full, &p).await.map(Done::Pull),
+        Write::CloseIssue(n) => gh.close_issue(full, n).await.map(|_| Done::Closed(n)),
+        Write::Merge { number, method } => gh.merge_pull(full, number, method).await.map(|_| Done::Merged(number)),
+    }
+}
+
+/// A branch name GitHub will take: no spaces, no `..`, no leading `-` or `/`, none of `~^:?*[\`.
+pub fn valid_branch(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 200
+        && !name.starts_with(['-', '/', '.'])
+        && !name.ends_with(['/', '.'])
+        && !name.ends_with(".lock")
+        && !name.contains("..")
+        && !name.contains("//")
+        && !name.contains("@{")
+        && !name.chars().any(|c| c.is_whitespace() || c.is_control() || "~^:?*[\\".contains(c))
+}
+
+/// Percent-encodes a query value (a branch name in `?ref=`).
+fn enc(v: &str) -> String {
+    v.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
+}
+
+/// Like `enc`, but keeps `/` (a branch name inside a path).
+fn enc_path(v: &str) -> String {
+    v.split('/').map(enc).collect::<Vec<_>>().join("/")
 }
 
 pub async fn branches(cfg: &Config, full: &str, default: &str) -> Result<Vec<String>, String> {
@@ -306,5 +427,18 @@ mod tests {
     #[test]
     fn repo_name_from_url() {
         assert_eq!(super::repo_from_url("https://api.github.com/repos/octo/hello"), "octo/hello");
+    }
+
+    #[test]
+    fn branch_names_and_encoding() {
+        use super::{enc, enc_path, valid_branch};
+        for ok in ["main", "feature/login", "fix-12", "v1.2"] {
+            assert!(valid_branch(ok), "{ok}");
+        }
+        for bad in ["", "has space", "-x", "a..b", "a/", "x.lock", "a:b", "a~1", "/a", "a//b"] {
+            assert!(!valid_branch(bad), "{bad}");
+        }
+        assert_eq!(enc("feature/x y"), "feature%2Fx%20y");
+        assert_eq!(enc_path("feature/x"), "feature/x");
     }
 }

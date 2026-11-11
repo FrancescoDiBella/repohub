@@ -16,6 +16,9 @@
 //! | [`RepoFilter`], [`RepoSort`] | | the Repositories list |
 //! | [`Account`] | Locked / SignedOut / SignedIn | the account form in Settings |
 //! | [`Toast`] | (none) → shown(kind) → (none) | the message at the bottom |
+//! | [`Submit`] | Editing → Sending → (closed) / Failed | a form that writes to GitHub |
+//! | [`Compose`] | Issue / Branch / Pull | which form is open |
+//! | [`BranchSlot`] | View / From / Head / Base | what the branch picker fills in |
 
 /// Where the data on screen comes from.
 ///
@@ -327,6 +330,67 @@ pub struct Toast {
     pub kind: ToastKind,
 }
 
+/// A form that sends something to GitHub.
+///
+/// ```text
+/// Editing ──submit (valid)──▶ Sending ──ok──▶ (form closes, toast)
+///    ▲                           └──error──▶ Failed ──edit / submit──▶ Editing / Sending
+///    └──────────────── cancel at any point closes the form ─────────────────────────────┘
+/// ```
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Submit {
+    #[default]
+    Editing,
+    Sending,
+    Failed(String),
+}
+
+impl Submit {
+    pub fn is_sending(&self) -> bool {
+        matches!(self, Submit::Sending)
+    }
+
+    /// Starts sending. False while a send is already running (a double click sends once).
+    pub fn start(&mut self) -> bool {
+        if self.is_sending() {
+            return false;
+        }
+        *self = Submit::Sending;
+        true
+    }
+}
+
+/// Which form is open on a repository's page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Compose {
+    Issue,
+    Branch,
+    Pull,
+}
+
+impl Compose {
+    /// The section the form belongs to: opening it shows that section.
+    pub fn tab(self) -> RepoTab {
+        match self {
+            Compose::Issue => RepoTab::Issues,
+            Compose::Branch => RepoTab::Code,
+            Compose::Pull => RepoTab::Pulls,
+        }
+    }
+}
+
+/// What the open branch picker fills in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BranchSlot {
+    /// The branch the Code and Notes tabs show.
+    View,
+    /// Where a new branch starts.
+    From,
+    /// A pull request's branch, and the branch it goes into.
+    Head,
+    Base,
+}
+
 /// Prints a state change to stderr when `REPOHUB_TRACE=1`, one line each:
 /// `state: page Overview -> Repos`. For debugging and for agents driving the app headless.
 pub fn trace(what: &str, from: &dyn std::fmt::Debug, to: &dyn std::fmt::Debug) {
@@ -373,6 +437,16 @@ mod tests {
         assert!(!l.edit() && !l.written(Ok(())));
         l.loaded(Ok(()));
         assert_eq!(l, Save::Saved);
+    }
+
+    #[test]
+    fn submit_sends_once() {
+        let mut s = Submit::Editing;
+        assert!(s.start() && s.is_sending());
+        assert!(!s.start(), "a second click while sending does nothing");
+        s = Submit::Failed("422".into());
+        assert!(s.start(), "a failed form can be sent again");
+        assert_eq!(Compose::Pull.tab(), RepoTab::Pulls);
     }
 
     #[test]

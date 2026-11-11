@@ -140,6 +140,27 @@ cargo run --release                   # the first build takes a few minutes
 packaging/macos/bundle.sh 0.1.0       # macOS: builds dist/RepoHub.app and the .dmg
 ```
 
+## Working on GitHub from the app
+
+With a token that has write access, the everyday changes happen in RepoHub:
+
+| Where | What |
+| --- | --- |
+| Code tab | **Branch picker** (the branch button): files, last commit and README follow the branch you pick, and so does the Notes tab. **New branch** starts one from the branch on screen. |
+| Code or Pull requests tab | **New pull request**: pick its branch and the one it goes into, title, description, draft. |
+| Issues tab | **New issue**: title and Markdown description. |
+| Issue rows | **Close**. |
+| Pull request rows | **Merge**, after a confirmation: a merge commit or **Squash**. |
+
+What GitHub creates shows at once; the lists catch up on the next refresh. GitHub's error, if
+any, shows in the form (for example "A pull request already exists").
+
+RepoHub still doesn't delete repositories or branches or rewrite history: those stay on GitHub.
+In Docker the same actions go through `repohub-server`, which forwards only these writes.
+
+The token needs, as a fine-grained token: **Contents**, **Issues** and **Pull requests** read
+and write, **Metadata** and **Actions** read. A classic token needs the `repo` scope.
+
 ## README
 
 The Code tab shows the repository's README rendered as Markdown. Select text as on a web page
