@@ -16,6 +16,7 @@
 | `src/board.rs` | The Notes whiteboard: model, hand-drawn rendering, gestures, undo/redo, `.excalidraw` read/write |
 | `src/actions.rs` | The branch picker, the New issue / branch / pull request forms, Close and Merge on rows |
 | `src/notes.rs`, `src/notes_page.rs` | Notes storage (local folder on desktop, `/api/notes` on the web) and the Notes tab |
+| `src/claude.rs`, `src/claude_page.rs` | The Claude tab (desktop): runs `claude -p --output-format stream-json` in the clone, parses the stream into chat items (`Run`, `Mode`, `Item`), the chat UI |
 | `src/terminal.rs`, `src/terminal_page.rs` | Embedded terminal (desktop): `portable-pty` runs the login shell, `vt100` keeps the screen; key mapping, colours, the Terminal tab |
 | `src/clones.rs` | Finding and remembering each repository's local clone |
 | `assets/fonts/` | Inter and IBM Plex Mono (SIL OFL), bundled so mono text is monospaced everywhere |

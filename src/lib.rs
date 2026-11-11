@@ -16,6 +16,8 @@ use rune_kit::{ControlSize, IconButton, IconButtonVariant, Kit, PaletteSeed};
 
 mod actions;
 mod board;
+mod claude;
+mod claude_page;
 #[cfg(not(target_arch = "wasm32"))]
 mod clones;
 mod clones_shim;
@@ -106,6 +108,10 @@ pub struct App {
     confirm_delete: Option<String>,
     /// The drawing open in the Notes tab, if any.
     board: Option<board::Board>,
+    // Claude tab (desktop): one conversation per repository, run in its local clone.
+    chats: HashMap<String, claude::Chat>,
+    claude_prompt: TextEdit,
+    claude_mode: claude::Mode,
     // Terminal tab (desktop): one shell per repository, opened in its local clone.
     terms: HashMap<String, terminal::Term>,
     /// Width of one character and height of one line of the terminal font, measured on screen.
@@ -657,6 +663,75 @@ impl App {
         self.load_notes(i);
     }
 
+    /// Sends `prompt` to Claude Code in repository `i`'s local clone, continuing its conversation.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn ask_claude(&mut self, i: usize, prompt: String) {
+        let prompt = prompt.trim().to_owned();
+        let Some(r) = self.data.repos.get(i) else { return };
+        let full = r.full_name.clone();
+        let Some(dir) = clones_shim::find(&full) else { return };
+        let Some(h) = self.handle.clone() else { return };
+        let chat = self.chats.entry(full.clone()).or_default();
+        if prompt.is_empty() || chat.run.is_busy() {
+            return;
+        }
+        chat.items.push(claude::Item::User(prompt.clone()));
+        chat.run = claude::Run::Starting;
+        chat.run_id += 1;
+        let run = chat.run_id;
+        let (h2, f2) = (h.clone(), full.clone());
+        let started = claude::start(
+            &dir,
+            &prompt,
+            self.claude_mode,
+            chat.session.as_deref(),
+            move |e| {
+                let full = full.clone();
+                h.update(move |s: &mut App, _| {
+                    if let Some(c) = s.chats.get_mut(&full).filter(|c| c.run_id == run) {
+                        c.apply(e);
+                    }
+                });
+            },
+            move |problem| {
+                h2.update(move |s: &mut App, _| {
+                    if let Some(c) = s.chats.get_mut(&f2).filter(|c| c.run_id == run) {
+                        c.finished(problem);
+                    }
+                });
+            },
+        );
+        match started {
+            Ok(p) => {
+                chat.proc = Some(p);
+                self.claude_prompt.clear();
+            }
+            Err(e) => chat.finished(Some(e)),
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn ask_claude(&mut self, _: usize, _: String) {}
+
+    /// Stops the answer Claude is writing for repository `i`.
+    fn stop_claude(&mut self, i: usize) {
+        let Some(c) = self.data.repos.get(i).and_then(|r| self.chats.get_mut(&r.full_name)) else { return };
+        if c.run.is_busy() {
+            c.run = claude::Run::Stopping;
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(p) = &c.proc {
+                p.stop();
+            }
+        }
+    }
+
+    /// Forgets repository `i`'s conversation; the next message starts a new Claude Code session.
+    fn new_chat(&mut self, i: usize) {
+        if let Some(r) = self.data.repos.get(i) {
+            self.chats.remove(&r.full_name);
+        }
+    }
+
     /// Starts a shell for repository `i` in `dir` (its clone, or where a clone will go).
     fn start_terminal(&mut self, i: usize, dir: std::path::PathBuf, first: Option<String>) {
         let Some(r) = self.data.repos.get(i) else { return };
@@ -708,7 +783,10 @@ impl App {
         }
         self.clone_path.clear();
         self.terms.remove(&full);
-        self.start_terminal(i, dir, None);
+        // From the Claude tab the folder is all that's needed; the Terminal tab opens a shell there.
+        if self.tab == RepoTab::Terminal {
+            self.start_terminal(i, dir, None);
+        }
     }
 
     /// Clones repository `i` into the default folder, in its terminal, and remembers where.
@@ -722,6 +800,10 @@ impl App {
         }
         let _ = clones_shim::remember(&full, &parent.join(&name));
         self.terms.remove(&full);
+        // The clone runs in the terminal, so show it.
+        if self.tab != RepoTab::Terminal {
+            self.set_tab(i, RepoTab::Terminal);
+        }
         self.start_terminal(i, parent, Some(format!("git clone {url}.git && cd {name}\r")));
     }
 
@@ -793,6 +875,9 @@ fn init() -> App {
         note_name: TextEdit::new(""),
         confirm_delete: None,
         board: None,
+        chats: HashMap::new(),
+        claude_prompt: TextEdit::new(""),
+        claude_mode: claude::Mode::Plan,
         terms: HashMap::new(),
         term_cell: [7.8, 17.0],
         term_grid: (24, 100),

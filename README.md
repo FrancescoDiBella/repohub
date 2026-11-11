@@ -193,6 +193,25 @@ Drawings never go to GitHub. They are stored at
 
 The static GitHub Pages build has nowhere to store them, so the tab explains that instead.
 
+## Claude (desktop app)
+
+Each repository has a **Claude** tab: a chat with [Claude Code](https://claude.ai/code) running in
+the repository's local copy, much like the Claude Code extension for VS Code.
+
+![The Claude tab answering a question about a repository](docs/claude.png)
+
+- It runs your own `claude` with your own login, in the clone's folder, so RepoHub needs no
+  API key. The local copy is found as in the Terminal tab.
+- Claude's answers are rendered as Markdown (selectable, with copy buttons on code); each tool it
+  uses (Read, Edit, Bash…) shows as a row with the start of its result.
+- **Plan (read-only)** lets Claude read only; **Edit files** lets it change files in the local
+  copy. What it wasn't allowed to do is listed after the answer: switch mode, or run it in the
+  Terminal tab.
+- Replies continue the conversation (`--resume`); **New chat** starts over; **Stop** ends the
+  answer. Each answer shows its time and cost, and the chat its total.
+- RepoHub looks for `claude` in the usual install places, then on your login shell's PATH. If it
+  lives elsewhere, set `REPOHUB_CLAUDE` to its path.
+
 ## Terminal (desktop app)
 
 Each repository has a **Terminal** tab: your login shell in a real pseudo-terminal, opened in the
