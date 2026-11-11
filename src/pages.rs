@@ -202,6 +202,7 @@ pub fn repo_detail(s: &App, k: &Kit, i: usize) -> El {
             s.data.pulls.iter().filter(|x| in_repo(&x.repo)).map(|x| actions::pull_line(s, k, x, s.compact)).collect()),
         RepoTab::Actions => list_of(k, "Workflow runs", None, s.data.runs.iter().filter(|x| in_repo(&x.repo)).map(|x| run_row(k, x, s.compact)).collect()),
         RepoTab::Notes => crate::notes_page::notes_tab(s, k, i),
+        RepoTab::Claude => crate::claude_page::claude_tab(s, k, i),
         RepoTab::Terminal => crate::terminal_page::terminal_tab(s, k, i, k.c.page.r + k.c.page.g + k.c.page.b < 1.5),
         RepoTab::Settings => crate::lists::repo_settings(s, k, r),
     };

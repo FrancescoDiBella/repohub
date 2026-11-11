@@ -225,13 +225,14 @@ pub enum RepoTab {
     Pulls,
     Actions,
     Notes,
+    Claude,
     Terminal,
     Settings,
 }
 
 impl RepoTab {
-    pub const ALL: [RepoTab; 7] = [RepoTab::Code, RepoTab::Issues, RepoTab::Pulls, RepoTab::Actions, RepoTab::Notes, RepoTab::Terminal, RepoTab::Settings];
-    pub const LABELS: [&'static str; 7] = ["Code", "Issues", "Pull requests", "Actions", "Notes", "Terminal", "Settings"];
+    pub const ALL: [RepoTab; 8] = [RepoTab::Code, RepoTab::Issues, RepoTab::Pulls, RepoTab::Actions, RepoTab::Notes, RepoTab::Claude, RepoTab::Terminal, RepoTab::Settings];
+    pub const LABELS: [&'static str; 8] = ["Code", "Issues", "Pull requests", "Actions", "Notes", "Claude", "Terminal", "Settings"];
 
     pub fn index(self) -> usize {
         RepoTab::ALL.iter().position(|t| *t == self).unwrap_or(0)
@@ -461,7 +462,8 @@ mod tests {
         }
         assert_eq!(RepoTab::parse("notes"), Some(RepoTab::Notes));
         assert_eq!(RepoTab::parse("Pull requests"), Some(RepoTab::Pulls));
-        assert_eq!(RepoTab::parse("5"), Some(RepoTab::Terminal));
+        assert_eq!(RepoTab::parse("6"), Some(RepoTab::Terminal));
+        assert_eq!(RepoTab::parse("claude"), Some(RepoTab::Claude));
         assert_eq!(RepoTab::from_index(99), RepoTab::Code);
         assert!(RepoFilter::Private.matches(true, false) && !RepoFilter::Fork.matches(true, false));
     }
