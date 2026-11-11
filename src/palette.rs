@@ -38,6 +38,7 @@ pub enum Command {
     Theme(Theme),
     OpenUrl(String),
     CopyClone(String),
+    TogglePin(usize),
     CheckUpdate,
     InstallUpdate,
     /// The Repositories page for one owner.
@@ -75,6 +76,11 @@ pub fn entries(s: &App) -> Vec<Entry> {
         out.push(entry(format!("New pull request in {n}"), "Action", &icons::PULL, Command::Compose(i, Compose::Pull)));
         out.push(entry(format!("New branch in {n}"), "Action", &icons::BRANCH, Command::Compose(i, Compose::Branch)));
         out.push(entry(format!("Ask Claude about {n}"), "Action", &icons::SPARK, Command::Tab(i, RepoTab::Claude)));
+        out.push(if s.is_pinned(i) {
+            entry(format!("Unpin {n}"), "Action", &icons::PIN, Command::TogglePin(i))
+        } else {
+            entry(format!("Pin {n} to the sidebar"), "Action", &icons::PIN_ON, Command::TogglePin(i))
+        });
         out.push(entry(format!("Open a terminal in {n}"), "Action", &icons::TERMINAL, Command::Tab(i, RepoTab::Terminal)));
         out.push(entry(format!("Open {n} on GitHub"), "Action", &icons::EXTERNAL, Command::OpenUrl(r.url.clone())));
         out.push(entry(format!("Copy the clone URL of {n}"), "Action", &icons::COPY, Command::CopyClone(format!("{}.git", r.url))));
@@ -217,6 +223,7 @@ pub fn run(s: &mut App, cmd: Command, tx: &mut Tx) {
             let _ = tx.open_url(&u);
         }
         Command::Owner(o) => s.show_owner(o),
+        Command::TogglePin(i) => s.toggle_pin(i),
         Command::CheckUpdate => s.check_update(true),
         Command::InstallUpdate => s.install_update(),
         Command::CopyClone(u) => {

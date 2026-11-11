@@ -73,6 +73,9 @@ pub struct App {
     filter: RepoFilter,
     /// Whose repositories the Repositories page shows.
     owner: OwnerFilter,
+    /// The repositories pinned in the app (full names); `None`: never changed, so
+    /// `REPOHUB_PINNED` or the most recently pushed decide (see `pinned`).
+    pins: Option<Vec<String>>,
     /// The Organizations section of the sidebar is collapsed.
     orgs_closed: bool,
     /// The section of the repository page. Change it with `set_tab`, which runs what a section
@@ -1061,6 +1064,7 @@ fn init() -> App {
         filter: RepoFilter::All,
         owner: OwnerFilter::All,
         orgs_closed: false,
+        pins: prefs::load_pins(),
         tab: RepoTab::Code,
         pr_filter: PullState::Open,
         search: TextEdit::new(""),
@@ -1194,6 +1198,32 @@ fn orgs(s: &App) -> Vec<(String, usize)> {
 }
 
 impl App {
+    /// Whether repository `i` is in the sidebar's Pinned section.
+    fn is_pinned(&self, i: usize) -> bool {
+        pinned(self).contains(&i)
+    }
+
+    /// Pins or unpins repository `i`. The first change starts from what the sidebar shows, so
+    /// the pins it had by default stay.
+    fn toggle_pin(&mut self, i: usize) {
+        let Some(full) = self.data.repos.get(i).map(|r| r.full_name.clone()) else { return };
+        let mut list: Vec<String> = match &self.pins {
+            Some(p) => p.clone(),
+            None => pinned(self).into_iter().map(|j| self.data.repos[j].full_name.clone()).collect(),
+        };
+        let name = self.data.repos[i].name.clone();
+        if let Some(at) = list.iter().position(|p| p.eq_ignore_ascii_case(&full)) {
+            list.remove(at);
+            self.notify(format!("Unpinned {name}"));
+        } else {
+            list.push(full);
+            self.notify(format!("Pinned {name}"));
+        }
+        prefs::save_pins(&list);
+        self.pins = Some(list);
+        self.sync_tray();
+    }
+
     /// Shows the Repositories page for `owner`.
     fn show_owner(&mut self, owner: OwnerFilter) {
         state::trace("owner", &self.owner, &owner);
@@ -1205,6 +1235,10 @@ impl App {
 /// The pinned repositories: the names in REPOHUB_PINNED, else the three most recently pushed.
 fn pinned(s: &App) -> Vec<usize> {
     let repos = &s.data.repos;
+    // Pins chosen in the app win; a repository that's no longer loaded is skipped.
+    if let Some(pins) = &s.pins {
+        return pins.iter().filter_map(|p| repos.iter().position(|r| r.full_name.eq_ignore_ascii_case(p))).collect();
+    }
     if s.cfg.pinned.is_empty() {
         return (0..repos.len().min(3)).collect();
     }
@@ -1534,4 +1568,32 @@ pub fn start() {
         });
     });
     app.run();
+}
+
+#[cfg(test)]
+mod pin_tests {
+    #[test]
+    fn the_first_pin_keeps_the_default_ones() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("repohub-pins-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // SAFETY: the lock keeps other environment-changing tests out.
+        unsafe { std::env::set_var("REPOHUB_DATA_DIR", &dir) };
+        let mut s = crate::init();
+        s.data = crate::model::Data::sample();
+        s.pins = None;
+        let mut cfg = (*s.cfg).clone();
+        cfg.pinned.clear();
+        s.cfg = std::sync::Arc::new(cfg);
+        assert_eq!(crate::pinned(&s), vec![0, 1, 2], "by default the three most recently pushed");
+        s.toggle_pin(4);
+        assert_eq!(crate::pinned(&s), vec![0, 1, 2, 4], "pinning one more keeps them");
+        s.toggle_pin(1);
+        assert_eq!(crate::pinned(&s), vec![0, 2, 4]);
+        assert!(s.is_pinned(4) && !s.is_pinned(1));
+        let saved = crate::prefs::load_pins().unwrap();
+        assert_eq!(saved.len(), 3);
+        assert!(saved[2].eq_ignore_ascii_case(&s.data.repos[4].full_name), "remembered by full name");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
