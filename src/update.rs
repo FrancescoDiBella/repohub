@@ -132,6 +132,7 @@ pub fn is_newer(release: &Release, sha: &str, built: Option<i64>) -> bool {
 }
 
 /// Checks `bytes` (the file `name`) against a `SHA256SUMS` text (`<hex>  <name>` lines).
+#[cfg(not(target_arch = "wasm32"))]
 pub fn verify(bytes: &[u8], name: &str, sums: &str) -> Result<(), String> {
     use sha2::{Digest, Sha256};
     let want = sums.lines().find_map(|l| {
