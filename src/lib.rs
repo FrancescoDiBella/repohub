@@ -64,12 +64,16 @@ pub enum Page {
 }
 
 pub use state::Status;
-use state::{BranchSlot, Compose, Load, Refresh, RepoFilter, RepoSort, RepoTab, Save, Submit, Theme, Toast, ToastKind};
+use state::{BranchSlot, Compose, Load, OwnerFilter, Refresh, RepoFilter, RepoSort, RepoTab, Save, Submit, Theme, Toast, ToastKind};
 
 pub struct App {
     sidebar: PaneState,
     page: Page,
     filter: RepoFilter,
+    /// Whose repositories the Repositories page shows.
+    owner: OwnerFilter,
+    /// The Organizations section of the sidebar is collapsed.
+    orgs_closed: bool,
     /// The section of the repository page. Change it with `set_tab`, which runs what a section
     /// needs on entry and tidies up the one it leaves.
     tab: RepoTab,
@@ -969,6 +973,8 @@ fn init() -> App {
         sidebar: PaneState::new(248.0).range(180.0, 360.0),
         page: Page::Overview,
         filter: RepoFilter::All,
+        owner: OwnerFilter::All,
+        orgs_closed: false,
         tab: RepoTab::Code,
         pr_filter: PullState::Open,
         search: TextEdit::new(""),
@@ -1071,11 +1077,40 @@ fn kit(dark: bool) -> Kit {
 
 fn nav(s: &App, k: &Kit, label: &str, icon: &'static rune::Icon, page: Page, badge: Option<usize>) -> El {
     let selected = s.page == page || (page == Page::Repos && matches!(s.page, Page::Repo(_)));
-    let mut r = SidebarRow::new(label).icon(icon).height(32.0).selected(selected).on_select(move |s: &mut App, _| s.go(page));
+    // The Repositories row shows every owner again.
+    let mut r = SidebarRow::new(label).icon(icon).height(32.0).selected(selected).on_select(move |s: &mut App, _| {
+        if page == Page::Repos {
+            s.owner = OwnerFilter::All;
+        }
+        s.go(page)
+    });
     if let Some(n) = badge.filter(|n| *n > 0) {
         r = r.badge(n.to_string());
     }
     r.build(k).key(format!("nav-{label}"))
+}
+
+/// The organizations whose repositories are loaded, with how many each, most first.
+fn orgs(s: &App) -> Vec<(String, usize)> {
+    let me = &s.data.profile.login;
+    let mut out: Vec<(String, usize)> = Vec::new();
+    for r in s.data.repos.iter().filter(|r| !r.owner.eq_ignore_ascii_case(me)) {
+        match out.iter_mut().find(|(o, _)| o.eq_ignore_ascii_case(&r.owner)) {
+            Some((_, n)) => *n += 1,
+            None => out.push((r.owner.clone(), 1)),
+        }
+    }
+    out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase())));
+    out
+}
+
+impl App {
+    /// Shows the Repositories page for `owner`.
+    fn show_owner(&mut self, owner: OwnerFilter) {
+        state::trace("owner", &self.owner, &owner);
+        self.owner = owner;
+        self.go(Page::Repos);
+    }
 }
 
 /// The pinned repositories: the names in REPOHUB_PINNED, else the three most recently pushed.
@@ -1098,7 +1133,13 @@ fn sidebar(s: &App, k: &Kit) -> El {
         SidebarRow::new(r.name.clone()).avatar(ui::avatar(k, &r.name, r.hue, 16.0)).height(30.0)
             .selected(s.page == Page::Repo(i)).on_select(move |s: &mut App, _| s.open(i)).build(k).key(format!("pin-{}", r.full_name))
     }).collect();
-    Sidebar::new()
+    let org_rows: Vec<El> = orgs(s).into_iter().map(|(o, n)| {
+        let on = s.page == Page::Repos && s.owner == OwnerFilter::Org(o.clone());
+        let pick = o.clone();
+        SidebarRow::new(o.clone()).avatar(ui::avatar(k, &o, 210.0, 16.0)).height(30.0).badge(n.to_string())
+            .selected(on).on_select(move |s: &mut App, _| s.show_owner(OwnerFilter::Org(pick.clone()))).build(k).key(format!("org-{o}"))
+    }).collect();
+    let mut sb = Sidebar::new()
         .label("Navigation")
         .header(brand)
         .header(nav(s, k, "Overview", &icons::HOME, Page::Overview, None))
@@ -1107,9 +1148,12 @@ fn sidebar(s: &App, k: &Kit) -> El {
         .header(nav(s, k, "Issues", &icons::ISSUE, Page::Issues, Some(s.data.issues.len())))
         .header(nav(s, k, "Actions", &icons::PLAY, Page::Actions, None))
         .section(SidebarSection::new("Pinned").count(pinned.len()).collapsed(!s.pinned_open)
-            .on_toggle(|s: &mut App, _| s.pinned_open = !s.pinned_open).rows(pinned))
-        .footer(nav(s, k, "Settings", &icons::GEAR, Page::Settings, None))
-        .build(k)
+            .on_toggle(|s: &mut App, _| s.pinned_open = !s.pinned_open).rows(pinned));
+    if !org_rows.is_empty() {
+        sb = sb.section(SidebarSection::new("Organizations").count(org_rows.len()).collapsed(s.orgs_closed)
+            .on_toggle(|s: &mut App, _| s.orgs_closed = !s.orgs_closed).rows(org_rows));
+    }
+    sb.footer(nav(s, k, "Settings", &icons::GEAR, Page::Settings, None)).build(k)
 }
 
 fn title(s: &App) -> String {

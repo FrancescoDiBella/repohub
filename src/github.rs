@@ -123,6 +123,7 @@ impl Gh {
             forks: n(v, "forks_count"),
             issues: n(v, "open_issues_count"),
             updated: self.ago(&s(v, "pushed_at")),
+            pushed: parse_iso(&s(v, "pushed_at")).unwrap_or(0),
             private: b(v, "private"),
             fork: b(v, "fork"),
             archived: b(v, "archived"),
@@ -134,35 +135,57 @@ impl Gh {
         }
     }
 
+    /// The account's repositories and those of its organizations (`cfg.orgs`), most recently
+    /// pushed first. With the account's own token, `/user/repos` lists both, private ones
+    /// included; otherwise the public repositories of the user and of its public organizations.
     pub async fn repos(&self, cfg: &Config, login: &str, own: bool) -> Result<Vec<Repo>, String> {
+        use crate::state::Orgs;
         let starred: HashSet<String> = if self.t.has_token() {
             self.get("/user/starred?per_page=100").await.ok().and_then(|v| v.as_array().cloned()).unwrap_or_default()
                 .iter().map(|r| s(r, "full_name")).collect()
         } else {
             HashSet::new()
         };
+        let wanted = |r: &Repo| (!r.fork || cfg.include_forks) && (!r.archived || cfg.include_archived)
+            && (r.owner.eq_ignore_ascii_case(login) || cfg.orgs.includes(&r.owner));
         let mut out = Vec::new();
-        let mut page = 1;
-        while out.len() < cfg.max_repos && page <= 10 {
-            // The token's owner also sees private repositories through /user/repos.
-            let path = if own {
-                format!("/user/repos?affiliation=owner&sort=pushed&per_page=100&page={page}")
-            } else {
-                format!("/users/{login}/repos?type=owner&sort=pushed&per_page=100&page={page}")
+        if own {
+            // The token's owner also sees private repositories, and its organizations', here.
+            let affiliation = if cfg.orgs == Orgs::Off { "owner" } else { "owner,organization_member" };
+            let mut page = 1;
+            while out.len() < cfg.max_repos && page <= 10 {
+                let v = self.get(&format!("/user/repos?affiliation={affiliation}&sort=pushed&per_page=100&page={page}")).await?;
+                let items = v.as_array().cloned().unwrap_or_default();
+                out.extend(items.iter().map(|r| self.repo(r, &starred)).filter(wanted));
+                if items.len() < 100 {
+                    break;
+                }
+                page += 1;
+            }
+        } else {
+            let mut page = 1;
+            while out.len() < cfg.max_repos && page <= 10 {
+                let v = self.get(&format!("/users/{login}/repos?type=owner&sort=pushed&per_page=100&page={page}")).await?;
+                let items = v.as_array().cloned().unwrap_or_default();
+                out.extend(items.iter().map(|r| self.repo(r, &starred)).filter(wanted));
+                if items.len() < 100 {
+                    break;
+                }
+                page += 1;
+            }
+            // Public organizations, then their public repositories (one request each).
+            let orgs: Vec<String> = match &cfg.orgs {
+                Orgs::Off => Vec::new(),
+                Orgs::Only(list) => list.clone(),
+                Orgs::All => self.get(&format!("/users/{login}/orgs?per_page=100")).await.ok().and_then(|v| v.as_array().cloned()).unwrap_or_default()
+                    .iter().map(|o| s(o, "login")).filter(|o| !o.is_empty()).collect(),
             };
-            let v = self.get(&path).await?;
-            let items = v.as_array().cloned().unwrap_or_default();
-            let done = items.len() < 100;
-            for r in &items {
-                let repo = self.repo(r, &starred);
-                if (!repo.fork || cfg.include_forks) && (!repo.archived || cfg.include_archived) {
-                    out.push(repo);
+            for org in orgs.iter().take(20) {
+                if let Ok(v) = self.get(&format!("/orgs/{org}/repos?type=public&sort=pushed&per_page=100")).await {
+                    out.extend(v.as_array().cloned().unwrap_or_default().iter().map(|r| self.repo(r, &starred)).filter(wanted));
                 }
             }
-            if done {
-                break;
-            }
-            page += 1;
+            out.sort_by(|a, b| b.pushed.cmp(&a.pushed));
         }
         out.truncate(cfg.max_repos);
         Ok(out)
@@ -192,8 +215,10 @@ impl Gh {
         }).collect()
     }
 
-    pub async fn issues(&self, login: &str) -> Vec<Issue> {
-        self.search(&format!("is:issue is:open archived:false user:{login}")).await.iter().map(|v| Issue {
+    /// Open issues in the account's repositories and in those of `orgs` (search ORs the owners).
+    pub async fn issues(&self, login: &str, orgs: &[String]) -> Vec<Issue> {
+        let owners: String = orgs.iter().take(10).map(|o| format!(" org:{o}")).collect();
+        self.search(&format!("is:issue is:open archived:false user:{login}{owners}")).await.iter().map(|v| Issue {
             number: n(v, "number"),
             title: s(v, "title"),
             repo: repo_from_url(&s(v, "repository_url")),
@@ -325,7 +350,11 @@ pub async fn load_all(cfg: &Config) -> Result<Data, String> {
     };
     let repos = gh.repos(cfg, &profile.login, own).await?;
     let pulls = gh.pulls(&profile.login).await;
-    let issues = gh.issues(&profile.login).await;
+    // The organizations whose repositories were loaded: their issues too.
+    let mut orgs: Vec<String> = repos.iter().map(|r| r.owner.clone()).filter(|o| !o.eq_ignore_ascii_case(&profile.login)).collect();
+    orgs.sort_by_key(|o| o.to_lowercase());
+    orgs.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+    let issues = gh.issues(&profile.login, &orgs).await;
     let active: Vec<String> = repos.iter().filter(|r| !r.archived).take(cfg.activity_repos).map(|r| r.full_name.clone()).collect();
     let mut runs: Vec<Run> = Vec::new();
     let mut activity = vec![0u32; 26];

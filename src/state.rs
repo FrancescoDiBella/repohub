@@ -392,6 +392,59 @@ pub enum BranchSlot {
     Base,
 }
 
+/// Which organizations' repositories to load (`REPOHUB_ORGS`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Orgs {
+    /// Every organization the account belongs to (the default).
+    #[default]
+    All,
+    /// Only the account's own repositories.
+    Off,
+    /// These organizations (logins, lowercase).
+    Only(Vec<String>),
+}
+
+impl Orgs {
+    /// `""` or `all`, `none`, or a comma-separated list of logins.
+    pub fn parse(v: &str) -> Orgs {
+        match v.trim().to_ascii_lowercase().as_str() {
+            "" | "all" => Orgs::All,
+            "none" | "off" | "0" => Orgs::Off,
+            list => Orgs::Only(list.split(',').map(|o| o.trim().to_owned()).filter(|o| !o.is_empty()).collect()),
+        }
+    }
+
+    /// Whether repositories owned by organization `owner` are wanted.
+    pub fn includes(&self, owner: &str) -> bool {
+        match self {
+            Orgs::All => true,
+            Orgs::Off => false,
+            Orgs::Only(list) => list.iter().any(|o| o.eq_ignore_ascii_case(owner)),
+        }
+    }
+}
+
+/// Whose repositories the Repositories page shows.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum OwnerFilter {
+    #[default]
+    All,
+    /// The account's own.
+    Mine,
+    /// One organization's (its login).
+    Org(String),
+}
+
+impl OwnerFilter {
+    pub fn matches(&self, owner: &str, me: &str) -> bool {
+        match self {
+            OwnerFilter::All => true,
+            OwnerFilter::Mine => owner.eq_ignore_ascii_case(me),
+            OwnerFilter::Org(o) => owner.eq_ignore_ascii_case(o),
+        }
+    }
+}
+
 /// Prints a state change to stderr when `REPOHUB_TRACE=1`, one line each:
 /// `state: page Overview -> Repos`. For debugging and for agents driving the app headless.
 pub fn trace(what: &str, from: &dyn std::fmt::Debug, to: &dyn std::fmt::Debug) {
@@ -438,6 +491,17 @@ mod tests {
         assert!(!l.edit() && !l.written(Ok(())));
         l.loaded(Ok(()));
         assert_eq!(l, Save::Saved);
+    }
+
+    #[test]
+    fn orgs_and_owners() {
+        assert_eq!(Orgs::parse(""), Orgs::All);
+        assert_eq!(Orgs::parse("None"), Orgs::Off);
+        assert_eq!(Orgs::parse("acme, XR-Lab"), Orgs::Only(vec!["acme".into(), "xr-lab".into()]));
+        assert!(Orgs::parse("acme,xr-lab").includes("XR-Lab") && !Orgs::parse("acme").includes("other"));
+        assert!(!Orgs::Off.includes("acme") && Orgs::All.includes("acme"));
+        assert!(OwnerFilter::Mine.matches("Octo", "octo") && !OwnerFilter::Mine.matches("acme", "octo"));
+        assert!(OwnerFilter::Org("acme".into()).matches("ACME", "octo"));
     }
 
     #[test]

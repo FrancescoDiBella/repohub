@@ -5,7 +5,7 @@ use rune_kit::{Badge, BadgeVariant, Button, ButtonVariant, ControlSize, Kit, Seg
 use crate::lists::{pull_row, run_row};
 use crate::model::{PullState, Repo, lang_hue};
 use crate::ui::{self, panel, panel_head, rule};
-use crate::state::{BranchSlot, Compose, Load, RepoFilter, RepoSort, RepoTab};
+use crate::state::{BranchSlot, Compose, Load, OwnerFilter, RepoFilter, RepoSort, RepoTab};
 use crate::{App, Page, actions, icons};
 
 pub fn heading(k: &Kit, title: &str, subtitle: &str, action: Option<El>) -> El {
@@ -55,7 +55,7 @@ pub fn overview(s: &App, k: &Kit) -> El {
         .child(col().w_full().px(16.0).pb(16.0).child(ui::sparkline(k, &d.activity, 72.0)));
     let recent = d.repos.iter().enumerate().take(4).fold(
         panel(k).child(panel_head(k, "Recent repositories", Some(see_all(k, "See all", Page::Repos)))),
-        |p, (i, r)| p.child(rule(k)).child(compact_repo(k, i, r)),
+        |p, (i, r)| p.child(rule(k)).child(compact_repo(k, i, r, &d.profile.login)),
     );
     let review = d.pulls.iter().filter(|p| matches!(p.state, PullState::Open | PullState::Draft)).take(4).fold(
         panel(k).child(panel_head(k, "Open pull requests", Some(see_all(k, "All pull requests", Page::Pulls)))),
@@ -80,13 +80,15 @@ fn see_all(k: &Kit, label: &str, page: Page) -> El {
         .on_press(move |s: &mut App| s.go(page)).build(k)
 }
 
-fn compact_repo(k: &Kit, i: usize, r: &Repo) -> El {
+fn compact_repo(k: &Kit, i: usize, r: &Repo, me: &str) -> El {
     row().w_full().px(16.0).py(10.0).gap(12.0).center_y().hover(k.c.hover).press(k.c.pressed)
         .on_press(move |s: &mut App| s.open(i)).key(format!("recent-{}", r.full_name))
         .child(ui::avatar(k, &r.name, r.hue, 28.0))
         .child(col().grow(1.0).shrink().gap(2.0)
             .child(text(r.name.clone()).font(k.ty.ui_medium).color(k.c.text_base))
-            .child(row().gap(12.0).child(ui::language(k, &r.language, r.hue)).child(ui::stat(k, &icons::STAR, r.stars.to_string()))))
+            .child(row().gap(12.0)
+                .child(if r.owner.eq_ignore_ascii_case(&me) { el() } else { text(r.owner.clone()).font(k.ty.text_small).color(k.c.text_muted) })
+                .child(ui::language(k, &r.language, r.hue)).child(ui::stat(k, &icons::STAR, r.stars.to_string()))))
         .child(text(r.updated.clone()).font(k.ty.text_small).color(k.c.text_faint))
 }
 
@@ -98,7 +100,7 @@ pub fn repos(s: &App, k: &Kit) -> El {
     let all = &s.data.repos;
     let shown: Vec<usize> = (0..all.len()).filter(|&i| {
         let r = &all[i];
-        s.filter.matches(r.private, r.fork) && (q.is_empty() || r.name.to_lowercase().contains(&q) || r.description.to_lowercase().contains(&q) || r.topics.iter().any(|t| t.contains(&q)))
+        s.owner.matches(&r.owner, &s.data.profile.login) && s.filter.matches(r.private, r.fork) && (q.is_empty() || r.name.to_lowercase().contains(&q) || r.description.to_lowercase().contains(&q) || r.topics.iter().any(|t| t.contains(&q)))
     }).collect();
     let mut shown = shown;
     match s.sort {
@@ -114,9 +116,27 @@ pub fn repos(s: &App, k: &Kit) -> El {
         .on_edit(|s: &mut App| &mut s.search).build(k).key("search").grow(1.0).min_w(200.0);
     let seg = SegmentedControl::new(&RepoFilter::LABELS, Some(s.filter.index())).label("Filter").fit()
         .on_pick(|s: &mut App, i, _| s.filter = RepoFilter::from_index(i)).build(k).key("filter");
+    // Whose: all, the account's own, or one organization (shown when there are any).
+    let orgs = crate::orgs(s);
+    let mut owners = row().w_full().gap(6.0).center_y().flex_wrap();
+    if !orgs.is_empty() {
+        let me = s.data.profile.login.clone();
+        let mine = all.iter().filter(|r| r.owner.eq_ignore_ascii_case(&me)).count();
+        let mut chips: Vec<(String, OwnerFilter, usize)> = vec![("All".into(), OwnerFilter::All, all.len()), ("Mine".into(), OwnerFilter::Mine, mine)];
+        chips.extend(orgs.into_iter().map(|(o, n)| (o.clone(), OwnerFilter::Org(o), n)));
+        for (label, f, n) in chips {
+            let on = s.owner == f;
+            let key = format!("owner-{label}");
+            owners = owners.child(Button::new(format!("{label} · {n}")).control_size(ControlSize::Small)
+                .icon(if matches!(f, OwnerFilter::Org(_)) { &icons::GLOBE } else { &icons::REPO })
+                .variant(if on { ButtonVariant::Contrast } else { ButtonVariant::Ghost })
+                .on_press(move |s: &mut App| s.owner = f.clone()).build(k).key(key));
+        }
+    }
+    let me = s.data.profile.login.clone();
     let mut list = col().w_full().gap(12.0);
     for &i in &shown {
-        list = list.child(repo_card(k, i, &all[i]));
+        list = list.child(repo_card(k, i, &all[i], !all[i].owner.eq_ignore_ascii_case(&me)));
     }
     if shown.is_empty() {
         let msg = if all.is_empty() { "No repositories to show" } else { "No repositories match your search" };
@@ -126,6 +146,7 @@ pub fn repos(s: &App, k: &Kit) -> El {
     }
     col().w_full().gap(16.0)
         .child(heading(k, "Repositories", &format!("{} of {} repositories", shown.len(), all.len()), Some(new_repo_button(k))))
+        .child(owners)
         .child(row().w_full().gap(12.0).center_y().flex_wrap().child(search).child(seg).child(sort))
         .child(list)
 }
@@ -143,9 +164,14 @@ fn star_button(k: &Kit, i: usize, r: &Repo, with_count: bool, key: String) -> El
         .on_press(move |s: &mut App| s.toggle_star(i)).build(k).key(key)
 }
 
-fn repo_card(k: &Kit, i: usize, r: &Repo) -> El {
+/// A repository in the list; `show_owner` prefixes the name with its organization.
+fn repo_card(k: &Kit, i: usize, r: &Repo, show_owner: bool) -> El {
     let vis = if r.private { Badge::new("Private").variant(BadgeVariant::Subtle).build(k) } else { Badge::new("Public").build(k) };
-    let mut title = row().gap(8.0).center_y().flex_wrap()
+    let mut title = row().gap(8.0).center_y().flex_wrap();
+    if show_owner {
+        title = title.child(text(format!("{} /", r.owner)).font(k.ty.body).color(k.c.text_muted));
+    }
+    let mut title = title
         .child(text(r.name.clone()).font(k.ty.body_medium).color(k.c.text_accent)
             .on_press(move |s: &mut App| s.open(i)).key(format!("open-{}", r.full_name)))
         .child(vis);
