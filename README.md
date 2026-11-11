@@ -147,8 +147,7 @@ Open **Settings → GitHub account**, type your user name and (optionally) a tok
 
 You need [Rust](https://rustup.rs). The toolchain version is pinned in `rust-toolchain.toml` and
 installed automatically.
-- Linux: you also need `libxkbcommon-dev` (only its `libxkbcommon.so` link is used; Wayland and
-  X11 are loaded when the app starts).
+- Linux: you also need `libxkbcommon-dev` and `libwayland-dev`.
 - Windows: you also need the Visual Studio C++ Build Tools.
 
 ```sh
@@ -162,6 +161,14 @@ The sidebar's **Pinned** section (also in the status-bar menu) starts with `REPO
 without it, the three most recently pushed repositories. Pin or unpin any repository with the pin
 on its card, **Pin** on its page or ⌘K → *Pin …*. The first change starts from what the sidebar
 shows, and your pins are remembered from then on (they win over `REPOHUB_PINNED`).
+
+## Where you left off
+
+RepoHub reopens where you were: the page, the repository and its section (Code, Claude,
+Terminal…), the sidebar's width and whether it was open, and the Repositories page's sort and
+owner filter. It waits for the repositories to load before opening a repository; if that
+repository is gone it shows the Repositories page, and if you move first, your move wins. A page
+on the command line (`-- page …`, used by scripts) wins too.
 
 ## Organizations
 

@@ -216,6 +216,11 @@ pub fn sample_detail(r: &Repo) -> Detail {
 }
 
 impl Data {
+    /// Nothing worth remembering a place in: the sample data, or nothing loaded yet.
+    pub fn sample_or_empty(&self) -> bool {
+        self.sample || self.repos.is_empty()
+    }
+
     /// Built-in sample data, shown when no GitHub configuration is present. Everything is made up.
     pub fn sample() -> Data {
         let repo_of = |owner: &str, name: &str, desc: &str, lang: &str, stars, forks, issues, updated: &str, private, fork, branch: &str, topics: &[&str], starred| Repo {
