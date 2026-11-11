@@ -162,6 +162,14 @@ without it, the three most recently pushed repositories. Pin or unpin any reposi
 on its card, **Pin** on its page or ⌘K → *Pin …*. The first change starts from what the sidebar
 shows, and your pins are remembered from then on (they win over `REPOHUB_PINNED`).
 
+## Where you left off
+
+RepoHub reopens where you were: the page, the repository and its section (Code, Claude,
+Terminal…), the sidebar's width and whether it was open, and the Repositories page's sort and
+owner filter. It waits for the repositories to load before opening a repository; if that
+repository is gone it shows the Repositories page, and if you move first, your move wins. A page
+on the command line (`-- page …`, used by scripts) wins too.
+
 ## Organizations
 
 The repositories of the organizations you belong to show next to yours, ordered by last push.

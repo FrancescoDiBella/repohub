@@ -76,6 +76,13 @@ pub struct App {
     /// The repositories pinned in the app (full names); `None`: never changed, so
     /// `REPOHUB_PINNED` or the most recently pushed decide (see `pinned`).
     pins: Option<Vec<String>>,
+    /// Where you were last time, waiting for the repositories to load (see `restore_place`).
+    /// Navigating before then drops it: what you do now wins.
+    pending_place: Option<state::Place>,
+    /// Whether the current place may be saved: not before the saved one was restored.
+    save_places: bool,
+    /// The arrangement last saved, so it's written only when it changes.
+    saved_layout: Option<state::Layout>,
     /// The Organizations section of the sidebar is collapsed.
     orgs_closed: bool,
     /// The section of the repository page. Change it with `set_tab`, which runs what a section
@@ -164,6 +171,10 @@ pub struct App {
 impl App {
     /// Opens a page. Leaving a repository's section closes what belonged to it.
     fn go(&mut self, p: Page) {
+        // Moving before the saved place was restored: you chose where to be.
+        if self.pending_place.take().is_some() {
+            self.save_places = true;
+        }
         if self.page != p {
             state::trace("page", &self.page, &p);
             self.leave_tab();
@@ -171,6 +182,64 @@ impl App {
         self.page = p;
         self.toast = None;
         self.sync_tray();
+        self.save_place();
+    }
+
+    /// The place on screen, for the next start.
+    fn place(&self) -> state::Place {
+        let (page, repo) = match self.page {
+            Page::Overview => ("overview", None),
+            Page::Repos => ("repos", None),
+            Page::Repo(i) => ("repo", self.data.repos.get(i).map(|r| r.full_name.clone())),
+            Page::Pulls => ("pulls", None),
+            Page::Issues => ("issues", None),
+            Page::Actions => ("actions", None),
+            Page::Settings => ("settings", None),
+        };
+        state::Place { page: page.into(), tab: repo.as_ref().map(|_| self.tab), repo }
+    }
+
+    fn save_place(&mut self) {
+        if self.save_places && !self.data.sample_or_empty() {
+            prefs::set("place", self.place().to_json());
+        }
+        self.save_layout();
+    }
+
+    /// The sidebar and the list's sort and owner, saved when they changed.
+    fn save_layout(&mut self) {
+        let now = state::Layout { sidebar_width: self.sidebar.width(), sidebar_open: self.sidebar.is_open(), sort: self.sort, owner: self.owner.clone() };
+        if self.saved_layout.as_ref() != Some(&now) {
+            prefs::set("layout", now.to_json());
+            self.saved_layout = Some(now);
+        }
+    }
+
+    /// Opens the place saved last time, once the repositories are here. A repository that's
+    /// gone falls back to the Repositories page.
+    fn restore_place(&mut self) {
+        let Some(p) = self.pending_place.take() else { return };
+        self.save_places = true;
+        state::trace("restore", &"place", &p);
+        let page = match p.page.as_str() {
+            "repos" => Page::Repos,
+            "pulls" => Page::Pulls,
+            "issues" => Page::Issues,
+            "actions" => Page::Actions,
+            "settings" => Page::Settings,
+            "repo" => match p.repo.as_ref().and_then(|full| self.data.repos.iter().position(|r| r.full_name.eq_ignore_ascii_case(full))) {
+                Some(i) => {
+                    self.open(i);
+                    if let Some(t) = p.tab {
+                        self.set_tab(i, t);
+                    }
+                    return;
+                }
+                None => Page::Repos,
+            },
+            _ => Page::Overview,
+        };
+        self.go(page);
     }
 
     /// Tidies up the repository section on screen before another one (or another page) shows:
@@ -192,6 +261,7 @@ impl App {
             self.leave_tab();
         }
         self.tab = tab;
+        self.save_place();
         match tab {
             RepoTab::Notes => self.load_notes(i),
             RepoTab::Terminal => self.open_terminal(i),
@@ -236,6 +306,7 @@ impl App {
             state::trace("refresh", &"due", &self.cfg.refresh_every());
             self.refresh();
         }
+        self.save_layout();
         // A new Latest build is looked for every 6 hours.
         if self.update_checked.is_some_and(|c| self.clock - c >= 6.0 * 3600.0) {
             self.check_update(false);
@@ -498,6 +569,7 @@ impl App {
                 if let Page::Repo(i) = self.page {
                     if i < self.data.repos.len() { self.load_detail(i) } else { self.page = Page::Repos }
                 }
+                self.restore_place();
             }
             Err(e) => self.set_status(Status::Failed(e)),
         }
@@ -1065,6 +1137,9 @@ fn init() -> App {
         owner: OwnerFilter::All,
         orgs_closed: false,
         pins: prefs::load_pins(),
+        pending_place: None,
+        save_places: false,
+        saved_layout: None,
         tab: RepoTab::Code,
         pr_filter: PullState::Open,
         search: TextEdit::new(""),
@@ -1149,6 +1224,25 @@ fn init() -> App {
     // `-- tab notes` (a name or a number) picks the repository page's section.
     if let Some(t) = arg("tab").and_then(|t| RepoTab::parse(&t)) {
         s.tab = t;
+    }
+    // The arrangement and the place of last time; a page on the command line (scripts) wins.
+    if let Some(l) = prefs::get("layout").as_ref().and_then(state::Layout::from_json) {
+        s.sidebar.set_width(l.sidebar_width);
+        s.sidebar.set_open(l.sidebar_open);
+        s.sort = l.sort;
+        s.owner = l.owner.clone();
+        s.saved_layout = Some(l);
+    }
+    // The sample data has no places of its own to go back to.
+    if arg("page").is_none() && !s.data.sample {
+        s.pending_place = prefs::get("place").as_ref().and_then(state::Place::from_json);
+        if !s.data.repos.is_empty() {
+            s.restore_place();
+        }
+    }
+    // Nothing waiting to be restored: where you go from now on is saved.
+    if s.pending_place.is_none() {
+        s.save_places = true;
     }
     if let Some(q) = arg("search") {
         s.search = TextEdit::new(q);
@@ -1537,6 +1631,7 @@ pub fn start() {
     if tray::keeps_running() {
         app = app.keep_running().on_close(on_close);
     }
+    let app = app.on_quit(|s: &mut App, _| s.save_layout());
     let handle = app.handle();
     let h2 = handle.clone();
     handle.update(move |s: &mut App, _| {

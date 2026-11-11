@@ -445,6 +445,72 @@ impl OwnerFilter {
     }
 }
 
+/// Where you were: a page, and on a repository's page the repository (full name) and section.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Place {
+    pub page: String,
+    pub repo: Option<String>,
+    pub tab: Option<RepoTab>,
+}
+
+impl Place {
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "page": self.page,
+            "repo": self.repo,
+            "tab": self.tab.map(|t| format!("{t:?}").to_lowercase()),
+        })
+    }
+
+    pub fn from_json(v: &serde_json::Value) -> Option<Place> {
+        let page = v.get("page")?.as_str()?.to_owned();
+        Some(Place {
+            page,
+            repo: v.get("repo").and_then(|r| r.as_str()).map(str::to_owned),
+            tab: v.get("tab").and_then(|t| t.as_str()).and_then(RepoTab::parse),
+        })
+    }
+}
+
+/// How the window was arranged: the sidebar, and the Repositories page's sort and owner.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Layout {
+    pub sidebar_width: f32,
+    pub sidebar_open: bool,
+    pub sort: RepoSort,
+    pub owner: OwnerFilter,
+}
+
+impl Layout {
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "sidebarWidth": self.sidebar_width,
+            "sidebarOpen": self.sidebar_open,
+            "sort": RepoSort::LABELS[self.sort.index()].to_lowercase(),
+            "owner": match &self.owner {
+                OwnerFilter::All => "all".to_owned(),
+                OwnerFilter::Mine => "mine".to_owned(),
+                OwnerFilter::Org(o) => format!("org:{o}"),
+            },
+        })
+    }
+
+    pub fn from_json(v: &serde_json::Value) -> Option<Layout> {
+        let sort = v.get("sort").and_then(|s| s.as_str()).unwrap_or("recent");
+        let owner = v.get("owner").and_then(|o| o.as_str()).unwrap_or("all");
+        Some(Layout {
+            sidebar_width: v.get("sidebarWidth")?.as_f64()? as f32,
+            sidebar_open: v.get("sidebarOpen").and_then(|o| o.as_bool()).unwrap_or(true),
+            sort: RepoSort::ALL.into_iter().find(|s| RepoSort::LABELS[s.index()].eq_ignore_ascii_case(sort)).unwrap_or_default(),
+            owner: match owner {
+                "mine" => OwnerFilter::Mine,
+                o if o.starts_with("org:") && o.len() > 4 => OwnerFilter::Org(o[4..].to_owned()),
+                _ => OwnerFilter::All,
+            },
+        })
+    }
+}
+
 /// Prints a state change to stderr when `REPOHUB_TRACE=1`, one line each:
 /// `state: page Overview -> Repos`. For debugging and for agents driving the app headless.
 pub fn trace(what: &str, from: &dyn std::fmt::Debug, to: &dyn std::fmt::Debug) {
@@ -491,6 +557,17 @@ mod tests {
         assert!(!l.edit() && !l.written(Ok(())));
         l.loaded(Ok(()));
         assert_eq!(l, Save::Saved);
+    }
+
+    #[test]
+    fn place_and_layout_round_trip() {
+        let p = Place { page: "repo".into(), repo: Some("acme/site".into()), tab: Some(RepoTab::Claude) };
+        assert_eq!(Place::from_json(&p.to_json()), Some(p));
+        let l = Layout { sidebar_width: 301.5, sidebar_open: false, sort: RepoSort::Stars, owner: OwnerFilter::Org("xr-lab".into()) };
+        assert_eq!(Layout::from_json(&l.to_json()), Some(l));
+        assert_eq!(Place::from_json(&serde_json::json!({"nope": 1})), None);
+        let old = Layout::from_json(&serde_json::json!({"sidebarWidth": 200.0})).unwrap();
+        assert_eq!((old.sort, old.owner, old.sidebar_open), (RepoSort::Recent, OwnerFilter::All, true), "missing keys take their defaults");
     }
 
     #[test]
