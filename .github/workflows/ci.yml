@@ -10,6 +10,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # The build names -lxkbcommon for the linker (Wayland and X11 are loaded at run time), and
+      # the program ends up using none of its symbols. So no Ubuntu package is needed: link the
+      # runner's runtime library under its unversioned name, or else an empty stand-in. A symbol
+      # that really were used would then fail the link loudly, not ship a broken program.
+      - name: xkbcommon for the linker
+        run: |
+          lib=/usr/lib/x86_64-linux-gnu
+          if [ -e "$lib/libxkbcommon.so" ]; then exit 0; fi
+          if [ -e "$lib/libxkbcommon.so.0" ]; then sudo ln -s libxkbcommon.so.0 "$lib/libxkbcommon.so"
+          else echo 'void repohub_xkbcommon_stub(void) {}' | sudo cc -shared -x c - -o "$lib/libxkbcommon.so"; fi
       # rust-toolchain.toml pins the toolchain; rustup installs it on first use.
       - name: Toolchain
         run: rustup show active-toolchain && rustup target add wasm32-unknown-unknown
