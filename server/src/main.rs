@@ -60,7 +60,7 @@ impl Cfg {
         let pinned: Vec<String> = env("REPOHUB_PINNED").map(|v| v.split(',').map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()).collect()).unwrap_or_default();
         let num = |k: &str, d: u64| env(k).and_then(|v| v.parse::<u64>().ok()).unwrap_or(d);
         let public_json = format!(
-            "{{\"user\":{},\"hasToken\":{},\"api\":{},\"title\":{},\"theme\":{},\"pinned\":[{}],\"includeForks\":{},\"includeArchived\":{},\"maxRepos\":{},\"activityRepos\":{},\"demo\":{},\"notes\":true}}",
+            "{{\"user\":{},\"hasToken\":{},\"api\":{},\"title\":{},\"theme\":{},\"pinned\":[{}],\"includeForks\":{},\"includeArchived\":{},\"maxRepos\":{},\"activityRepos\":{},\"refreshMinutes\":{},\"demo\":{},\"notes\":true}}",
             opt("GITHUB_USER"),
             token.is_some(),
             json_str(&api),
@@ -71,6 +71,7 @@ impl Cfg {
             flag("REPOHUB_INCLUDE_ARCHIVED", false),
             num("REPOHUB_MAX_REPOS", 100),
             num("REPOHUB_ACTIVITY_REPOS", 5),
+            num("REPOHUB_REFRESH_MINUTES", 10),
             flag("REPOHUB_DEMO", false),
         );
         let mut allowed_hosts: Vec<String> = ["localhost", "127.0.0.1", "[::1]"].iter().map(|s| s.to_string()).collect();

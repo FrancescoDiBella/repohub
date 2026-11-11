@@ -140,6 +140,16 @@ cargo run --release                   # the first build takes a few minutes
 packaging/macos/bundle.sh 0.1.0       # macOS: builds dist/RepoHub.app and the .dmg
 ```
 
+## Staying up to date
+
+While an account is connected RepoHub refreshes by itself every 10 minutes
+(`REPOHUB_REFRESH_MINUTES`; `0` turns it off), also while it waits in the status bar. Without a
+token it never refreshes more often than every 30 minutes, so it can't use up GitHub's 60
+requests an hour. A refresh that fails is tried again after the next interval.
+
+"Updated 3 minutes ago" shows on the Overview, in the refresh button's tooltip, in the status-bar
+menu and in Settings, which also says when the next refresh is due. ⌘R (Ctrl+R) refreshes now.
+
 ## Search and commands
 
 **⌘K** (Ctrl+K on Windows and Linux), or the search button in the toolbar, opens a palette over the

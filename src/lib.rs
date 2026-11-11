@@ -128,6 +128,18 @@ pub struct App {
     term_error: Option<String>,
     /// The window is phone-sized: the pages use the layout in `mobile`.
     compact: bool,
+    /// When GitHub's data on screen was loaded, and when the last load started (Unix seconds).
+    loaded_at: Option<i64>,
+    last_load: Option<i64>,
+    /// The clock the "updated … ago" labels read; it ticks every 30 seconds.
+    now: i64,
+    /// Rune's frame clock (seconds since start; virtual in headless runs), when the last tick
+    /// ran, and its value at the last load and the last data. It measures intervals with the
+    /// wall clock above, which also counts time the computer slept.
+    clock: f64,
+    tick_at: f64,
+    load_clock: Option<f64>,
+    loaded_clock: Option<f64>,
     /// The command palette, while it's open (⌘K / Ctrl+K).
     palette: Option<palette::Palette>,
     /// The status-bar widget, and the menu it shows now.
@@ -179,6 +191,38 @@ impl App {
             state::trace("status", &self.status.name(), &status.name());
         }
         self.status = status;
+        self.sync_tray();
+    }
+
+    /// Seconds since `wall` (Unix seconds) and `mono` (frame clock), whichever measured more.
+    fn since(&self, wall: Option<i64>, mono: Option<f64>) -> Option<i64> {
+        let w = wall.map(|t| self.now - t);
+        let m = mono.map(|c| (self.clock - c) as i64);
+        w.max(m).map(|d| d.max(0))
+    }
+
+    /// "Updated 3 minutes ago", once GitHub's data has loaded.
+    fn freshness(&self) -> Option<String> {
+        let age = self.since(self.loaded_at, self.loaded_clock)?;
+        Some(format!("Updated {}", model::ago(self.now - age, self.now)))
+    }
+
+    /// Seconds until the next automatic refresh (negative: overdue), if they're on. The
+    /// interval counts from when the last load started, so a failed load waits a whole one.
+    fn refresh_in(&self) -> Option<i64> {
+        let every = self.cfg.refresh_every()? as i64 * 60;
+        let since = self.since(self.last_load.or(self.loaded_at), self.load_clock.or(self.loaded_clock))?;
+        Some(every - since)
+    }
+
+    /// Every 30 seconds: move the labels' clock, and refresh when it's due. A load already
+    /// running, the sample data, or a refresh turned off skip it.
+    fn tick(&mut self) {
+        self.now = net::now();
+        if self.refresh_in().is_some_and(|left| left <= 0) && self.status.can_load() {
+            state::trace("refresh", &"due", &self.cfg.refresh_every());
+            self.refresh();
+        }
         self.sync_tray();
     }
 
@@ -340,6 +384,8 @@ impl App {
         if !self.cfg.live() || !self.status.can_load() {
             return;
         }
+        self.last_load = Some(net::now());
+        self.load_clock = Some(self.clock);
         self.set_status(Status::Loading);
         if let Some(h) = self.handle.clone() {
             let cfg = self.cfg.clone();
@@ -352,6 +398,9 @@ impl App {
             Ok(d) => {
                 self.data = d;
                 self.details.clear();
+                self.loaded_at = Some(net::now());
+                self.loaded_clock = Some(self.clock);
+                self.now = net::now();
                 self.set_status(Status::Ready);
                 if let Page::Repo(i) = self.page {
                     if i < self.data.repos.len() { self.load_detail(i) } else { self.page = Page::Repos }
@@ -962,6 +1011,13 @@ fn init() -> App {
         tray: None,
         tray_menu: Vec::new(),
         palette: None,
+        loaded_at: None,
+        last_load: None,
+        now: net::now(),
+        clock: 0.0,
+        tick_at: 0.0,
+        load_clock: None,
+        loaded_clock: None,
         cfg,
     };
     // `REPOHUB_BLOCKING=1` loads synchronously before the first frame (headless snapshots).
@@ -1136,7 +1192,8 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
     let mut trailing = row().gap(4.0).center_y();
     if s.cfg.live() {
         trailing = trailing.child(IconButton::new(&icons::REFRESH).variant(IconButtonVariant::GhostMuted).label("Refresh")
-            .help("Refresh from GitHub").disabled(s.status.is_busy()).on_press(|s: &mut App| s.refresh()).build(&k).key("refresh"));
+            .help(match s.freshness() { Some(f) => format!("Refresh from GitHub · {}", f.to_lowercase()), None => "Refresh from GitHub".into() })
+            .disabled(s.status.is_busy()).on_press(|s: &mut App| s.refresh()).build(&k).key("refresh"));
     }
     let search = IconButton::new(k.glyph.search).variant(IconButtonVariant::GhostMuted).label("Search and commands")
         .help(format!("Search and commands ({}+K)", palette::MOD)).on_press(|s: &mut App| s.palette = Some(palette::Palette::new()))
@@ -1191,6 +1248,20 @@ fn starts_compact() -> bool {
     {
         std::env::var("REPOHUB_COMPACT").is_ok_and(|v| v == "1")
     }
+}
+
+/// Runs at the start of every frame with Rune's clock: ticks every 30 seconds (`App::tick`) and
+/// asks Rune to wake for the next one, also while the window is closed. No timer thread.
+fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
+    const EVERY: f64 = 30.0;
+    s.clock = clock;
+    let due = clock - s.tick_at >= EVERY;
+    if due {
+        s.tick_at = clock;
+        s.tick();
+    }
+    tx.wake_after(std::time::Duration::from_secs_f64((EVERY - (clock - s.tick_at)).max(1.0)));
+    due
 }
 
 /// The window closed: RepoHub stays in the status bar, unless its icon couldn't be shown.
@@ -1265,7 +1336,7 @@ const FAMILIES: (&str, &str) = ("Inter", "ui-monospace, IBM Plex Mono");
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen::prelude::wasm_bindgen(start))]
 pub fn start() {
-    let mut app = rune::App::new(AppSpec { on_key: Some(on_key), fonts: FONTS, families: FAMILIES, ..AppSpec::new("RepoHub", (1180.0, 760.0), init, view) });
+    let mut app = rune::App::new(AppSpec { on_key: Some(on_key), poll: Some(poll), fonts: FONTS, families: FAMILIES, ..AppSpec::new("RepoHub", (1180.0, 760.0), init, view) });
     // With the status-bar widget, closing the window keeps RepoHub there (macOS, Windows).
     if tray::keeps_running() {
         app = app.keep_running().on_close(on_close);

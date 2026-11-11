@@ -64,7 +64,10 @@ pub fn overview(s: &App, k: &Kit) -> El {
     let first = d.profile.name.split_whitespace().next().unwrap_or("").to_owned();
     let hello = if first.is_empty() { "Welcome back".to_owned() } else { format!("Welcome back, {first}") };
     col().w_full().gap(16.0)
-        .child(heading(k, &hello, "Here's what's happening in your repositories today.", Some(new_repo_button(k))))
+        .child(heading(k, &hello, &match s.freshness() {
+            Some(f) => format!("Here's what's happening in your repositories. {f}."),
+            None => "Here's what's happening in your repositories today.".into(),
+        }, Some(new_repo_button(k))))
         .child(metrics)
         .child(activity)
         .child(row().w_full().gap(16.0).flex_wrap()
