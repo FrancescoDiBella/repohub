@@ -140,6 +140,13 @@ cargo run --release                   # the first build takes a few minutes
 packaging/macos/bundle.sh 0.1.0       # macOS: builds dist/RepoHub.app and the .dmg
 ```
 
+## README
+
+The Code tab shows the repository's README rendered as Markdown. Select text as on a web page
+(drag, double- or triple-click; Ctrl/⌘+A for all) and copy it with Ctrl/⌘+C or a right-click.
+Copying whole blocks copies their Markdown, so a pasted code block keeps its fences. **Copy** in
+the panel's head copies the whole README, and each code block has its own copy button.
+
 ## Notes
 
 Each repository has a **Notes** tab with a small whiteboard in the spirit of

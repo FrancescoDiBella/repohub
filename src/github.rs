@@ -229,7 +229,8 @@ impl Gh {
             }
             Err(e) => d.error = Some(e),
         }
-        d.readme = self.get_raw(&format!("/repos/{full}/readme")).await.ok().flatten().map(|t| t.chars().take(4000).collect());
+        // The whole README (up to 200 KB), so Copy copies all of it.
+        d.readme = self.get_raw(&format!("/repos/{full}/readme")).await.ok().flatten().map(|t| t.chars().take(200_000).collect());
         if let Ok(v) = self.get(&format!("/repos/{full}/languages")).await {
             let mut langs: Vec<(String, u64)> = v.as_object().map(|o| o.iter().map(|(k, v)| (k.clone(), v.as_u64().unwrap_or(0))).collect()).unwrap_or_default();
             langs.sort_by(|a, b| b.1.cmp(&a.1));

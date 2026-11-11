@@ -219,6 +219,30 @@ fn list_of(k: &Kit, title: &str, rows: Vec<El>) -> El {
     p
 }
 
+/// A README as rendered Markdown that can be selected and copied like a web page.
+///
+/// - Drag, double- or triple-click to select; Cmd/Ctrl+A selects it all, Cmd/Ctrl+C copies, and
+///   a secondary click offers Copy.
+/// - Copying whole blocks copies their Markdown source (a code block keeps its fences); a part
+///   of one block copies the text as shown.
+/// - Each code block has its own Copy button.
+pub fn readme_view(k: &Kit, md: &str) -> El {
+    let kit = k.clone();
+    rune_kit::Markdown::new(md.to_owned())
+        .selectable(true)
+        .copy_source(true)
+        .code_frame(move |card, c| {
+            let code = c.source.trim_end_matches('\n').to_owned();
+            let copy = rune_kit::IconButton::new(&icons::COPY).variant(rune_kit::IconButtonVariant::GhostMuted).label("Copy code")
+                .help("Copy code")
+                .on_press_tx(move |s: &mut App, tx| { tx.copy(code.clone()); s.notify("Code copied"); })
+                .build(&kit).key(format!("code-copy-{}", c.index));
+            col().w_full().child(card).child(copy.pin(None, Some(6.0), Some(6.0), None))
+        })
+        .on_link_tx(|_: &mut App, url: &str, tx| { let _ = tx.open_url(url); })
+        .build(k).w_full()
+}
+
 fn code_tab(s: &App, k: &Kit, r: &Repo) -> El {
     let load = s.details.get(&r.full_name);
     let detail = load.and_then(Load::ready);
@@ -259,14 +283,21 @@ fn code_tab(s: &App, k: &Kit, r: &Repo) -> El {
             }
         }
     }
-    let readme_body = match detail.and_then(|d| d.readme.as_deref()) {
-        Some(src) => rune_kit::Markdown::new(crate::markdown::prepare(src, &r.full_name, &r.branch))
-            .on_link_tx(|_: &mut App, url: &str, tx| { let _ = tx.open_url(url); })
-            .build(k).w_full(),
+    let readme = detail.and_then(|d| d.readme.clone());
+    let readme_body = match &readme {
+        Some(src) => readme_view(k, &crate::markdown::prepare(src, &r.full_name, &r.branch)),
         None => text(if loading { "Loading…" } else { "This repository has no README." }).font(k.ty.ui).color(k.c.text_muted),
     };
+    // The README panel's head: copy the whole file as Markdown, or read it on GitHub.
+    let readme_tools = match readme {
+        Some(src) => row().gap(4.0).center_y()
+            .child(Button::new("Copy").icon(&icons::COPY).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
+                .on_press_tx(move |s: &mut App, tx| { tx.copy(src.clone()); s.notify("README copied as Markdown"); })
+                .build(k).key("readme-copy")),
+        None => ui::ico(&icons::BOOK, 16.0, k.c.icon_muted),
+    };
     let readme_panel = panel(k)
-        .child(panel_head(k, "README", Some(ui::ico(&icons::BOOK, 16.0, k.c.icon_muted))))
+        .child(panel_head(k, "README", Some(readme_tools)))
         .child(rule(k))
         .child(col().w_full().padding(if s.compact { 14.0 } else { 20.0 }).child(readme_body));
     // Language bar from GitHub's byte counts.
