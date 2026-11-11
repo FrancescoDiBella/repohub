@@ -147,6 +147,11 @@ pub fn settings(s: &App, k: &Kit) -> El {
     } else { None }));
     for (label, value) in [
         ("State", source),
+        ("Last update", match (s.freshness(), s.refresh_in(), cfg.refresh_every()) {
+            (None, _, _) => "not loaded yet".into(),
+            (Some(f), Some(left), Some(m)) => format!("{f} · next in {} (every {m} min, REPOHUB_REFRESH_MINUTES)", minutes(left)),
+            (Some(f), _, _) => format!("{f} · automatic refresh off (REPOHUB_REFRESH_MINUTES=0, or no account)"),
+        }),
         ("Settings file", cfg.env_file.clone().unwrap_or_else(|| "none yet".into())),
         ("User (GITHUB_USER)", cfg.user.clone().unwrap_or_else(|| "from the token".into())),
         ("Token (GITHUB_TOKEN)", if cfg.token.is_some() { "set (not shown)".into() } else { "not set: public data only, 60 requests an hour".into() }),
@@ -219,6 +224,15 @@ fn account_panel(s: &App, k: &Kit) -> El {
         body = body.child(text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap());
     }
     head.child(body.child(buttons))
+}
+
+/// "7 minutes", "less than a minute".
+fn minutes(secs: i64) -> String {
+    match secs.max(0) / 60 {
+        0 => "less than a minute".into(),
+        1 => "1 minute".into(),
+        m => format!("{m} minutes"),
+    }
 }
 
 fn notes_where() -> String {

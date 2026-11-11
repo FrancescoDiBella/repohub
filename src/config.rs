@@ -20,6 +20,8 @@ pub struct Config {
     pub max_repos: usize,
     /// How many recently pushed repositories to read workflow runs and commit activity from.
     pub activity_repos: usize,
+    /// Minutes between automatic refreshes (`REPOHUB_REFRESH_MINUTES`, 0: off). See `refresh_every`.
+    pub refresh_minutes: u32,
     /// Force the sample data even when credentials are present.
     pub demo: bool,
     /// Notes (Excalidraw drawings) are available: true when `repohub-server` serves the app.
@@ -180,7 +182,19 @@ pub fn default_commands() -> Vec<String> {
     ["claude", "git status", "git pull", "git log --oneline -15"].iter().map(|s| s.to_string()).collect()
 }
 
+/// Without a token GitHub allows 60 requests an hour, and a refresh takes about
+/// 4 + 2 × `activity_repos`: never refresh more often than this then.
+pub const MIN_MINUTES_WITHOUT_TOKEN: u32 = 30;
+
 impl Config {
+    /// Minutes between automatic refreshes, or `None` when they're off or there's no account.
+    pub fn refresh_every(&self) -> Option<u32> {
+        if !self.live() || self.refresh_minutes == 0 {
+            return None;
+        }
+        Some(if self.token.is_some() { self.refresh_minutes.max(1) } else { self.refresh_minutes.max(MIN_MINUTES_WITHOUT_TOKEN) })
+    }
+
     /// Reads the project `.env` (from `REPOHUB_ENV`, else the current folder or one of its
     /// parents) and the app's own settings file, then the process environment, which wins.
     pub fn load() -> Config {
@@ -211,6 +225,7 @@ impl Config {
             include_archived: flag(get("REPOHUB_INCLUDE_ARCHIVED"), false),
             max_repos: num("REPOHUB_MAX_REPOS", 100).clamp(1, 1000),
             activity_repos: num("REPOHUB_ACTIVITY_REPOS", 5).clamp(0, 20),
+            refresh_minutes: num("REPOHUB_REFRESH_MINUTES", 10).min(24 * 60) as u32,
             demo: flag(get("REPOHUB_DEMO"), false),
             // The desktop app keeps notes in a local folder; the web build needs repohub-server.
             notes: cfg!(not(target_arch = "wasm32")),
@@ -247,6 +262,7 @@ impl Config {
             include_archived: bo("includeArchived", false),
             max_repos: nu("maxRepos", 100).clamp(1, 1000),
             activity_repos: nu("activityRepos", 5).clamp(0, 20),
+            refresh_minutes: nu("refreshMinutes", 10).min(24 * 60) as u32,
             demo: bo("demo", false),
             notes: bo("notes", false),
             terminal_commands: default_commands(),
@@ -258,7 +274,7 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, parse_env, save_account, user_env_file};
+    use super::{Config, MIN_MINUTES_WITHOUT_TOKEN, parse_env, save_account, user_env_file};
 
     #[test]
     fn web_config() {
@@ -268,6 +284,18 @@ mod tests {
         assert_eq!(c.pinned, vec!["a", "b"]);
         assert_eq!((c.theme, c.max_repos), (crate::state::Theme::Dark, 20));
         assert!(!Config::from_json(r#"{"hasToken":false}"#).unwrap().live());
+    }
+
+    #[test]
+    fn refresh_interval() {
+        let base = Config::from_json(r#"{"user":"octocat","hasToken":true,"refreshMinutes":5}"#).unwrap();
+        assert_eq!(base.refresh_every(), Some(5));
+        let no_token = Config::from_json(r#"{"user":"octocat","hasToken":false,"refreshMinutes":5}"#).unwrap();
+        assert_eq!(no_token.refresh_every(), Some(MIN_MINUTES_WITHOUT_TOKEN), "60 requests an hour: at most every 30 minutes");
+        let off = Config::from_json(r#"{"user":"octocat","hasToken":true,"refreshMinutes":0}"#).unwrap();
+        assert_eq!(off.refresh_every(), None);
+        let default = Config::from_json(r#"{"user":"octocat","hasToken":true}"#).unwrap();
+        assert_eq!(default.refresh_every(), Some(10));
     }
 
     #[test]

@@ -98,7 +98,12 @@ pub fn menu(s: &App) -> Vec<Entry> {
         let label = if blocked { format!("New issue in {}… (connect your account)", r.name) } else { format!("New issue in {}…", r.name) };
         m.push(Entry::item(format!("new-issue:{}", r.full_name), label).off(blocked));
     }
-    m.push(Entry::item("refresh", if s.status.is_busy() { "Refreshing…" } else { "Refresh" }).off(!s.cfg.live() || !s.status.can_load()));
+    let refresh = match (s.status.is_busy(), s.freshness()) {
+        (true, _) => "Refreshing…".to_owned(),
+        (false, Some(f)) => format!("Refresh ({})", f.to_lowercase()),
+        (false, None) => "Refresh".to_owned(),
+    };
+    m.push(Entry::item("refresh", refresh).off(!s.cfg.live() || !s.status.can_load()));
     m.push(Entry::sep());
     m.push(Entry::item("quit", format!("Quit {}", s.cfg.title)));
     m
