@@ -147,7 +147,8 @@ Open **Settings → GitHub account**, type your user name and (optionally) a tok
 
 You need [Rust](https://rustup.rs). The toolchain version is pinned in `rust-toolchain.toml` and
 installed automatically.
-- Linux: you also need `libxkbcommon-dev` and `libwayland-dev`.
+- Linux: nothing else to build. Wayland, X11 and xkbcommon are loaded when the app starts, as
+  every Linux desktop has them.
 - Windows: you also need the Visual Studio C++ Build Tools.
 
 ```sh

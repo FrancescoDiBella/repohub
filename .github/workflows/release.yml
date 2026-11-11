@@ -52,9 +52,6 @@ jobs:
             echo "VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)-dev" >> "$GITHUB_ENV"
           fi
           echo "REPOHUB_BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
-      - name: System libraries for Rune (Linux)
-        if: matrix.name == 'linux'
-        run: .github/scripts/apt-install.sh libxkbcommon-dev libwayland-dev
       # rust-toolchain.toml pins the toolchain; rustup installs it on first use.
       - name: Toolchain
         run: rustup show active-toolchain

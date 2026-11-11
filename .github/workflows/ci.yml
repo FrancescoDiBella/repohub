@@ -10,8 +10,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: System libraries for Rune
-        run: .github/scripts/apt-install.sh libxkbcommon-dev libwayland-dev
       # rust-toolchain.toml pins the toolchain; rustup installs it on first use.
       - name: Toolchain
         run: rustup show active-toolchain && rustup target add wasm32-unknown-unknown
