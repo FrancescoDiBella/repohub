@@ -168,6 +168,7 @@ pub fn settings(s: &App, k: &Kit) -> El {
                 .on_pick(|s: &mut App, i, _| s.set_theme(Theme::ALL[i.min(2)])).build(k).key("theme-pick")));
     let keys = panel(k).child(panel_head(k, "Keyboard shortcuts", None));
     let keys = [
+        ("⌘/Ctrl + K", "Search and commands: jump to any repository or page, run any action"),
         ("⌘/Ctrl + 1 … 5", "Overview, Repositories, Pull requests, Issues, Actions"),
         ("⌘/Ctrl + ,", "Settings"),
         ("⌘/Ctrl + R", "Refresh from GitHub"),

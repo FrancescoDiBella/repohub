@@ -140,6 +140,19 @@ cargo run --release                   # the first build takes a few minutes
 packaging/macos/bundle.sh 0.1.0       # macOS: builds dist/RepoHub.app and the .dmg
 ```
 
+## Search and commands
+
+**⌘K** (Ctrl+K on Windows and Linux), or the search button in the toolbar, opens a palette over the
+window. Type a few letters (they can be the start of any word, or just letters in order: `rhb`
+finds `repohub`) and press Enter:
+
+- any page, repository, open pull request or issue;
+- for the repository on screen: New issue, New pull request, New branch, Ask Claude, Open a
+  terminal, Open on GitHub, Copy the clone URL, and its sections;
+- Refresh and the theme.
+
+↑ ↓ move through the results, Esc or a click outside closes it.
+
 ## Working on GitHub from the app
 
 With a token that has write access, the everyday changes happen in RepoHub:

@@ -32,6 +32,7 @@ mod net;
 mod notes;
 mod notes_page;
 mod pages;
+mod palette;
 mod prefs;
 mod state;
 mod terminal;
@@ -127,6 +128,8 @@ pub struct App {
     term_error: Option<String>,
     /// The window is phone-sized: the pages use the layout in `mobile`.
     compact: bool,
+    /// The command palette, while it's open (⌘K / Ctrl+K).
+    palette: Option<palette::Palette>,
     /// The status-bar widget, and the menu it shows now.
     #[cfg(not(target_arch = "wasm32"))]
     tray: Option<tray::Native>,
@@ -958,6 +961,7 @@ fn init() -> App {
         #[cfg(not(target_arch = "wasm32"))]
         tray: None,
         tray_menu: Vec::new(),
+        palette: None,
         cfg,
     };
     // `REPOHUB_BLOCKING=1` loads synchronously before the first frame (headless snapshots).
@@ -1134,6 +1138,10 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
         trailing = trailing.child(IconButton::new(&icons::REFRESH).variant(IconButtonVariant::GhostMuted).label("Refresh")
             .help("Refresh from GitHub").disabled(s.status.is_busy()).on_press(|s: &mut App| s.refresh()).build(&k).key("refresh"));
     }
+    let search = IconButton::new(k.glyph.search).variant(IconButtonVariant::GhostMuted).label("Search and commands")
+        .help(format!("Search and commands ({}+K)", palette::MOD)).on_press(|s: &mut App| s.palette = Some(palette::Palette::new()))
+        .build(&k).key("open-palette");
+    let trailing = row().gap(4.0).center_y().child(search).child(trailing);
     let who = if s.data.profile.login.is_empty() { "?".to_owned() } else { s.data.profile.login.clone() };
     let profile_url = format!("https://github.com/{who}");
     let profile = ui::user(&k, &who, 26.0).ml(6.0).role("button").label("Your profile on GitHub").key("profile")
@@ -1158,7 +1166,8 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
             .reduced_motion(cx.is_reduced_motion())
             .build(&k)
     };
-    root.on_paste(|s: &mut App, text: &str, _| {
+    let overlays = palette::layer(s, &k);
+    let root = root.on_paste(|s: &mut App, text: &str, _| {
             s.paste(text);
         })
         // The window's width picks the layout: phone-sized windows get the one in `mobile`.
@@ -1167,7 +1176,9 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
             if s.compact != compact {
                 s.compact = compact;
             }
-        })
+        });
+    // Overlays (the command palette) go above the whole window.
+    rune_kit::root(root, overlays)
 }
 
 /// The layout to start with, before the first frame is measured (avoids a flash on phones).
@@ -1226,6 +1237,10 @@ fn shortcuts(s: &mut App, ev: &KeyEvent) -> bool {
     }
     if ev.is_command('r') {
         s.refresh();
+        return true;
+    }
+    if ev.is_command('k') {
+        s.palette = if s.palette.is_some() { None } else { Some(palette::Palette::new()) };
         return true;
     }
     // ⌘/Ctrl+1…5 jump to the main pages, ⌘/Ctrl+, to Settings.
