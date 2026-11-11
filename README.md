@@ -140,6 +140,29 @@ cargo run --release                   # the first build takes a few minutes
 packaging/macos/bundle.sh 0.1.0       # macOS: builds dist/RepoHub.app and the .dmg
 ```
 
+## Organizations
+
+The repositories of the organizations you belong to show next to yours, ordered by last push.
+Everything works on them as on your own: Code, branches, issues, pull requests, Notes, Claude,
+Terminal.
+
+- The Repositories page filters by owner (**All**, **Mine**, each organization); the sidebar's
+  **Organizations** section and the command palette (`Repositories in …`) open the same filter.
+- Their open issues join the Issues page; pull requests already include everything you're
+  involved in.
+- `REPOHUB_ORGS` chooses which: empty for all, `none` for only yours, or a list (`acme,xr-lab`).
+
+What you see depends on the token:
+
+| Token | Organization repositories shown |
+| --- | --- |
+| none | public ones, of the organizations whose membership is public |
+| classic, `repo` + `read:org` | all you can access, private included |
+| fine-grained | only those of its resource owner: create one whose owner is the organization (the organization must allow fine-grained tokens) |
+
+Organizations that use SAML single sign-on also need the token authorized for them (on GitHub:
+Settings → Developer settings → the token → Configure SSO).
+
 ## Staying up to date
 
 While an account is connected RepoHub refreshes by itself every 10 minutes

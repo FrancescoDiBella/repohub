@@ -29,6 +29,8 @@ pub struct Repo {
     pub issues: u32,
     /// "2 hours ago" text, computed when loaded.
     pub updated: String,
+    /// When it was last pushed (Unix seconds), for ordering repositories from several owners.
+    pub pushed: i64,
     pub private: bool,
     pub fork: bool,
     pub archived: bool,
@@ -216,9 +218,9 @@ pub fn sample_detail(r: &Repo) -> Detail {
 impl Data {
     /// Built-in sample data, shown when no GitHub configuration is present. Everything is made up.
     pub fn sample() -> Data {
-        let repo = |name: &str, desc: &str, lang: &str, stars, forks, issues, updated: &str, private, fork, branch: &str, topics: &[&str], starred| Repo {
-            full_name: format!("francescodibella/{name}"),
-            owner: "francescodibella".into(),
+        let repo_of = |owner: &str, name: &str, desc: &str, lang: &str, stars, forks, issues, updated: &str, private, fork, branch: &str, topics: &[&str], starred| Repo {
+            full_name: format!("{owner}/{name}"),
+            owner: owner.into(),
             name: name.into(),
             description: desc.into(),
             language: lang.into(),
@@ -227,20 +229,25 @@ impl Data {
             forks,
             issues,
             updated: updated.into(),
+            pushed: 0,
             private,
             fork,
             archived: false,
             branch: branch.into(),
             topics: topics.iter().map(|t| t.to_string()).collect(),
-            url: format!("https://github.com/francescodibella/{name}"),
+            url: format!("https://github.com/{owner}/{name}"),
             starred,
         };
+        let repo = |name: &str, desc: &str, lang: &str, stars, forks, issues, updated: &str, private, fork, branch: &str, topics: &[&str], starred|
+            repo_of("francescodibella", name, desc, lang, stars, forks, issues, updated, private, fork, branch, topics, starred);
         let repos = vec![
             repo("francescodibella.github.io", "Personal site and playground: shell UI, widgets and a procedural Three.js bunny.", "JavaScript", 12, 2, 3, "2 hours ago", false, false, "main", &["github-pages", "threejs", "portfolio"], false),
             repo("ngsi-ld-xr-contexts", "JSON-LD contexts for AR, VR and MR entities in NGSI-LD smart data models.", "JSON-LD", 41, 9, 5, "yesterday", false, false, "main", &["fiware", "ngsi-ld", "xr"], true),
             repo("xr-digital-twin-thesis", "Master thesis: a digital twin of an industrial cell streamed to a WebXR headset.", "TypeScript", 7, 0, 11, "3 days ago", true, false, "dev", &["webxr", "digital-twin"], false),
+            repo_of("xr-lab", "spatial-anchors", "Shared spatial anchors for multi-user WebXR sessions (organization repository).", "TypeScript", 64, 12, 8, "4 days ago", false, false, "main", &["webxr", "anchors"], false),
             repo("dotfiles", "Shell, editor and terminal configuration, bootstrapped with one script.", "Shell", 3, 1, 0, "last week", false, false, "main", &["zsh", "neovim"], false),
             repo("rune", "A native GPU-rendered Rust UI framework for macOS, Windows, Linux and the web.", "Rust", 0, 0, 0, "2 weeks ago", false, true, "dev", &["rust", "gpu", "ui"], false),
+            repo_of("xr-lab", "lab-handbook", "How the lab works: onboarding, hardware booking, publishing (organization repository).", "Markdown", 5, 3, 2, "3 weeks ago", true, false, "main", &["docs"], false),
             repo("iot-sensor-gateway", "MQTT to NGSI-LD bridge for low-power environmental sensors.", "Python", 18, 4, 2, "last month", true, false, "main", &["mqtt", "iot", "fiware"], false),
             repo("university-notes", "Lecture notes in Markdown, compiled to a searchable static site.", "Markdown", 25, 6, 1, "2 months ago", false, false, "main", &["notes", "mkdocs"], false),
         ];

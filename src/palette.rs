@@ -38,6 +38,8 @@ pub enum Command {
     Theme(Theme),
     OpenUrl(String),
     CopyClone(String),
+    /// The Repositories page for one owner.
+    Owner(crate::state::OwnerFilter),
 }
 
 #[derive(Clone, Debug)]
@@ -106,6 +108,9 @@ pub fn entries(s: &App) -> Vec<Entry> {
         if *t != s.theme {
             out.push(entry(format!("Theme: {label}"), "Appearance", if *t == Theme::Dark { &icons::MOON } else { &icons::SUN }, Command::Theme(*t)));
         }
+    }
+    for (o, n) in crate::orgs(s) {
+        out.push(Entry { detail: format!("{n} repositories"), ..entry(format!("Repositories in {o}"), "Organization", &icons::GLOBE, Command::Owner(crate::state::OwnerFilter::Org(o))) });
     }
     for (i, r) in s.data.repos.iter().enumerate() {
         out.push(Entry { detail: r.owner.clone(), ..entry(r.name.clone(), "Repository", &icons::REPO, Command::OpenRepo(i)) });
@@ -204,6 +209,7 @@ pub fn run(s: &mut App, cmd: Command, tx: &mut Tx) {
         Command::OpenUrl(u) => {
             let _ = tx.open_url(&u);
         }
+        Command::Owner(o) => s.show_owner(o),
         Command::CopyClone(u) => {
             tx.copy(u);
             s.notify("Clone URL copied");

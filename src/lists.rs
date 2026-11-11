@@ -156,6 +156,14 @@ pub fn settings(s: &App, k: &Kit) -> El {
         ("User (GITHUB_USER)", cfg.user.clone().unwrap_or_else(|| "from the token".into())),
         ("Token (GITHUB_TOKEN)", if cfg.token.is_some() { "set (not shown)".into() } else { "not set: public data only, 60 requests an hour".into() }),
         ("API", cfg.api.clone()),
+        ("Organizations (REPOHUB_ORGS)", match &cfg.orgs {
+            crate::state::Orgs::All => match crate::orgs(s).iter().map(|o| o.0.clone()).collect::<Vec<_>>().join(", ") {
+                l if l.is_empty() => "all you belong to (none found)".into(),
+                l => format!("all you belong to: {l}"),
+            },
+            crate::state::Orgs::Off => "none: only your own repositories".into(),
+            crate::state::Orgs::Only(l) => l.join(", "),
+        }),
         ("Pinned (REPOHUB_PINNED)", if cfg.pinned.is_empty() { "the 3 most recently pushed".into() } else { cfg.pinned.join(", ") }),
         ("Notes", if cfg.notes { notes_where() } else { "not available here (needs the desktop app or Docker)".into() }),
         ("Filters", format!("forks {}, archived {}, at most {} repositories", if cfg.include_forks { "yes" } else { "no" }, if cfg.include_archived { "yes" } else { "no" }, cfg.max_repos)),
@@ -218,7 +226,7 @@ fn account_panel(s: &App, k: &Kit) -> El {
     let mut body = col().w_full().padding(16.0).gap(12.0)
         .child(row().w_full().gap(12.0).center_y().flex_wrap().child(label("User name")).child(user))
         .child(row().w_full().gap(12.0).center_y().flex_wrap().child(label("Token")).child(token))
-        .child(text("With only a user name RepoHub shows public repositories (60 requests an hour). A token adds private repositories, starring and 5,000 requests an hour: a fine-grained token with read access to Metadata and Actions, and read and write access to Contents, Issues and Pull requests (to create branches, issues and pull requests from the app). It is saved on this computer only, in a file only you can read.")
+        .child(text("With only a user name RepoHub shows public repositories (60 requests an hour). A token adds private repositories, starring and 5,000 requests an hour: a fine-grained token with read access to Metadata and Actions, and read and write access to Contents, Issues and Pull requests (to create branches, issues and pull requests from the app). A fine-grained token sees one owner's repositories; for your organizations' private repositories use a classic token with repo and read:org. It is saved on this computer only, in a file only you can read.")
             .font(k.ty.text_small).color(k.c.text_muted).wrap());
     if let Some(e) = &s.acct_error {
         body = body.child(text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap());

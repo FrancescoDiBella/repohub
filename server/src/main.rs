@@ -60,7 +60,7 @@ impl Cfg {
         let pinned: Vec<String> = env("REPOHUB_PINNED").map(|v| v.split(',').map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()).collect()).unwrap_or_default();
         let num = |k: &str, d: u64| env(k).and_then(|v| v.parse::<u64>().ok()).unwrap_or(d);
         let public_json = format!(
-            "{{\"user\":{},\"hasToken\":{},\"api\":{},\"title\":{},\"theme\":{},\"pinned\":[{}],\"includeForks\":{},\"includeArchived\":{},\"maxRepos\":{},\"activityRepos\":{},\"refreshMinutes\":{},\"demo\":{},\"notes\":true}}",
+            "{{\"user\":{},\"hasToken\":{},\"api\":{},\"title\":{},\"theme\":{},\"pinned\":[{}],\"includeForks\":{},\"includeArchived\":{},\"maxRepos\":{},\"activityRepos\":{},\"refreshMinutes\":{},\"orgs\":{},\"demo\":{},\"notes\":true}}",
             opt("GITHUB_USER"),
             token.is_some(),
             json_str(&api),
@@ -72,6 +72,7 @@ impl Cfg {
             num("REPOHUB_MAX_REPOS", 100),
             num("REPOHUB_ACTIVITY_REPOS", 5),
             num("REPOHUB_REFRESH_MINUTES", 10),
+            opt("REPOHUB_ORGS"),
             flag("REPOHUB_DEMO", false),
         );
         let mut allowed_hosts: Vec<String> = ["localhost", "127.0.0.1", "[::1]"].iter().map(|s| s.to_string()).collect();
@@ -136,6 +137,8 @@ fn allowed(method: &Method, path: &str) -> bool {
             p == "/user"
                 || p == "/user/repos"
                 || p == "/user/starred"
+                || p == "/user/orgs"
+                || (p.starts_with("/orgs/") && p.ends_with("/repos") && p.matches('/').count() == 3)
                 || p == "/search/issues"
                 || p.starts_with("/users/")
                 || (p.starts_with("/repos/") && !p.contains(".."))
@@ -305,6 +308,9 @@ mod tests {
         assert!(allowed(&Method::Get, "/user/repos?per_page=100"));
         assert!(allowed(&Method::Get, "/repos/o/r/contents"));
         assert!(allowed(&Method::Get, "/search/issues?q=is%3Apr"));
+        assert!(allowed(&Method::Get, "/orgs/acme/repos?type=public"));
+        assert!(allowed(&Method::Get, "/user/orgs"));
+        assert!(!allowed(&Method::Get, "/orgs/acme/members"));
         assert!(allowed(&Method::Put, "/user/starred/o/r"));
         assert!(!allowed(&Method::Delete, "/repos/o/r"));
         assert!(!allowed(&Method::Post, "/user/repos"));

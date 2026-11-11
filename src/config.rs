@@ -20,6 +20,8 @@ pub struct Config {
     pub max_repos: usize,
     /// How many recently pushed repositories to read workflow runs and commit activity from.
     pub activity_repos: usize,
+    /// Which organizations' repositories to show (`REPOHUB_ORGS`).
+    pub orgs: crate::state::Orgs,
     /// Minutes between automatic refreshes (`REPOHUB_REFRESH_MINUTES`, 0: off). See `refresh_every`.
     pub refresh_minutes: u32,
     /// Force the sample data even when credentials are present.
@@ -225,6 +227,7 @@ impl Config {
             include_archived: flag(get("REPOHUB_INCLUDE_ARCHIVED"), false),
             max_repos: num("REPOHUB_MAX_REPOS", 100).clamp(1, 1000),
             activity_repos: num("REPOHUB_ACTIVITY_REPOS", 5).clamp(0, 20),
+            orgs: crate::state::Orgs::parse(&get("REPOHUB_ORGS").unwrap_or_default()),
             refresh_minutes: num("REPOHUB_REFRESH_MINUTES", 10).min(24 * 60) as u32,
             demo: flag(get("REPOHUB_DEMO"), false),
             // The desktop app keeps notes in a local folder; the web build needs repohub-server.
@@ -262,6 +265,7 @@ impl Config {
             include_archived: bo("includeArchived", false),
             max_repos: nu("maxRepos", 100).clamp(1, 1000),
             activity_repos: nu("activityRepos", 5).clamp(0, 20),
+            orgs: crate::state::Orgs::parse(&st("orgs").unwrap_or_default()),
             refresh_minutes: nu("refreshMinutes", 10).min(24 * 60) as u32,
             demo: bo("demo", false),
             notes: bo("notes", false),
