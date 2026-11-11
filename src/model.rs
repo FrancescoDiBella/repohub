@@ -207,7 +207,7 @@ pub fn sample_detail(r: &Repo) -> Detail {
     Detail {
         error: None,
         files: files.iter().map(|(n, d)| (n.to_string(), *d)).collect(),
-        readme: Some(format!("# {}\n\n{}\n\n## Quick start\n\ngit clone {}.git", r.name, r.description, r.url)),
+        readme: Some(format!("# {}\n\n{}\n\n## Quick start\n\n```sh\ngit clone {}.git\ncd {}\n```\n\nSee the [contributing guide](CONTRIBUTING.md) for the details.", r.name, r.description, r.url, r.name)),
         languages: vec![(r.language.clone(), 70), ("HTML".into(), 20), ("CSS".into(), 10)],
         commit: Some(Commit { author: r.owner.clone(), message: "Add RepoHub, a Rune-based GitHub repository manager UI".into(), sha: "a6f6543".into(), age: "2 hours ago".into() }),
     }
