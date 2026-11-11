@@ -14,6 +14,7 @@ use rune::{AppHandle, AppSpec, Cx, El, KeyEvent, ScrollSpec, TextEdit, Tx, col, 
 use rune_kit::shell::{self, PaneState, Sidebar, SidebarRow, SidebarSection, SidebarToggle, SplitView, Toolbar};
 use rune_kit::{ControlSize, IconButton, IconButtonVariant, Kit, PaletteSeed};
 
+mod actions;
 mod board;
 #[cfg(not(target_arch = "wasm32"))]
 mod clones;
@@ -42,6 +43,11 @@ use config::Config;
 pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 use model::{Data, Detail, PullState};
 
+/// `a` and `b` name the same repository (`owner/name`, or only the name).
+fn same_repo(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b) || b.rsplit('/').next().is_some_and(|n| a.eq_ignore_ascii_case(n))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
     Overview,
@@ -54,7 +60,7 @@ pub enum Page {
 }
 
 pub use state::Status;
-use state::{Load, Refresh, RepoFilter, RepoSort, RepoTab, Save, Theme, Toast, ToastKind};
+use state::{BranchSlot, Compose, Load, Refresh, RepoFilter, RepoSort, RepoTab, Save, Submit, Theme, Toast, ToastKind};
 
 pub struct App {
     sidebar: PaneState,
@@ -74,14 +80,27 @@ pub struct App {
     toast: Option<Toast>,
     cfg: Arc<Config>,
     data: Data,
-    /// Repository details by full name; a missing entry hasn't been asked for.
-    details: HashMap<String, Load<Detail>>,
+    /// Repository details by (full name, branch); a missing entry hasn't been asked for.
+    details: HashMap<(String, String), Load<Detail>>,
     /// Where the data comes from. Change it with `set_status`.
     status: Status,
     handle: Option<AppHandle<App>>,
     // Notes (Excalidraw drawings), keyed by repository full name.
     branches: HashMap<String, Load<Vec<String>>>,
-    note_branch: HashMap<String, String>,
+    /// The branch picked for each repository (Code and Notes tabs); absent: the default branch.
+    branch_of: HashMap<String, String>,
+    /// The open branch picker, and what it fills in.
+    picker: Option<BranchSlot>,
+    branch_filter: TextEdit,
+    /// The open form (new issue, branch or pull request).
+    form: Option<actions::Form>,
+    /// The pull request whose Merge is waiting for a yes (`owner/repo#12`).
+    confirm_merge: Option<String>,
+    /// Rows with a write running (`owner/repo#12`), so their buttons wait.
+    busy: std::collections::HashSet<String>,
+    /// The title (and draft flag) of the item a form is creating, for showing it once created.
+    form_title: Option<String>,
+    pull_meta: Option<(String, bool)>,
     notes: HashMap<(String, String), notes::NotesView>,
     note_name: TextEdit,
     confirm_delete: Option<String>,
@@ -122,6 +141,8 @@ impl App {
         self.board = None;
         self.confirm_delete = None;
         self.term_error = None;
+        self.picker = None;
+        self.confirm_merge = None;
     }
 
     /// Switches the repository page of repository `i` to `tab`.
@@ -268,28 +289,224 @@ impl App {
         }
     }
 
+    /// The branch shown for repository `i`: the one picked, else the default branch.
+    fn branch(&self, i: usize) -> String {
+        self.data.repos.get(i).map(|r| self.branch_of.get(&r.full_name).cloned().unwrap_or_else(|| r.branch.clone())).unwrap_or_default()
+    }
+
+    /// Loads files, README and last commit of repository `i` at its shown branch (once).
     fn load_detail(&mut self, i: usize) {
         let Some(r) = self.data.repos.get(i) else { return };
         let full = r.full_name.clone();
+        let key = (full.clone(), self.branch(i));
         if self.data.sample {
             let d = model::sample_detail(r);
-            self.details.insert(full, Load::Ready(d));
+            self.details.insert(key, Load::Ready(d));
             return;
         }
-        if self.details.contains_key(&full) {
+        self.load_branches(i);
+        if self.details.contains_key(&key) {
             return;
         }
-        self.details.insert(full.clone(), Load::Loading);
+        self.details.insert(key.clone(), Load::Loading);
         if let Some(h) = self.handle.clone() {
             let cfg = self.cfg.clone();
-            let key = full.clone();
-            net::spawn(h, move || async move { github::load_detail(&cfg, &full).await }, move |s: &mut App, d| {
+            let at = key.1.clone();
+            net::spawn(h, move || async move { github::load_detail(&cfg, &full, &at).await }, move |s: &mut App, d| {
                 s.details.insert(key, Load::Ready(d));
             });
         }
     }
 
-    /// Stars or unstars repository `i`: on GitHub when a token is configured, locally otherwise.
+    /// Loads repository `i`'s branch list, once. The sample data has its default branch only.
+    fn load_branches(&mut self, i: usize) {
+        let Some(r) = self.data.repos.get(i) else { return };
+        let full = r.full_name.clone();
+        if self.branches.contains_key(&full) {
+            return;
+        }
+        if self.data.sample || !self.cfg.live() {
+            let mut names = vec![r.branch.clone()];
+            names.extend(["feature/readme-selection", "fix/theme-switch"].map(String::from));
+            self.branches.insert(full, Load::Ready(names));
+            return;
+        }
+        let Some(h) = self.handle.clone() else { return };
+        self.branches.insert(full.clone(), Load::Loading);
+        let (cfg, default, key) = (self.cfg.clone(), r.branch.clone(), full.clone());
+        net::spawn(h, move || async move { github::branches(&cfg, &full, &default).await }, move |s: &mut App, r: Result<Vec<String>, String>| {
+            // A pull request form opened before the list arrived starts from the first other branch.
+            if let (Ok(names), Some(f)) = (&r, s.form.as_mut())
+                && f.repo == key && f.kind == Compose::Pull && f.from == f.into
+                && let Some(other) = names.iter().find(|n| **n != f.into)
+            {
+                f.from = other.clone();
+            }
+            s.branches.insert(key, r.into());
+        });
+    }
+
+    /// Shows branch `branch` of repository `i` in the Code and Notes tabs.
+    fn set_branch(&mut self, i: usize, branch: String) {
+        let Some(r) = self.data.repos.get(i) else { return };
+        state::trace("branch", &self.branch(i), &branch);
+        if branch == r.branch {
+            self.branch_of.remove(&r.full_name);
+        } else {
+            self.branch_of.insert(r.full_name.clone(), branch);
+        }
+        self.confirm_delete = None;
+        self.load_detail(i);
+        if self.tab == RepoTab::Notes {
+            self.load_notes(i);
+        }
+    }
+
+    /// The branch picker chose `branch` for `slot`.
+    fn pick_branch_for(&mut self, i: usize, slot: BranchSlot, branch: String) {
+        self.picker = None;
+        match slot {
+            BranchSlot::View => self.set_branch(i, branch),
+            BranchSlot::From => if let Some(f) = self.form.as_mut() { f.from = branch },
+            BranchSlot::Head => if let Some(f) = self.form.as_mut() { f.from = branch },
+            BranchSlot::Base => if let Some(f) = self.form.as_mut() { f.into = branch },
+        }
+    }
+
+    /// Opens form `kind` for repository `i` on the section it belongs to.
+    fn open_form(&mut self, i: usize, kind: Compose) {
+        let Some(r) = self.data.repos.get(i) else { return };
+        let (full, default, shown) = (r.full_name.clone(), r.branch.clone(), self.branch(i));
+        // A pull request starts from the branch on screen, or the first other branch.
+        let head = if shown != default {
+            shown.clone()
+        } else {
+            self.branches.get(&full).and_then(Load::ready).and_then(|b| b.iter().find(|n| **n != default).cloned()).unwrap_or(shown.clone())
+        };
+        self.form = Some(actions::Form {
+            repo: full,
+            kind,
+            title: TextEdit::new(""),
+            body: TextEdit::new(""),
+            from: if kind == Compose::Pull { head } else { shown },
+            into: default,
+            draft: false,
+            submit: Submit::Editing,
+        });
+        self.picker = None;
+        if self.tab != kind.tab() {
+            self.set_tab(i, kind.tab());
+        }
+        self.load_branches(i);
+        // `set_tab` tidies up the section it leaves; the form opened for the new one stays.
+        if let Some(f) = self.form.as_mut() {
+            f.title.focused = true;
+        }
+    }
+
+    /// Sends the open form.
+    fn submit_form(&mut self, i: usize) {
+        if actions::blocked(self).is_some() {
+            return;
+        }
+        let Some(f) = self.form.as_mut() else { return };
+        let Ok(w) = f.write() else { return };
+        if !f.submit.start() {
+            return;
+        }
+        let repo = f.repo.clone();
+        // What the screen shows for the new item until the lists reload.
+        self.form_title = Some(f.title.text.trim().to_owned());
+        self.pull_meta = Some((f.title.text.trim().to_owned(), f.draft));
+        let Some(h) = self.handle.clone() else { return };
+        let cfg = self.cfg.clone();
+        net::spawn(h, move || async move { github::run(&cfg, &repo, w).await }, move |s: &mut App, r| match r {
+            Ok(done) => {
+                s.form = None;
+                s.picker = None;
+                s.apply_done(i, done);
+            }
+            Err(e) => {
+                if let Some(f) = s.form.as_mut() {
+                    f.submit = Submit::Failed(e);
+                }
+            }
+        });
+    }
+
+    /// Runs a row's write (close an issue, merge a pull request) on repository `repo`.
+    fn write(&mut self, repo: &str, w: github::Write) {
+        if actions::blocked(self).is_some() {
+            return;
+        }
+        let number = match &w {
+            github::Write::CloseIssue(n) | github::Write::Merge { number: n, .. } => *n,
+            _ => 0,
+        };
+        let key = actions::busy_key(repo, number);
+        if !self.busy.insert(key.clone()) {
+            return;
+        }
+        self.confirm_merge = None;
+        let i = self.data.repos.iter().position(|r| r.full_name.eq_ignore_ascii_case(repo) || r.name.eq_ignore_ascii_case(repo)).unwrap_or(usize::MAX);
+        let full = if i != usize::MAX { self.data.repos[i].full_name.clone() } else { repo.to_owned() };
+        let Some(h) = self.handle.clone() else { return };
+        let cfg = self.cfg.clone();
+        net::spawn(h, move || async move { github::run(&cfg, &full, w).await }, move |s: &mut App, r| {
+            s.busy.remove(&key);
+            match r {
+                Ok(done) => s.apply_done(i, done),
+                Err(e) => s.notify_problem(e),
+            }
+        });
+    }
+
+    /// Shows what a write changed at once, without waiting for GitHub's lists to catch up.
+    fn apply_done(&mut self, i: usize, done: github::Done) {
+        let repo = self.data.repos.get(i).map(|r| r.full_name.clone()).unwrap_or_default();
+        match done {
+            github::Done::Issue(c) => {
+                let title = self.form_title.take().unwrap_or_default();
+                self.data.issues.insert(0, model::Issue { number: c.number, title, repo: repo.clone(), label: None, age: "just now".into(), comments: 0, url: c.url });
+                if let Some(r) = self.data.repos.get_mut(i) {
+                    r.issues += 1;
+                }
+                self.notify(format!("Opened issue #{} in {repo}", c.number));
+            }
+            github::Done::Branch(name) => {
+                if let Some(Load::Ready(list)) = self.branches.get_mut(&repo) {
+                    list.push(name.clone());
+                }
+                self.notify(format!("Created branch {name}"));
+                self.set_branch(i, name);
+            }
+            github::Done::Pull(c) => {
+                let (title, draft) = self.pull_meta.take().unwrap_or_default();
+                let author = self.data.profile.login.clone();
+                self.data.pulls.insert(0, model::Pull {
+                    number: c.number, title, repo: repo.clone(), author,
+                    state: if draft { PullState::Draft } else { PullState::Open },
+                    checks: None, age: "just now".into(), comments: 0, url: c.url,
+                });
+                self.notify(format!("Opened pull request #{}", c.number));
+            }
+            github::Done::Closed(n) => {
+                self.data.issues.retain(|x| !(x.number == n && same_repo(&x.repo, &repo)));
+                if let Some(r) = self.data.repos.get_mut(i) {
+                    r.issues = r.issues.saturating_sub(1);
+                }
+                self.notify(format!("Closed issue #{n}"));
+            }
+            github::Done::Merged(n) => {
+                for p in self.data.pulls.iter_mut().filter(|p| p.number == n && same_repo(&p.repo, &repo)) {
+                    p.state = PullState::Merged;
+                }
+                self.notify(format!("Merged pull request #{n}"));
+            }
+        }
+    }
+
+    /// Stars or unstars repository    /// Stars or unstars repository `i`: on GitHub when a token is configured, locally otherwise.
     fn toggle_star(&mut self, i: usize) {
         let Some(r) = self.data.repos.get_mut(i) else { return };
         let on = !r.starred;
@@ -319,7 +536,7 @@ impl App {
     /// The branch the Notes tab shows for repository `i`: the one picked, else the default branch.
     fn notes_branch(&self, i: usize) -> Option<(String, String)> {
         let r = self.data.repos.get(i)?;
-        let b = self.note_branch.get(&r.full_name).cloned().unwrap_or_else(|| r.branch.clone());
+        let b = self.branch_of.get(&r.full_name).cloned().unwrap_or_else(|| r.branch.clone());
         Some((r.full_name.clone(), b))
     }
 
@@ -353,12 +570,10 @@ impl App {
         });
     }
 
+    /// The Notes tab's branch chips: the same branch as the Code tab.
     fn pick_branch(&mut self, i: usize, branch: String) {
-        if let Some(r) = self.data.repos.get(i) {
-            self.note_branch.insert(r.full_name.clone(), branch);
-            self.confirm_delete = None;
-            self.load_notes(i);
-        }
+        self.set_branch(i, branch);
+        self.load_notes(i);
     }
 
     fn delete_note(&mut self, i: usize, name: String) {
@@ -566,7 +781,14 @@ fn init() -> App {
         status: if live || cfg!(target_arch = "wasm32") { Status::Starting } else { Status::Sample },
         handle: None,
         branches: HashMap::new(),
-        note_branch: HashMap::new(),
+        branch_of: HashMap::new(),
+        picker: None,
+        branch_filter: TextEdit::new(""),
+        form: None,
+        confirm_merge: None,
+        busy: std::collections::HashSet::new(),
+        form_title: None,
+        pull_meta: None,
         notes: HashMap::new(),
         note_name: TextEdit::new(""),
         confirm_delete: None,
@@ -592,7 +814,8 @@ fn init() -> App {
             && let Some(r) = s.data.repos.get(i)
         {
             let full = r.full_name.clone();
-            s.details.insert(full.clone(), Load::Ready(pollster::block_on(github::load_detail(&s.cfg, &full))));
+            let at = s.data.repos[i].branch.clone();
+            s.details.insert((full.clone(), at.clone()), Load::Ready(pollster::block_on(github::load_detail(&s.cfg, &full, &at))));
         }
     }
     // `-- page repos|repo|pulls|issues|actions|settings` opens a page (for headless stills).

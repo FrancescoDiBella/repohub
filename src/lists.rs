@@ -94,7 +94,7 @@ pub const PR_STATES: [PullState; 4] = [PullState::Open, PullState::Draft, PullSt
 pub const PR_LABELS: [&str; 4] = ["Open", "Drafts", "Merged", "Closed"];
 
 pub fn pulls(s: &App, k: &Kit) -> El {
-    let rows: Vec<El> = s.data.pulls.iter().filter(|p| p.state == s.pr_filter).map(|p| pull_row(k, p, s.compact)).collect();
+    let rows: Vec<El> = s.data.pulls.iter().filter(|p| p.state == s.pr_filter).map(|p| crate::actions::pull_line(s, k, p, s.compact)).collect();
     let sub = if s.data.sample { "Pull requests you opened or that wait for your review." } else { "Pull requests you're involved in (author, reviewer, assignee or mentioned). Click one to open it on GitHub." };
     col().w_full().gap(16.0)
         .child(heading(k, "Pull requests", sub, None))
@@ -106,7 +106,7 @@ pub fn pulls(s: &App, k: &Kit) -> El {
 pub fn issues(s: &App, k: &Kit) -> El {
     col().w_full().gap(16.0)
         .child(heading(k, "Issues", "Open issues in your repositories. Click one to open it on GitHub.", None))
-        .child(listing(k, s.data.issues.iter().map(|i| issue_row(k, i)).collect(), "No open issues"))
+        .child(listing(k, s.data.issues.iter().map(|i| crate::actions::issue_line(s, k, i)).collect(), "No open issues"))
 }
 
 pub fn actions(s: &App, k: &Kit) -> El {
@@ -212,7 +212,7 @@ fn account_panel(s: &App, k: &Kit) -> El {
     let mut body = col().w_full().padding(16.0).gap(12.0)
         .child(row().w_full().gap(12.0).center_y().flex_wrap().child(label("User name")).child(user))
         .child(row().w_full().gap(12.0).center_y().flex_wrap().child(label("Token")).child(token))
-        .child(text("With only a user name RepoHub shows public repositories (60 requests an hour). A token adds private repositories, starring and 5,000 requests an hour: a fine-grained token with read access to Metadata, Contents, Issues, Pull requests and Actions is enough. It is saved on this computer only, in a file only you can read.")
+        .child(text("With only a user name RepoHub shows public repositories (60 requests an hour). A token adds private repositories, starring and 5,000 requests an hour: a fine-grained token with read access to Metadata and Actions, and read and write access to Contents, Issues and Pull requests (to create branches, issues and pull requests from the app). It is saved on this computer only, in a file only you can read.")
             .font(k.ty.text_small).color(k.c.text_muted).wrap());
     if let Some(e) = &s.acct_error {
         body = body.child(text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap());

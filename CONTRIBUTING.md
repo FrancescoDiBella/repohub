@@ -14,6 +14,7 @@
 | `src/net.rs` | Transport: blocking `ureq` on the desktop, `fetch` to the `/gh` proxy on the web; `spawn` runs work in the background and reports to the UI |
 | `src/config.rs` | `.env` parsing (desktop: the project file and the app's own settings file, where Settings saves the account) and `config.json` (web) |
 | `src/board.rs` | The Notes whiteboard: model, hand-drawn rendering, gestures, undo/redo, `.excalidraw` read/write |
+| `src/actions.rs` | The branch picker, the New issue / branch / pull request forms, Close and Merge on rows |
 | `src/notes.rs`, `src/notes_page.rs` | Notes storage (local folder on desktop, `/api/notes` on the web) and the Notes tab |
 | `src/terminal.rs`, `src/terminal_page.rs` | Embedded terminal (desktop): `portable-pty` runs the login shell, `vt100` keeps the screen; key mapping, colours, the Terminal tab |
 | `src/clones.rs` | Finding and remembering each repository's local clone |
@@ -93,5 +94,7 @@ the same; the clients bypass HTTP proxies for `localhost` and `NO_PROXY` hosts.
 - Never commit `.env` or anything that contains a token.
 - Keep the proxy allowlist (`server/src/main.rs`, `allowed`) as narrow as the app needs. Add an
   endpoint there only together with the feature that uses it.
-- RepoHub doesn't change repositories. Destructive actions belong on GitHub.
+- RepoHub creates (issues, branches, pull requests), closes issues and merges pull requests, and
+  nothing more: deleting repositories or branches and rewriting history stay on GitHub. A new
+  write goes through `github::Write`, the proxy allowlist (`server/src/main.rs`) and its test.
 - Text in the UI is plain and specific: say what happened and how to fix it.

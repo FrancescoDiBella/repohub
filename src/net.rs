@@ -78,13 +78,24 @@ impl Transport {
     }
 
     pub async fn send(&self, method: &str, path: &str, accept: &str) -> Result<Resp, String> {
+        self.send_body(method, path, accept, "").await
+    }
+
+    /// `send` with a JSON body (empty: none).
+    pub async fn send_body(&self, method: &str, path: &str, accept: &str, body: &str) -> Result<Resp, String> {
         let mut r = self.agent.request(method, &format!("{}{}", self.api, path))
             .set("Accept", accept)
             .set("X-GitHub-Api-Version", "2022-11-28");
         if let Some(t) = &self.token {
             r = r.set("Authorization", &format!("Bearer {t}"));
         }
-        let res = if method == "PUT" { r.set("Content-Length", "0").send_string("") } else { r.call() };
+        let res = if !body.is_empty() {
+            r.set("Content-Type", "application/json").send_string(body)
+        } else if method == "PUT" {
+            r.set("Content-Length", "0").send_string("")
+        } else {
+            r.call()
+        };
         let resp = match res {
             Ok(resp) | Err(ureq::Error::Status(_, resp)) => resp,
             Err(e) => return Err(format!("Can't reach {}: {e}", self.api)),
@@ -160,6 +171,10 @@ impl Transport {
 
     pub async fn send(&self, method: &str, path: &str, accept: &str) -> Result<Resp, String> {
         request(method, &format!("gh{path}"), accept, "").await
+    }
+
+    pub async fn send_body(&self, method: &str, path: &str, accept: &str, body: &str) -> Result<Resp, String> {
+        request(method, &format!("gh{path}"), accept, body).await
     }
 }
 

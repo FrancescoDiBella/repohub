@@ -2,11 +2,11 @@
 use rune::{El, col, el, row, text};
 use rune_kit::{Badge, BadgeVariant, Button, ButtonVariant, ControlSize, Kit, SegmentedControl, TextInput};
 
-use crate::lists::{issue_row, pull_row, run_row};
+use crate::lists::{pull_row, run_row};
 use crate::model::{PullState, Repo, lang_hue};
 use crate::ui::{self, panel, panel_head, rule};
-use crate::state::{Load, RepoFilter, RepoSort, RepoTab};
-use crate::{App, Page, icons};
+use crate::state::{BranchSlot, Compose, Load, RepoFilter, RepoSort, RepoTab};
+use crate::{App, Page, actions, icons};
 
 pub fn heading(k: &Kit, title: &str, subtitle: &str, action: Option<El>) -> El {
     let mut r = row().w_full().center_y().justify_between().gap(12.0).flex_wrap()
@@ -195,20 +195,22 @@ pub fn repo_detail(s: &App, k: &Kit, i: usize) -> El {
     let tabs = if s.compact { row().w_full().scroll_x().child(tabs) } else { tabs };
     let in_repo = |name: &str| name.eq_ignore_ascii_case(&r.full_name) || name.eq_ignore_ascii_case(&r.name);
     let body = match s.tab {
-        RepoTab::Code => code_tab(s, k, r),
-        RepoTab::Issues => list_of(k, "Open issues", s.data.issues.iter().filter(|x| in_repo(&x.repo)).map(|x| issue_row(k, x)).collect()),
-        RepoTab::Pulls => list_of(k, "Pull requests", s.data.pulls.iter().filter(|x| in_repo(&x.repo)).map(|x| pull_row(k, x, s.compact)).collect()),
-        RepoTab::Actions => list_of(k, "Workflow runs", s.data.runs.iter().filter(|x| in_repo(&x.repo)).map(|x| run_row(k, x, s.compact)).collect()),
+        RepoTab::Code => code_tab(s, k, i, r),
+        RepoTab::Issues => list_of(k, "Open issues", Some(actions::open_form_button(k, i, Compose::Issue)),
+            s.data.issues.iter().filter(|x| in_repo(&x.repo)).map(|x| actions::issue_line(s, k, x)).collect()),
+        RepoTab::Pulls => list_of(k, "Pull requests", Some(actions::open_form_button(k, i, Compose::Pull)),
+            s.data.pulls.iter().filter(|x| in_repo(&x.repo)).map(|x| actions::pull_line(s, k, x, s.compact)).collect()),
+        RepoTab::Actions => list_of(k, "Workflow runs", None, s.data.runs.iter().filter(|x| in_repo(&x.repo)).map(|x| run_row(k, x, s.compact)).collect()),
         RepoTab::Notes => crate::notes_page::notes_tab(s, k, i),
         RepoTab::Terminal => crate::terminal_page::terminal_tab(s, k, i, k.c.page.r + k.c.page.g + k.c.page.b < 1.5),
         RepoTab::Settings => crate::lists::repo_settings(s, k, r),
     };
-    col().w_full().gap(16.0).child(back).child(header).child(tabs).child(body)
+    col().w_full().gap(16.0).child(back).child(header).child(tabs).child(actions::form_panel(s, k, i)).child(body)
 }
 
-fn list_of(k: &Kit, title: &str, rows: Vec<El>) -> El {
+fn list_of(k: &Kit, title: &str, action: Option<El>, rows: Vec<El>) -> El {
     let empty = rows.is_empty();
-    let mut p = panel(k).child(panel_head(k, title, None));
+    let mut p = panel(k).child(panel_head(k, title, action));
     for r in rows {
         p = p.child(rule(k)).child(r);
     }
@@ -243,11 +245,12 @@ pub fn readme_view(k: &Kit, md: &str) -> El {
         .build(k).w_full()
 }
 
-fn code_tab(s: &App, k: &Kit, r: &Repo) -> El {
-    let load = s.details.get(&r.full_name);
+fn code_tab(s: &App, k: &Kit, i: usize, r: &Repo) -> El {
+    let at = s.branch(i);
+    let load = s.details.get(&(r.full_name.clone(), at.clone()));
     let detail = load.and_then(Load::ready);
-    let branch = Button::new(r.branch.clone()).icon(&icons::BRANCH).control_size(ControlSize::Small)
-        .on_press_tx({ let u = format!("{}/branches", r.url); move |_: &mut App, tx| { let _ = tx.open_url(&u); } }).build(k).key("branch");
+    // The branch on screen: pick another one, or start a branch or pull request from it.
+    let branch = actions::branch_button(s, k, i, BranchSlot::View, &at, "branch");
     let clone_url = format!("{}.git", r.url);
     let clone = Button::new("Copy clone URL").variant(ButtonVariant::Submit).control_size(ControlSize::Small)
         .on_press_tx(move |s: &mut App, tx| { tx.copy(clone_url.clone()); s.notify("Clone URL copied"); })
@@ -271,7 +274,7 @@ fn code_tab(s: &App, k: &Kit, r: &Repo) -> El {
             }
             for (name, dir) in d.files.iter().take(40) {
                 // A file or folder opens on GitHub.
-                let url = format!("{}/{}/{}/{}", r.url, if *dir { "tree" } else { "blob" }, r.branch, name);
+                let url = format!("{}/{}/{}/{}", r.url, if *dir { "tree" } else { "blob" }, at, name);
                 files = files.child(rule(k)).child(
                     row().w_full().px(16.0).py(9.0).gap(10.0).center_y().hover(k.c.hover).press(k.c.pressed)
                         .role("link").label(format!("Open {name} on GitHub")).key(format!("file-{name}"))
@@ -285,7 +288,7 @@ fn code_tab(s: &App, k: &Kit, r: &Repo) -> El {
     }
     let readme = detail.and_then(|d| d.readme.clone());
     let readme_body = match &readme {
-        Some(src) => readme_view(k, &crate::markdown::prepare(src, &r.full_name, &r.branch)),
+        Some(src) => readme_view(k, &crate::markdown::prepare(src, &r.full_name, &at)),
         None => text(if loading { "Loading…" } else { "This repository has no README." }).font(k.ty.ui).color(k.c.text_muted),
     };
     // The README panel's head: copy the whole file as Markdown, or read it on GitHub.
@@ -322,7 +325,13 @@ fn code_tab(s: &App, k: &Kit, r: &Repo) -> El {
         .child(if langs.is_empty() { text("—").font(k.ty.small).color(k.c.text_faint) } else { col().w_full().gap(8.0).child(bar).child(legend) });
     row().w_full().gap(16.0).flex_wrap()
         .child(col().grow(3.0).min_w(if s.compact { 260.0 } else { 380.0 }).gap(12.0)
-            .child(row().w_full().justify_between().child(branch).child(clone))
+            .child(row().w_full().justify_between().gap(8.0).flex_wrap()
+                .child(row().gap(8.0).center_y().flex_wrap()
+                    .child(branch)
+                    .child(actions::open_form_button(k, i, Compose::Branch))
+                    .child(actions::open_form_button(k, i, Compose::Pull)))
+                .child(clone))
+            .child(actions::branch_panel(s, k, i, BranchSlot::View, &at))
             .child(files)
             .child(readme_panel))
         .child(col().grow(1.0).min_w(240.0).child(about))
