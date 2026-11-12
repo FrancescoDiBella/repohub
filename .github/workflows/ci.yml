@@ -34,3 +34,20 @@ jobs:
         run: cargo test --release --manifest-path server/Cargo.toml
       - name: Web build compiles
         run: cargo build --release --lib --target wasm32-unknown-unknown
+
+  # A reminder, not a gate: a pull request that changes the app should say so in CHANGELOG.md,
+  # whose Unreleased section becomes the next release's notes.
+  changelog:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Release notes
+        run: |
+          scripts/release-notes.sh > /dev/null || echo "::warning file=CHANGELOG.md::The Unreleased section is empty."
+          changed=$(git diff --name-only "origin/$GITHUB_BASE_REF...HEAD")
+          if echo "$changed" | grep -qE '^(src|assets|server/src)/' && ! echo "$changed" | grep -qx CHANGELOG.md; then
+            echo "::warning file=CHANGELOG.md::This pull request changes the app but not CHANGELOG.md: add a line under Unreleased."
+          fi

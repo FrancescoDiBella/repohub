@@ -29,6 +29,7 @@
 | `web/index.html` | Page that loads the WebAssembly build (`app.js` and `app_bg.wasm` are build outputs) |
 | `Dockerfile`, `compose.yaml` | Container: builds the web app and the server, runs the server on port 8080 |
 | `packaging/` | Desktop packaging: the icon, the macOS bundle script and `Info.plist`, the Linux launcher and installer |
+| `CHANGELOG.md`, `scripts/release-notes.sh` | Release notes: one section per version, printed by the script for the Desktop workflow |
 | `.github/workflows/` | CI (tests and builds), image publishing (GHCR), GitHub Pages, desktop builds and releases (`release.yml`) |
 
 ## How data flows
@@ -103,3 +104,16 @@ the same; the clients bypass HTTP proxies for `localhost` and `NO_PROXY` hosts.
   nothing more: deleting repositories or branches and rewriting history stay on GitHub. A new
   write goes through `github::Write`, the proxy allowlist (`server/src/main.rs`) and its test.
 - Text in the UI is plain and specific: say what happened and how to fix it.
+- A pull request that changes the app adds a line to [`CHANGELOG.md`](CHANGELOG.md) under
+  **Unreleased** (Added, Changed or Fixed), written for the people who use RepoHub. CI warns
+  when it's missing.
+
+## Releasing a version
+
+1. In `CHANGELOG.md`, rename `## Unreleased` to `## 0.2.0`, then start a new, empty
+   `## Unreleased` above it. Set `version = "0.2.0"` in `Cargo.toml`.
+2. Merge that, then tag it: `git tag v0.2.0 && git push origin v0.2.0`.
+3. The Desktop workflow builds the three packages and publishes the release. Its notes are the
+   `0.2.0` section (`scripts/release-notes.sh 0.2.0` prints it), followed by GitHub's list of
+   pull requests.
+

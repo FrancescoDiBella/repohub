@@ -1,0 +1,48 @@
+# Changelog
+
+What changes in each version of RepoHub, newest first. Every pull request that changes the app
+adds a line under **Unreleased**. When a version is tagged (`v0.2.0`), its section is renamed
+from Unreleased to that version, and the Desktop workflow publishes the section as the release
+notes. The Latest build shows the Unreleased section, and so does the app's **What's new**.
+
+The sections are **Added**, **Changed** and **Fixed**.
+
+## Unreleased
+
+### Added
+- Release notes. This changelog is now published as the notes of each release and of the Latest
+  build. When a new version is ready, the app can show **What's new**.
+- Pinned repositories: pin or unpin any repository from its card, its page or ⌘K. Your pins are
+  remembered.
+- RepoHub reopens where you left off: the page, the repository and its section, the sidebar,
+  and the sort and owner filter on the Repositories page.
+- In-app updates. On the desktop, RepoHub checks the Latest build, downloads the package for
+  your system, checks it against `SHA256SUMS`, installs it and restarts.
+- Repositories of the organizations you belong to, with an owner filter and an Organizations
+  section in the sidebar.
+- Command palette (⌘K / Ctrl+K): go anywhere, open repositories and run actions by typing.
+- Auto-refresh every few minutes, and an "updated X ago" label.
+- Status-bar widget (macOS menu bar, Windows notification area, Linux tray) with quick actions.
+- Claude tab: chat with Claude Code inside the repository's local clone.
+- Work on GitHub from the app: pick a branch; create branches, issues and pull requests; close
+  issues and merge pull requests.
+- Selectable, copyable README text.
+- Desktop builds for macOS, Windows and Linux on every push to `main`, published as the Latest
+  build.
+- Native desktop app: connect your account from Settings, plus packaging for the three systems.
+- Phone layout with a top bar and a bottom tab bar.
+- Embedded terminal in each repository's local clone.
+- Rendered README with images, tables and code.
+- Notes: hand-drawn diagrams for each repository and branch.
+- Docker image for amd64 and arm64.
+
+### Changed
+- The app's states (loading, saving, theme, tabs, filters…) are explicit state machines,
+  drawn in `docs/STATE.md`.
+- A new look, with a more readable layout.
+
+### Fixed
+- Linux builds no longer depend on Ubuntu's package mirrors, so they keep working when the
+  mirrors are down.
+- Switching the theme works again.
+- The Docker image builds again.
