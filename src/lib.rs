@@ -37,6 +37,8 @@ mod prefs;
 mod state;
 mod terminal;
 mod terminal_page;
+mod themes;
+mod themes_page;
 mod tray;
 mod ui;
 mod update;
@@ -92,6 +94,14 @@ pub struct App {
     pr_filter: PullState,
     search: TextEdit,
     theme: Theme,
+    /// The looks (themes) and which one each appearance uses; edited in Settings.
+    looks: themes::Looks,
+    /// The theme editor's fields, for one of your looks.
+    look_edit: LookEditor,
+    /// The page area's size, for the background pattern.
+    backdrop_size: [f32; 2],
+    /// Decodes the background picture of a look (set up with the window).
+    images: Option<rune::ImageCache>,
     sort: RepoSort,
     /// Counts toasts, so a toast's timer only hides its own message.
     toast_id: u64,
@@ -514,6 +524,70 @@ impl App {
         state::trace("theme", &self.theme, &theme);
         self.theme = theme;
         prefs::save_theme(theme);
+    }
+
+    /// Uses look `id` for its appearance and shows that appearance (`shown_dark` is what's on
+    /// screen now). One of your looks opens in the editor.
+    fn choose_look(&mut self, id: &str, shown_dark: bool) {
+        let Some(dark) = self.looks.choose(id) else { return };
+        state::trace("look", &shown_dark, &id);
+        if dark != shown_dark {
+            self.set_theme(if dark { Theme::Dark } else { Theme::Light });
+        }
+        self.looks.save();
+        self.edit_look(id);
+    }
+
+    /// Opens look `id` in the editor (nothing for a ready-made one).
+    fn edit_look(&mut self, id: &str) {
+        self.look_edit = match self.looks.get(id).filter(|t| !t.builtin) {
+            Some(t) => LookEditor::of(t),
+            None => LookEditor::default(),
+        };
+    }
+
+    /// Makes an editable copy of look `id` and opens it.
+    fn duplicate_look(&mut self, id: &str, shown_dark: bool) {
+        if let Some(new) = self.looks.duplicate(id) {
+            self.choose_look(&new, shown_dark);
+            self.notify("Copied: change it below");
+        }
+    }
+
+    fn delete_look(&mut self, id: &str) {
+        let name = self.looks.get(id).map(|t| t.name.clone()).unwrap_or_default();
+        if self.looks.delete(id) {
+            self.looks.save();
+            self.look_edit = LookEditor::default();
+            self.notify(format!("Deleted {name}"));
+        }
+    }
+
+    /// Changes the look being edited and saves it.
+    fn change_look(&mut self, f: impl FnOnce(&mut themes::Look)) {
+        let id = self.look_edit.id.clone();
+        if let Some(t) = self.looks.get_mut(&id) {
+            f(t);
+            self.looks.save();
+        }
+    }
+
+    /// Takes what was typed in the editor: valid colours apply at once.
+    fn look_typed(&mut self) {
+        let name = self.look_edit.name.text.trim().to_owned();
+        let image = self.look_edit.image.text.trim().to_owned();
+        let colors: Vec<Option<String>> = self.look_edit.colors.iter().map(|e| themes::parse_hex(&e.text)).collect();
+        self.change_look(|t| {
+            if !name.is_empty() {
+                t.name = name;
+            }
+            t.image = image;
+            for (i, c) in colors.into_iter().enumerate() {
+                if let Some(c) = c {
+                    t.colors[i] = c;
+                }
+            }
+        });
     }
 
     /// Shows a short message at the bottom of the window; it goes away after a few seconds.
@@ -1146,6 +1220,10 @@ fn init() -> App {
         pr_filter: PullState::Open,
         search: TextEdit::new(""),
         theme: prefs::load_theme().unwrap_or(cfg.theme),
+        looks: themes::Looks::load(),
+        look_edit: LookEditor::default(),
+        backdrop_size: [1180.0, 760.0],
+        images: None,
         sort: RepoSort::Recent,
         toast_id: 0,
         pinned_open: true,
@@ -1254,6 +1332,27 @@ fn init() -> App {
 }
 
 /// GitHub-like palette seeds: canvas, ink and the blue accent.
+/// The theme editor's text fields, for one of your looks (`id` empty: none open).
+#[derive(Default)]
+pub struct LookEditor {
+    id: String,
+    name: TextEdit,
+    colors: Vec<TextEdit>,
+    image: TextEdit,
+}
+
+impl LookEditor {
+    fn of(t: &themes::Look) -> LookEditor {
+        LookEditor {
+            id: t.id.clone(),
+            name: TextEdit::new(t.name.clone()),
+            colors: t.colors.iter().map(|c| TextEdit::new(c.clone())).collect(),
+            image: TextEdit::new(t.image.clone()),
+        }
+    }
+}
+
+#[allow(dead_code)]
 fn kit(dark: bool) -> Kit {
     let c = |h: &str| rune::color::hex(h).expect("valid colour");
     let mut k = if dark {
@@ -1451,7 +1550,8 @@ fn banner(s: &App, k: &Kit) -> Option<El> {
 fn view(s: &App, cx: &mut Cx<App>) -> El {
     let system_dark = cx.system_dark();
     let dark = s.theme.is_dark(system_dark);
-    let k = kit(dark);
+    let look = s.looks.active(dark);
+    let k = themes::kit(look);
     let content = match s.page {
         Page::Overview => pages::overview(s, &k),
         Page::Repos => pages::repos(s, &k),
@@ -1471,7 +1571,23 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
     }
     let pad = if s.compact { 12.0 } else { 24.0 };
     let page = col().w_full().padding(pad).gap(16.0).items_center().child(inner.child(content));
-    let mut main = col().w_full().h_full().shrink().fill(k.c.page)
+    let picture = match (&s.images, look.backdrop) {
+        (Some(cache), themes::Backdrop::Image) if !look.image.trim().is_empty() => {
+            let src = look.image.trim();
+            let img = if src.starts_with("http://") || src.starts_with("https://") { cache.url(src, 0.0, cx.env().scale) } else { cache.file(src, 0.0, cx.env().scale) };
+            Some(img.pixels().clone())
+        }
+        _ => None,
+    };
+    let backdrop = themes::backdrop(look, s.backdrop_size, picture.as_ref()).key("backdrop")
+        .on_layout_tx(|s: &mut App, [_, _, w, h], _| {
+            let size = [w, h];
+            if (size[0] / 64.0).ceil() != (s.backdrop_size[0] / 64.0).ceil() || (size[1] / 64.0).ceil() != (s.backdrop_size[1] / 64.0).ceil() {
+                s.backdrop_size = size;
+            }
+        });
+    let mut main = col().w_full().h_full().shrink().fill(k.c.page).clip_rounded(0.0)
+        .child(backdrop)
         .child(col().key("page").w_full().h_full().shrink().scroll(ScrollSpec { stick_bottom: false }).child(page));
     // The toast floats over the page, at the bottom; it leaves by itself or with its button.
     if let Some(toast) = &s.toast {
@@ -1539,6 +1655,11 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
         });
     // Overlays (the command palette) go above the whole window.
     rune_kit::root(root, overlays)
+}
+
+/// With the window: the image decoder for backgrounds.
+fn setup(s: &mut App, waker: rune::Waker) {
+    s.images = Some(rune::ImageCache::new(waker));
 }
 
 /// The layout to start with, before the first frame is measured (avoids a flash on phones).
@@ -1639,7 +1760,7 @@ const FAMILIES: (&str, &str) = ("Inter", "ui-monospace, IBM Plex Mono");
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen::prelude::wasm_bindgen(start))]
 pub fn start() {
-    let mut app = rune::App::new(AppSpec { on_key: Some(on_key), poll: Some(poll), fonts: FONTS, families: FAMILIES, ..AppSpec::new("RepoHub", (1180.0, 760.0), init, view) });
+    let mut app = rune::App::new(AppSpec { on_key: Some(on_key), poll: Some(poll), setup: Some(setup), fonts: FONTS, families: FAMILIES, ..AppSpec::new("RepoHub", (1180.0, 760.0), init, view) });
     // With the status-bar widget, closing the window keeps RepoHub there (macOS, Windows).
     if tray::keeps_running() {
         app = app.keep_running().on_close(on_close);

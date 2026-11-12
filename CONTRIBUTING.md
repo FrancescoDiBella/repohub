@@ -18,6 +18,7 @@
 | `src/notes.rs`, `src/notes_page.rs` | Notes storage (local folder on desktop, `/api/notes` on the web) and the Notes tab |
 | `src/palette.rs` | The command palette (⌘K): the commands for the current state, the fuzzy ranking (both tested), the modal layer |
 | `src/update.rs` | In-app updates: the build's commit (`REPOHUB_BUILD`, set by the Desktop workflow), the Latest build's package for this platform, the SHA256SUMS check, install and restart |
+| `src/themes.rs`, `src/themes_page.rs` | Themes: the ready-made looks, yours (`Looks`, saved in the preferences), the `Kit` built from a look, background patterns and pictures; the gallery and editor in Settings |
 | `src/prefs.rs` | What outlives the app: theme, pins, the place you were (`state::Place`) and the arrangement (`state::Layout`), one key each in `prefs.json` / `localStorage` |
 | `src/tray.rs` | The status-bar widget: the menu (a pure function of the state, tested), Rune's `Tray` on Windows and Linux, `tray-icon` on macOS; icons in `assets/tray-*.rgba` |
 | `src/claude.rs`, `src/claude_page.rs` | The Claude tab (desktop): runs `claude -p --output-format stream-json` in the clone, parses the stream into chat items (`Run`, `Mode`, `Item`), the chat UI |

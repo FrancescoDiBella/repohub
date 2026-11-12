@@ -5,7 +5,7 @@ use rune_kit::{Button, ButtonVariant, ControlSize, Kit, SegmentedControl, TextIn
 use crate::model::{Checks, Issue, Pull, PullState, Repo, Run};
 use crate::pages::{heading, open_button};
 use crate::ui::{self, panel, panel_head, rule};
-use crate::state::{Account, Theme};
+use crate::state::Account;
 use crate::{App, Status, icons};
 
 /// Makes a row open `url` in the browser when clicked.
@@ -175,14 +175,7 @@ pub fn settings(s: &App, k: &Kit) -> El {
         conn = conn.child(rule(k)).child(info(k, label, value));
     }
     let account = account_panel(s, k);
-    let appearance = panel(k).child(panel_head(k, "Appearance", None)).child(rule(k))
-        .child(row().w_full().px(16.0).py(12.0).gap(16.0).center_y().justify_between().flex_wrap()
-            .child(col().grow(1.0).shrink().min_w(200.0).gap(2.0)
-                .child(text("Theme").font(k.ty.ui_medium).color(k.c.text_base))
-                .child(text("System follows your computer's light or dark setting. Your choice is remembered; REPOHUB_THEME in .env only sets the default.")
-                    .font(k.ty.text_small).color(k.c.text_muted).wrap()))
-            .child(SegmentedControl::new(&Theme::LABELS, Some(s.theme.index())).label("Theme").fit()
-                .on_pick(|s: &mut App, i, _| s.set_theme(Theme::ALL[i.min(2)])).build(k).key("theme-pick")));
+    let appearance = crate::themes_page::appearance(s, k);
     let version = version_panel(s, k);
     let keys = panel(k).child(panel_head(k, "Keyboard shortcuts", None));
     let keys = [

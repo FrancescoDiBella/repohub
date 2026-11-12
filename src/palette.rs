@@ -43,6 +43,8 @@ pub enum Command {
     InstallUpdate,
     /// The Repositories page for one owner.
     Owner(crate::state::OwnerFilter),
+    /// Use a theme (look) and its appearance.
+    Look(String),
 }
 
 #[derive(Clone, Debug)]
@@ -119,7 +121,12 @@ pub fn entries(s: &App) -> Vec<Entry> {
     }
     for (t, label) in Theme::ALL.iter().zip(Theme::LABELS) {
         if *t != s.theme {
-            out.push(entry(format!("Theme: {label}"), "Appearance", if *t == Theme::Dark { &icons::MOON } else { &icons::SUN }, Command::Theme(*t)));
+            out.push(entry(format!("Mode: {label}"), "Appearance", if *t == Theme::Dark { &icons::MOON } else { &icons::SUN }, Command::Theme(*t)));
+        }
+    }
+    for t in &s.looks.all {
+        if s.looks.light != t.id && s.looks.dark != t.id {
+            out.push(Entry { detail: "theme look colours".into(), ..entry(format!("Theme: {}", t.name), "Appearance", if t.dark { &icons::MOON } else { &icons::SUN }, Command::Look(t.id.clone())) });
         }
     }
     for (o, n) in crate::orgs(s) {
@@ -219,6 +226,10 @@ pub fn run(s: &mut App, cmd: Command, tx: &mut Tx) {
         }
         Command::Refresh => s.refresh(),
         Command::Theme(t) => s.set_theme(t),
+        Command::Look(id) => {
+            let dark = s.looks.get(&id).is_some_and(|t| t.dark);
+            s.choose_look(&id, !dark);
+        }
         Command::OpenUrl(u) => {
             let _ = tx.open_url(&u);
         }
