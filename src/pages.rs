@@ -271,6 +271,19 @@ pub fn repo_detail(s: &App, k: &Kit, i: usize, plugin: Option<El>) -> El {
     col().w_full().gap(16.0).child(back).child(header).child(tabs).child(actions::form_panel(s, k, i)).child(body)
 }
 
+/// The files and what's under them: from the local clone an open file comes first, then the
+/// folder (the README when no file is open); from GitHub, its files and the README.
+fn local_or_github(s: &App, k: &Kit, i: usize, r: &Repo, has_local: bool, github: El, readme: El) -> Vec<El> {
+    if !has_local || s.files_from_github {
+        return vec![github, readme];
+    }
+    let files = crate::local_page::files_panel(s, k, i, r);
+    match crate::local_page::viewer(s, k, i, r) {
+        Some(file) => vec![file, files],
+        None => vec![files, readme],
+    }
+}
+
 fn list_of(k: &Kit, title: &str, action: Option<El>, rows: Vec<El>) -> El {
     let empty = rows.is_empty();
     let mut p = panel(k).child(panel_head(k, title, action));
@@ -318,7 +331,12 @@ fn code_tab(s: &App, k: &Kit, i: usize, r: &Repo) -> El {
     let clone = Button::new("Copy clone URL").variant(ButtonVariant::Submit).control_size(ControlSize::Small)
         .on_press_tx(move |s: &mut App, tx| { tx.copy(clone_url.clone()); s.notify("Clone URL copied"); })
         .build(k).key("clone");
+    // With a local clone the files come from the disk (`local_page`), unless GitHub is picked.
+    let has_local = s.local.contains_key(&r.full_name);
     let mut files = panel(k);
+    if has_local {
+        files = files.child(panel_head(k, "Files on GitHub", Some(crate::local_page::source_switch(s, k)))).child(rule(k));
+    }
     let loading = load.is_some_and(Load::is_loading);
     match load {
         None => files = files.child(col().w_full().padding(24.0).items_center().child(text("Open the repository to load its files").font(k.ty.ui).color(k.c.text_muted))),
@@ -395,7 +413,6 @@ fn code_tab(s: &App, k: &Kit, i: usize, r: &Repo) -> El {
                     .child(actions::open_form_button(k, i, Compose::Pull)))
                 .child(clone))
             .child(actions::branch_panel(s, k, i, BranchSlot::View, &at))
-            .child(files)
-            .child(readme_panel))
+            .children(local_or_github(s, k, i, r, has_local, files, readme_panel)))
         .child(col().grow(1.0).min_w(240.0).child(about))
 }

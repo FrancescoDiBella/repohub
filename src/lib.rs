@@ -26,6 +26,8 @@ mod github;
 mod harness;
 mod icons;
 mod lists;
+mod local;
+mod local_page;
 mod markdown;
 mod mobile;
 mod model;
@@ -138,6 +140,13 @@ pub struct App {
     toast: Option<Toast>,
     cfg: Arc<Config>,
     data: Data,
+    /// Local clones' file lists, by full name (desktop; read from disk).
+    local: HashMap<String, Load<local::Tree>>,
+    /// The Code tab's folder in the local clone (`""`: its root), and the file open in it.
+    local_dir: String,
+    local_file: Option<(String, Load<local::Content>)>,
+    /// The Code tab shows GitHub's files although a local clone is known.
+    files_from_github: bool,
     /// Repository details by (full name, branch); a missing entry hasn't been asked for.
     details: HashMap<(String, String), Load<Detail>>,
     /// Where the data comes from. Change it with `set_status`.
@@ -651,6 +660,10 @@ impl App {
     }
 
     fn open(&mut self, i: usize) {
+        if self.page != Page::Repo(i) {
+            self.local_dir.clear();
+            self.local_file = None;
+        }
         self.go(Page::Repo(i));
         self.set_tab(i, RepoTab::Code);
         self.load_detail(i);
@@ -707,10 +720,12 @@ impl App {
         let key = (full.clone(), self.branch(i));
         if self.data.sample {
             let d = model::sample_detail(r);
+            self.load_local(i, false);
             self.details.insert(key, Load::Ready(d));
             return;
         }
         self.load_branches(i);
+        self.load_local(i, false);
         if self.details.contains_key(&key) {
             return;
         }
@@ -722,6 +737,41 @@ impl App {
                 s.details.insert(key, Load::Ready(d));
             });
         }
+    }
+
+    /// Lists repository `i`'s local clone, if one is known (`again`: even if listed already).
+    fn load_local(&mut self, i: usize, again: bool) {
+        let Some(r) = self.data.repos.get(i) else { return };
+        let full = r.full_name.clone();
+        let Some(dir) = clones_shim::find(&full) else { return };
+        if !again && matches!(self.local.get(&full), Some(Load::Ready(_) | Load::Loading)) {
+            return;
+        }
+        let Some(h) = self.handle.clone() else { return };
+        if !matches!(self.local.get(&full), Some(Load::Ready(_))) {
+            self.local.insert(full.clone(), Load::Loading);
+        }
+        net::spawn(h, move || async move { local::scan(&dir) }, move |s: &mut App, r| {
+            s.local.insert(full, r.into());
+        });
+    }
+
+    /// Opens `path` in repository `i`'s local clone: a folder lists it, a file shows it.
+    fn open_local(&mut self, i: usize, path: String, dir: bool) {
+        if dir {
+            self.local_dir = path;
+            self.local_file = None;
+            return;
+        }
+        let Some(root) = self.data.repos.get(i).and_then(|r| clones_shim::find(&r.full_name)) else { return };
+        let Some(h) = self.handle.clone() else { return };
+        self.local_file = Some((path.clone(), Load::Loading));
+        let p = path.clone();
+        net::spawn(h, move || async move { local::read(&root, &p) }, move |s: &mut App, r| {
+            if s.local_file.as_ref().is_some_and(|(open, _)| *open == path) {
+                s.local_file = Some((path, r.into()));
+            }
+        });
     }
 
     /// Loads repository `i`'s branch list, once. The sample data has its default branch only.
@@ -1393,6 +1443,10 @@ fn init() -> App {
         // The web build waits for repohub-server's config.json before choosing (see `start`).
         data: if live || cfg!(target_arch = "wasm32") { Data::default() } else { Data::sample() },
         details: HashMap::new(),
+        local: HashMap::new(),
+        local_dir: String::new(),
+        local_file: None,
+        files_from_github: false,
         status: if live || cfg!(target_arch = "wasm32") { Status::Starting } else { Status::Sample },
         handle: None,
         branches: HashMap::new(),

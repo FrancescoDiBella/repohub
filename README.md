@@ -260,6 +260,21 @@ In Docker the same actions go through `repohub-server`, which forwards only thes
 The token needs, as a fine-grained token: **Contents**, **Issues** and **Pull requests** read
 and write, **Metadata** and **Actions** read. A classic token needs the `repo` scope.
 
+## Files on your computer (desktop app)
+
+When RepoHub knows a repository's local clone (found as in the Terminal tab, or a folder you
+picked), the Code tab reads its files from the disk instead of GitHub. That's instant, works
+offline, uses none of GitHub's requests, and includes what you haven't committed yet.
+
+- Folders open in place. A trail of folder names takes you back up.
+- Changed files are marked: M modified, A added, D deleted, R renamed, U new (not tracked yet),
+  ! in conflict. The title counts them.
+- A file opens with syntax colours, and Markdown is rendered. Copy takes the whole file, and
+  GitHub opens the committed version. Files longer than 5,000 lines or 1 MB show their beginning,
+  and binary files show a note.
+- Files git ignores are left out. **Refresh** lists the files again after you change them
+  outside RepoHub, and **GitHub** switches to the files on GitHub.
+
 ## README
 
 The Code tab shows the repository's README rendered as Markdown. Select text as on a web page
