@@ -10,6 +10,9 @@ The sections are **Added**, **Changed** and **Fixed**.
 ## Unreleased
 
 ### Added
+- The Code tab reads files from the repository's local clone when there is one. It's instant and
+  works offline, shows uncommitted changes and marks changed files. You can browse folders and
+  open files with syntax colours. GitHub is one click away.
 - Plugins (desktop app). Anyone can write one: a sandboxed Luau script that adds a section to
   repository pages or a page of its own. Install from a folder or a Git address, and turn each
   one on or off. **Create a plugin** starts from the Checklist example, and the guide is
