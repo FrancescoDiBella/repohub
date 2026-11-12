@@ -84,6 +84,8 @@ pub struct Release {
     pub size: u64,
     /// The address of `SHA256SUMS`, when the release has one.
     pub sums: Option<String>,
+    /// What's new: the release notes (CHANGELOG.md's Unreleased section), Markdown; may be empty.
+    pub notes: String,
 }
 
 impl Release {
@@ -121,7 +123,20 @@ pub fn parse_release(json: &str, suffix: &str) -> Result<Release, String> {
         url: s(&asset, "browser_download_url"),
         size: asset.get("size").and_then(Value::as_u64).unwrap_or(0),
         sums: pick("SHA256SUMS").map(|a| s(&a, "browser_download_url")),
+        notes: notes(&s(&v, "body")),
     })
+}
+
+/// The release notes in a release's text, without the Latest build's first line about itself.
+pub fn notes(body: &str) -> String {
+    let body = body.replace("\r\n", "\n");
+    let body = body.trim();
+    let rest = match body.split_once("\n\n") {
+        Some((first, rest)) if first.starts_with("Built automatically") => rest,
+        None if body.starts_with("Built automatically") => "",
+        _ => body,
+    };
+    rest.trim().to_owned()
 }
 
 /// Whether `release` should replace build `sha` built at `built`: another commit, published
@@ -353,6 +368,14 @@ mod tests {
         assert!(!is_newer(&r, "abc1234def", built), "the same commit");
         assert!(!is_newer(&r, "abc1234", None), "a short sha of the same commit");
         assert!(!is_newer(&r, "fff0000", crate::model::parse_iso("2026-11-12T00:00:00Z")), "this build is newer than the release");
+        assert_eq!(r.notes, "");
+    }
+
+    #[test]
+    fn release_notes() {
+        assert_eq!(notes("Built automatically from main at abc1234. It is replaced on every push.\r\n\r\n### Added\r\n- Pins"), "### Added\n- Pins");
+        assert_eq!(notes("Built automatically from main at abc1234."), "");
+        assert_eq!(notes("### Fixed\n- A crash\n\n### Added\n- B"), "### Fixed\n- A crash\n\n### Added\n- B");
     }
 
     #[test]

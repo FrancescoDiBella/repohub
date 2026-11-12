@@ -128,6 +128,12 @@ From the first build that includes it, the app updates itself from the
 - `REPOHUB_UPDATES=off` turns the checks off. Builds from source update with `git pull`, the
   Docker version with `docker compose pull`.
 
+### Release notes
+
+What changed in each version is in [`CHANGELOG.md`](CHANGELOG.md). The section of a tagged
+version (`v0.2.0`) becomes that release's notes. The Unreleased section becomes the notes of the
+Latest build, and the update banner shows them under **What's new** before you install.
+
 ### Connect your account
 
 Open **Settings → GitHub account**, type your user name and (optionally) a token, and press

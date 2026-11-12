@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use rune::{AppHandle, AppSpec, Cx, El, KeyEvent, ScrollSpec, TextEdit, Tx, col, row, text};
+use rune::{AppHandle, Color, AppSpec, Cx, El, KeyEvent, ScrollSpec, TextEdit, Tx, col, row, text};
 use rune_kit::shell::{self, PaneState, Sidebar, SidebarRow, SidebarSection, SidebarToggle, SplitView, Toolbar};
 use rune_kit::{ControlSize, IconButton, IconButtonVariant, Kit, PaletteSeed};
 
@@ -159,6 +159,8 @@ pub struct App {
     /// at the last check.
     update: update::Update,
     update_later: bool,
+    /// The update banner shows the new version's notes (What's new).
+    show_notes: bool,
     update_checked: Option<f64>,
     /// The command palette, while it's open (⌘K / Ctrl+K).
     palette: Option<palette::Palette>,
@@ -1184,6 +1186,7 @@ fn init() -> App {
         palette: None,
         update: update::Update::initial(),
         update_later: false,
+        show_notes: false,
         update_checked: None,
         loaded_at: None,
         last_load: None,
@@ -1402,13 +1405,23 @@ fn update_banner(s: &App, k: &Kit) -> Option<El> {
         .fill(tint.alpha(0.12)).border(1.0, tint.alpha(0.45))
         .child(ui::ico(&icons::REFRESH, 15.0, tint))
         .child(text(msg).font(k.ty.small).color(k.c.text_base).wrap().grow(1.0).shrink());
+    let notes = s.update.available().map(|r| r.notes.clone()).filter(|n| actions && !n.is_empty());
+    if notes.is_some() {
+        r = r.child(Button::new(if s.show_notes { "Hide what's new" } else { "What's new" }).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
+            .on_press(|s: &mut App| s.show_notes = !s.show_notes).build(k).key("update-notes"));
+    }
     if actions {
         r = r.child(Button::new("Later").variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
                 .on_press(|s: &mut App| s.update_later = true).build(k).key("update-later"))
             .child(Button::new("Install and restart").variant(ButtonVariant::Submit).control_size(ControlSize::Small)
                 .on_press(|s: &mut App| s.install_update()).build(k).key("update-install"));
     }
-    Some(r)
+    match notes {
+        Some(md) if s.show_notes => Some(col().w_full().gap(0.0).radius(k.radius.lg).fill(tint.alpha(0.06)).border(1.0, tint.alpha(0.45)).key("update-banner-box")
+            .child(r.radius(0.0).fill(Color::TRANSPARENT).border(0.0, Color::TRANSPARENT))
+            .child(col().w_full().px(16.0).pb(12.0).key("update-notes-body").child(pages::readme_view(k, &md)))),
+        _ => Some(r),
+    }
 }
 
 /// A banner above the page for loading, errors and sample data.
