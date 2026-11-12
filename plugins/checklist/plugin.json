@@ -1,0 +1,8 @@
+{
+  "name": "Checklist",
+  "version": "0.1.0",
+  "description": "A release checklist for each repository, and a page with the progress of all of them.",
+  "author": "RepoHub",
+  "repo_tab": "Checklist",
+  "page": "Checklists"
+}

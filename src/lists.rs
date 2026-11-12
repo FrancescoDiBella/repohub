@@ -177,6 +177,7 @@ pub fn settings(s: &App, k: &Kit) -> El {
     let account = account_panel(s, k);
     let appearance = crate::themes_page::appearance(s, k);
     let assistants = assistants_panel(s, k);
+    let plugins = crate::plugins_page::plugins_panel(s, k);
     let version = version_panel(s, k);
     let keys = panel(k).child(panel_head(k, "Keyboard shortcuts", None));
     let keys = [
@@ -191,6 +192,7 @@ pub fn settings(s: &App, k: &Kit) -> El {
         .child(account)
         .child(appearance)
         .child(assistants)
+        .child(plugins)
         .child(conn)
         .child(version)
         .child(keys)

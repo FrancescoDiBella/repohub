@@ -29,6 +29,9 @@ portable-pty = "0.9"
 vt100 = "0.18"
 # Checks downloaded updates against the release's SHA256SUMS.
 sha2 = "0.10"
+# Plugins: sandboxed Luau scripts that build Rune UI (src/plugins.rs); `watch` reloads a plugin
+# when one of its files is saved.
+rune-luau = { git = "https://github.com/anomalyco/rune", rev = "39301f6793266450a057f270da06b048a689be96", features = ["watch"] }
 
 # The menu bar item on macOS (Rune's tray covers Windows and Linux).
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -10,6 +10,10 @@ The sections are **Added**, **Changed** and **Fixed**.
 ## Unreleased
 
 ### Added
+- Plugins (desktop app). Anyone can write one: a sandboxed Luau script that adds a section to
+  repository pages or a page of its own. Install from a folder or a Git address, and turn each
+  one on or off. **Create a plugin** starts from the Checklist example, and the guide is
+  `docs/PLUGINS.md`.
 - Coding assistants. The Claude section can be turned off in Settings. You can add any harness,
   such as Codex, Aider, opencode, Gemini CLI or your own, with a name and the command that starts
   it. Each gets a button in the Terminal and a ⌘K command.

@@ -34,6 +34,12 @@ mod notes;
 mod notes_page;
 mod pages;
 mod palette;
+#[cfg(not(target_arch = "wasm32"))]
+mod plugins;
+#[cfg(target_arch = "wasm32")]
+#[path = "plugins_web.rs"]
+mod plugins;
+mod plugins_page;
 mod prefs;
 mod state;
 mod terminal;
@@ -65,6 +71,8 @@ pub enum Page {
     Issues,
     Actions,
     Settings,
+    /// A plugin's page (its position in `App::plugins`).
+    Plugin(usize),
 }
 
 pub use state::Status;
@@ -95,6 +103,17 @@ pub struct App {
     pr_filter: PullState,
     search: TextEdit,
     theme: Theme,
+    /// Installed plugins (desktop app).
+    plugins: plugins::Plugins,
+    /// The plugin whose section is open on the repository page (instead of `tab`).
+    plugin_tab: Option<usize>,
+    /// Settings → Plugins: the folder or Git address to install from, and what went wrong.
+    plugin_src: TextEdit,
+    plugin_error: Option<String>,
+    /// The plugin whose Remove was pressed once (press again to remove it).
+    plugin_confirm: Option<String>,
+    /// Whether the dark look is on screen (set while drawing; plugins' context).
+    shown_dark: std::cell::Cell<bool>,
     /// The coding assistants (harnesses) and whether the Claude section is on.
     assist: harness::Assistants,
     /// The Settings form that adds a harness.
@@ -214,6 +233,7 @@ impl App {
             Page::Issues => ("issues", None),
             Page::Actions => ("actions", None),
             Page::Settings => ("settings", None),
+            Page::Plugin(_) => ("overview", None),
         };
         state::Place { page: page.into(), tab: repo.as_ref().map(|_| self.tab), repo }
     }
@@ -280,6 +300,7 @@ impl App {
     }
 
     fn set_tab(&mut self, i: usize, tab: RepoTab) {
+        self.plugin_tab = None;
         let tab = if self.tabs().contains(&tab) { tab } else { RepoTab::Code };
         if self.tab != tab {
             state::trace("tab", &self.tab, &tab);
@@ -1131,6 +1152,55 @@ impl App {
         }
     }
 
+    /// Opens plugin `p`'s section on repository `i`'s page.
+    fn open_plugin_tab(&mut self, i: usize, p: Option<usize>) {
+        let Some(p) = p else { return };
+        if self.page != Page::Repo(i) {
+            self.go(Page::Repo(i));
+        }
+        self.leave_tab();
+        self.plugin_tab = Some(p);
+    }
+
+    /// Installs the plugin typed in Settings (a folder or a Git address) and starts it.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn install_plugin(&mut self, example: bool) {
+        let result = if example { plugins::create_example() } else { plugins::install(&self.plugin_src.text) };
+        match result {
+            Ok(id) => {
+                self.plugin_error = None;
+                self.plugin_src.clear();
+                self.plugins.rescan();
+                if let Some(h) = self.handle.clone() {
+                    self.plugins.start(&h);
+                }
+                let name = self.plugins.list.iter().find(|p| p.id == id).map(|p| p.manifest.name.clone()).unwrap_or(id);
+                self.notify(if example { format!("Created {name} in your plugins folder: edit it and it reloads") } else { format!("Installed {name}") });
+            }
+            Err(e) => self.plugin_error = Some(e),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn remove_plugin(&mut self, id: &str) {
+        if self.plugin_confirm.as_deref() != Some(id) {
+            self.plugin_confirm = Some(id.to_owned());
+            return;
+        }
+        self.plugin_confirm = None;
+        self.plugin_tab = None;
+        if matches!(self.page, Page::Plugin(_)) {
+            self.go(Page::Settings);
+        }
+        match plugins::remove(id) {
+            Ok(()) => {
+                self.plugins.list.retain(|p| p.id != id);
+                self.notify(format!("Removed {id}"));
+            }
+            Err(e) => self.plugin_error = Some(e),
+        }
+    }
+
     /// Turns the Claude section on or off.
     fn set_claude(&mut self, on: bool) {
         state::trace("claude", &self.assist.claude, &on);
@@ -1291,6 +1361,12 @@ fn init() -> App {
         pr_filter: PullState::Open,
         search: TextEdit::new(""),
         theme: prefs::load_theme().unwrap_or(cfg.theme),
+        plugins: plugins::Plugins::scan(),
+        plugin_tab: None,
+        plugin_src: TextEdit::new(""),
+        plugin_error: None,
+        plugin_confirm: None,
+        shown_dark: std::cell::Cell::new(false),
         assist: harness::Assistants::load(),
         harness_name: TextEdit::new(""),
         harness_cmd: TextEdit::new(""),
@@ -1547,6 +1623,13 @@ fn sidebar(s: &App, k: &Kit) -> El {
         sb = sb.section(SidebarSection::new("Organizations").count(org_rows.len()).collapsed(s.orgs_closed)
             .on_toggle(|s: &mut App, _| s.orgs_closed = !s.orgs_closed).rows(org_rows));
     }
+    let plugin_rows: Vec<El> = s.plugins.pages().into_iter().map(|(i, label)| {
+        SidebarRow::new(label.clone()).icon(&icons::SPARK).height(30.0).selected(s.page == Page::Plugin(i))
+            .on_select(move |s: &mut App, _| s.go(Page::Plugin(i))).build(k).key(format!("plugin-page-{i}"))
+    }).collect();
+    if !plugin_rows.is_empty() {
+        sb = sb.section(SidebarSection::new("Plugins").count(plugin_rows.len()).rows(plugin_rows));
+    }
     sb.footer(nav(s, k, "Settings", &icons::GEAR, Page::Settings, None)).build(k)
 }
 
@@ -1559,6 +1642,7 @@ fn title(s: &App) -> String {
         Page::Issues => "Issues".into(),
         Page::Actions => "Actions".into(),
         Page::Settings => "Settings".into(),
+        Page::Plugin(i) => s.plugins.list.get(i).and_then(|p| p.manifest.page.clone()).unwrap_or_default(),
     }
 }
 
@@ -1627,10 +1711,16 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
     let dark = s.theme.is_dark(system_dark);
     let look = s.looks.active(dark);
     let k = themes::kit(look);
+    s.shown_dark.set(dark);
+    s.plugins.set_colors(&k);
     let content = match s.page {
         Page::Overview => pages::overview(s, &k),
         Page::Repos => pages::repos(s, &k),
-        Page::Repo(i) if i < s.data.repos.len() => pages::repo_detail(s, &k, i),
+        Page::Repo(i) if i < s.data.repos.len() => {
+            let extra = s.plugin_tab.and_then(|p| s.plugins.surface(p, cx, "repo"));
+            pages::repo_detail(s, &k, i, extra)
+        }
+        Page::Plugin(i) => s.plugins.surface(i, cx, "page").unwrap_or_else(|| pages::overview(s, &k)),
         Page::Repo(_) => pages::repos(s, &k),
         Page::Pulls => lists::pulls(s, &k),
         Page::Issues => lists::issues(s, &k),
@@ -1734,6 +1824,8 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
 
 /// With the window: the image decoder for backgrounds.
 fn setup(s: &mut App, waker: rune::Waker) {
+    #[cfg(not(target_arch = "wasm32"))]
+    s.plugins.set_waker(waker.clone());
     s.images = Some(rune::ImageCache::new(waker));
 }
 
@@ -1753,6 +1845,16 @@ fn starts_compact() -> bool {
 /// asks Rune to wake for the next one, also while the window is closed. No timer thread.
 fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
     const EVERY: f64 = 30.0;
+    #[cfg(not(target_arch = "wasm32"))]
+    let plugins_ran = {
+        if s.plugins.list.iter().any(|p| p.running()) {
+            let ctx = plugins::context(s, s.shown_dark.get());
+            s.plugins.set_context(ctx);
+        }
+        s.plugins.poll(clock, tx)
+    };
+    #[cfg(target_arch = "wasm32")]
+    let plugins_ran = false;
     s.clock = clock;
     let due = clock - s.tick_at >= EVERY;
     if due {
@@ -1760,7 +1862,7 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
         s.tick();
     }
     tx.wake_after(std::time::Duration::from_secs_f64((EVERY - (clock - s.tick_at)).max(1.0)));
-    due
+    due || plugins_ran
 }
 
 /// The window closed: RepoHub stays in the status bar, unless its icon couldn't be shown.
@@ -1846,6 +1948,8 @@ pub fn start() {
     handle.update(move |s: &mut App, _| {
         s.handle = Some(h2.clone());
         s.start_tray();
+        #[cfg(not(target_arch = "wasm32"))]
+        s.plugins.start(&h2);
         // Clear what an earlier update left, then look for a newer build.
         #[cfg(not(target_arch = "wasm32"))]
         update::cleanup();

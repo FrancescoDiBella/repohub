@@ -35,6 +35,9 @@ STAGE=dist/dmg
 mkdir -p "$STAGE"
 cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
-hdiutil create -volname RepoHub -srcfolder "$STAGE" -ov -format UDZO "dist/RepoHub-$VERSION-macos.dmg"
+# hdiutil's own guess at the size can come out too small ("No space left on device"): give it
+# the folder's size plus room for the file system.
+SIZE_MB=$(( $(du -sm "$STAGE" | cut -f1) + 40 ))
+hdiutil create -volname RepoHub -srcfolder "$STAGE" -size "${SIZE_MB}m" -ov -format UDZO "dist/RepoHub-$VERSION-macos.dmg"
 rm -rf "$STAGE"
 echo "Built dist/RepoHub-$VERSION-macos.dmg"
