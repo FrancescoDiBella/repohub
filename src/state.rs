@@ -221,6 +221,8 @@ impl Theme {
 pub enum RepoTab {
     #[default]
     Code,
+    /// What changed in the local clone since the last commit (desktop, with a clone).
+    Changes,
     Issues,
     Pulls,
     Actions,
@@ -231,8 +233,8 @@ pub enum RepoTab {
 }
 
 impl RepoTab {
-    pub const ALL: [RepoTab; 8] = [RepoTab::Code, RepoTab::Issues, RepoTab::Pulls, RepoTab::Actions, RepoTab::Notes, RepoTab::Claude, RepoTab::Terminal, RepoTab::Settings];
-    pub const LABELS: [&'static str; 8] = ["Code", "Issues", "Pull requests", "Actions", "Notes", "Claude", "Terminal", "Settings"];
+    pub const ALL: [RepoTab; 9] = [RepoTab::Code, RepoTab::Changes, RepoTab::Issues, RepoTab::Pulls, RepoTab::Actions, RepoTab::Notes, RepoTab::Claude, RepoTab::Terminal, RepoTab::Settings];
+    pub const LABELS: [&'static str; 9] = ["Code", "Changes", "Issues", "Pull requests", "Actions", "Notes", "Claude", "Terminal", "Settings"];
 
     pub fn index(self) -> usize {
         RepoTab::ALL.iter().position(|t| *t == self).unwrap_or(0)
@@ -604,7 +606,8 @@ mod tests {
         }
         assert_eq!(RepoTab::parse("notes"), Some(RepoTab::Notes));
         assert_eq!(RepoTab::parse("Pull requests"), Some(RepoTab::Pulls));
-        assert_eq!(RepoTab::parse("6"), Some(RepoTab::Terminal));
+        assert_eq!(RepoTab::parse("7"), Some(RepoTab::Terminal));
+        assert_eq!(RepoTab::parse("changes"), Some(RepoTab::Changes));
         assert_eq!(RepoTab::parse("claude"), Some(RepoTab::Claude));
         assert_eq!(RepoTab::from_index(99), RepoTab::Code);
         assert!(RepoFilter::Private.matches(true, false) && !RepoFilter::Fork.matches(true, false));

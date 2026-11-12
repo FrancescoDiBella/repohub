@@ -98,6 +98,7 @@ pub fn pulls(s: &App, k: &Kit) -> El {
     let sub = if s.data.sample { "Pull requests you opened or that wait for your review." } else { "Pull requests you're involved in (author, reviewer, assignee or mentioned). Click one to open it on GitHub." };
     col().w_full().gap(16.0)
         .child(heading(k, "Pull requests", sub, None))
+        .children(crate::changes_page::pull_panel(s, k))
         .child(SegmentedControl::new(&PR_LABELS, PR_STATES.iter().position(|p| *p == s.pr_filter)).label("State").fit()
             .on_pick(|s: &mut App, i, _| s.pr_filter = PR_STATES[i.min(3)]).build(k).key("pr-filter"))
         .child(listing(k, rows, "No pull requests in this state"))

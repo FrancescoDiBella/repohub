@@ -10,6 +10,10 @@ The sections are **Added**, **Changed** and **Fixed**.
 ## Unreleased
 
 ### Added
+- Diffs in the app. **Files** on a pull request shows what it changes, unified or side by side,
+  and it can be merged from there with a merge commit, squash or rebase. A new **Changes** tab
+  shows what changed in the local clone, with **Commit**, **Commit and push**, **Push**, **Pull**
+  and **New pull request**.
 - The Code tab reads files from the repository's local clone when there is one. It's instant and
   works offline, shows uncommitted changes and marks changed files. You can browse folders and
   open files with syntax colours. GitHub is one click away.

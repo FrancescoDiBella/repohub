@@ -226,13 +226,14 @@ pub fn issue_line(s: &App, k: &Kit, x: &Issue) -> El {
 pub fn pull_line(s: &App, k: &Kit, p: &Pull, compact: bool) -> El {
     let key = busy_key(&p.repo, p.number);
     let line = lists::pull_row(k, p, compact).grow(1.0).shrink();
+    let files = crate::changes_page::files_button(k, p);
     if p.state != PullState::Open {
-        return line;
+        return row().w_full().center_y().child(line).children(files.map(|f| f.mr(12.0)));
     }
     let busy = s.busy.contains(&key);
     let asking = s.confirm_merge.as_deref() == Some(key.as_str());
     let (repo, number) = (p.repo.clone(), p.number);
-    let mut tools = row().gap(6.0).center_y().mr(12.0);
+    let mut tools = row().gap(6.0).center_y().mr(12.0).children(files);
     if asking && !busy {
         let r2 = repo.clone();
         tools = tools
