@@ -179,9 +179,9 @@ pub fn parse_env(src: &str) -> Vec<(String, String)> {
     out
 }
 
-/// The terminal's default command buttons.
+/// The terminal's default command buttons (coding assistants come from `harness`).
 pub fn default_commands() -> Vec<String> {
-    ["claude", "git status", "git pull", "git log --oneline -15"].iter().map(|s| s.to_string()).collect()
+    ["git status", "git pull", "git log --oneline -15"].iter().map(|s| s.to_string()).collect()
 }
 
 /// Without a token GitHub allows 60 requests an hour, and a refresh takes about

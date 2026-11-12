@@ -238,6 +238,7 @@ impl RepoTab {
         RepoTab::ALL.iter().position(|t| *t == self).unwrap_or(0)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn from_index(i: usize) -> RepoTab {
         RepoTab::ALL.get(i).copied().unwrap_or_default()
     }

@@ -176,6 +176,7 @@ pub fn settings(s: &App, k: &Kit) -> El {
     }
     let account = account_panel(s, k);
     let appearance = crate::themes_page::appearance(s, k);
+    let assistants = assistants_panel(s, k);
     let version = version_panel(s, k);
     let keys = panel(k).child(panel_head(k, "Keyboard shortcuts", None));
     let keys = [
@@ -189,9 +190,62 @@ pub fn settings(s: &App, k: &Kit) -> El {
         .child(profile)
         .child(account)
         .child(appearance)
+        .child(assistants)
         .child(conn)
         .child(version)
         .child(keys)
+}
+
+/// Coding assistants: the Claude switch and the harnesses (name and command) the Terminal offers.
+fn assistants_panel(s: &App, k: &Kit) -> El {
+    use crate::harness::SUGGESTED;
+    let a = &s.assist;
+    let claude = row().w_full().px(16.0).py(12.0).gap(16.0).center_y().justify_between()
+        .child(col().grow(1.0).shrink().gap(2.0)
+            .child(text("Claude").font(k.ty.ui_medium).color(k.c.text_base))
+            .child(text("The Claude section of each repository, and the buttons that start claude in the Terminal.")
+                .font(k.ty.text_small).color(k.c.text_muted).wrap()))
+        .child(rune_kit::Switch::new(a.claude).label("Claude section")
+            .on_toggle(|s: &mut App| { let on = !s.assist.claude; s.set_claude(on) }).build(k).key("claude-switch"));
+    let mut list = col().w_full().px(16.0).py(12.0).gap(8.0)
+        .child(text("Harnesses").font(k.ty.ui_medium).color(k.c.text_base))
+        .child(text("Each one gets a button in the Terminal and in ⌘K that starts it in the repository's folder.")
+            .font(k.ty.text_small).color(k.c.text_muted).wrap());
+    if a.harnesses.is_empty() {
+        list = list.child(text("None yet: add one below.").font(k.ty.small).color(k.c.text_faint));
+    }
+    for (n, h) in a.harnesses.iter().enumerate() {
+        let off = !a.allows(&h.command);
+        list = list.child(row().w_full().gap(10.0).py(4.0).center_y().key(format!("harness-row-{n}"))
+            .child(ui::ico(&icons::SPARK, 14.0, if off { k.c.icon_faint } else { k.c.text_accent }))
+            .child(text(h.name.clone()).font(k.ty.small_medium).color(if off { k.c.text_faint } else { k.c.text_base }).w(140.0).shrink())
+            .child(text(h.command.clone()).font(k.ty.mono).color(k.c.text_muted).grow(1.0).shrink().max_lines(1))
+            .child(if off { ui::pill(k, "Claude is off", k.c.text_faint) } else { rune::el() })
+            .child(Button::new("Remove").variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
+                .on_press(move |s: &mut App| s.remove_harness(n)).build(k).key(format!("harness-remove-{n}"))));
+    }
+    let name = TextInput::new(&s.harness_name).placeholder("Name, e.g. Codex").label("Harness name")
+        .on_edit(|s: &mut App| &mut s.harness_name).on_submit(|s: &mut App, _| s.add_harness(None)).build(k).key("harness-name").w(170.0);
+    let cmd = TextInput::new(&s.harness_cmd).placeholder("Command, e.g. codex --full-auto").label("Command")
+        .on_edit(|s: &mut App| &mut s.harness_cmd).on_submit(|s: &mut App, _| s.add_harness(None)).build(k).key("harness-command").grow(1.0).min_w(200.0);
+    let add = Button::new("Add").icon(&icons::PLUS).control_size(ControlSize::Small)
+        .on_press(|s: &mut App| s.add_harness(None)).build(k).key("harness-add");
+    list = list.child(row().w_full().gap(8.0).pt(6.0).center_y().flex_wrap().child(name).child(cmd).child(add));
+    if let Some(e) = &s.harness_error {
+        list = list.child(text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap());
+    }
+    let missing: Vec<_> = SUGGESTED.iter().filter(|(n, _)| !a.harnesses.iter().any(|h| h.name.eq_ignore_ascii_case(n))).collect();
+    if !missing.is_empty() {
+        let chips = missing.into_iter().map(|&(n, c)| Button::new(n).icon(&icons::PLUS).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
+            .help(format!("Adds {n}: {c}")).on_press(move |s: &mut App| s.add_harness(Some((n, c)))).build(k).key(format!("harness-suggest-{n}")));
+        list = list.child(row().w_full().gap(4.0).center_y().flex_wrap()
+            .child(text("Add:").font(k.ty.small).color(k.c.text_muted).pr(4.0)).children(chips));
+    }
+    if cfg!(target_arch = "wasm32") {
+        list = list.child(text("They run in the desktop app, where RepoHub can start programs on your computer.").font(k.ty.text_small).color(k.c.text_muted).wrap());
+    }
+    panel(k).key("assistants").child(panel_head(k, "Coding assistants", None)).child(rule(k))
+        .child(claude).child(rule(k)).child(list)
 }
 
 /// The GitHub account form (desktop): user name and token, saved in the app's settings file.
