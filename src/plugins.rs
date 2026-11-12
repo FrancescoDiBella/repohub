@@ -404,6 +404,18 @@ pub fn remove(id: &str) -> Result<(), String> {
     std::fs::remove_dir_all(folder().join(id)).map_err(|e| format!("Couldn't remove {id}: {e}"))
 }
 
+/// A fingerprint of what [`context`] reads: when it's unchanged, so is the context.
+pub fn context_key(s: &App, dark: bool) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    format!("{:?}", s.page).hash(&mut h);
+    s.loaded_at.hash(&mut h);
+    (s.data.repos.len(), s.data.issues.len(), s.data.pulls.len(), s.data.sample, dark).hash(&mut h);
+    s.data.repos.iter().filter(|r| r.starred).count().hash(&mut h);
+    s.data.profile.login.hash(&mut h);
+    h.finish()
+}
+
 /// What `repohub.context()` holds, from the app's state.
 pub fn context(s: &App, dark: bool) -> Data {
     use crate::Page;
