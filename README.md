@@ -161,6 +161,23 @@ cargo run --release                   # the first build takes a few minutes
 packaging/macos/bundle.sh 0.1.0       # macOS: builds dist/RepoHub.app and the .dmg
 ```
 
+## Themes
+
+**Settings → Appearance** has ready-made themes: Classic Light and Dark, Midnight, Neon, Forest,
+Ember, Paper, Ocean and Mono. Pick one for the light appearance and one for the dark one. The
+Mode (System, Light or Dark) and the toolbar's sun and moon switch between them. ⌘K → *Theme: …*
+works too.
+
+To make your own, choose **Duplicate to customize**. Then you can change:
+- **Colours** for each part of the window: page, sidebar and toolbar, panels and cards, text,
+  secondary text, accent, borders, background pattern, and the success, warning and danger
+  states (`#rrggbb`).
+- **Background:** plain, a pattern (dots, grid, lines, diagonal, waves) with its strength and
+  size, or a picture (a file on your computer or an `https://` address).
+- **Effects:** a glow on buttons, the roundness of corners, and main buttons in the accent colour.
+
+Changes show at once and are saved with your preferences.
+
 ## Pinned repositories
 
 The sidebar's **Pinned** section (also in the status-bar menu) starts with `REPOHUB_PINNED` or,

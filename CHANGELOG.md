@@ -10,6 +10,9 @@ The sections are **Added**, **Changed** and **Fixed**.
 ## Unreleased
 
 ### Added
+- Themes: nine ready-made themes, plus your own. You choose a colour for each part of the
+  window, a background (a pattern or a picture), a glow on buttons, corner roundness and accent
+  buttons. Pick one for the light appearance and one for the dark one.
 - Release notes. This changelog is now published as the notes of each release and of the Latest
   build. When a new version is ready, the app can show **What's new**.
 - Pinned repositories: pin or unpin any repository from its card, its page or ⌘K. Your pins are
