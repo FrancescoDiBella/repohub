@@ -158,6 +158,8 @@ pub struct App {
     /// A git command running in the background ("Committing…"), and the last one's error.
     git_job: Option<&'static str>,
     git_error: Option<String>,
+    /// The branch being previewed for a local merge, and its commits.
+    merge_preview: Option<local::MergePreview>,
     /// How a pull request is merged from its diff: merge, squash or rebase.
     merge_method: usize,
     /// The Code tab shows GitHub's files although a local clone is known.
@@ -784,8 +786,11 @@ impl App {
         let Some(h) = self.handle.clone() else { return };
         if self.diff_of.as_ref() != Some(&diffs::DiffOf::Local(full.clone())) {
             self.diff.set_files(Vec::new());
-            self.changes = None;
+            if !matches!(&self.diff_of, Some(diffs::DiffOf::Merge(f, _)) if *f == full) {
+                self.changes = None;
+            }
         }
+        self.merge_preview = None;
         self.diff_of = Some(diffs::DiffOf::Local(full.clone()));
         self.diff_load = Some(Load::Loading);
         net::spawn(h, move || async move { local::changes(&root) }, move |s: &mut App, r| {
@@ -843,6 +848,42 @@ impl App {
         } else {
             self.git_run(i, "Committing…", "Committed", move |root| local::commit_all(root, &msg));
         }
+    }
+
+    /// Shows what merging local `branch` into the checked-out one would bring.
+    fn preview_merge(&mut self, i: usize, branch: String) {
+        let Some(r) = self.data.repos.get(i) else { return };
+        let full = r.full_name.clone();
+        let Some(root) = clones_shim::find(&full) else { return };
+        let Some(h) = self.handle.clone() else { return };
+        let key = diffs::DiffOf::Merge(full, branch.clone());
+        self.diff_of = Some(key.clone());
+        self.diff_load = Some(Load::Loading);
+        self.diff.set_files(Vec::new());
+        self.merge_preview = None;
+        net::spawn(h, move || async move { local::merge_preview(&root, &branch) }, move |s: &mut App, r| {
+            if s.diff_of != Some(key) {
+                return;
+            }
+            match r {
+                Ok(p) => {
+                    s.diff.set_files(rune_kit::diff::parse(&p.patch));
+                    s.merge_preview = Some(p);
+                    s.diff_load = Some(Load::Ready(()));
+                }
+                Err(e) => s.diff_load = Some(Load::Failed(e)),
+            }
+        });
+    }
+
+    /// Merges local `branch` into the checked-out branch.
+    fn merge_local(&mut self, i: usize, branch: String) {
+        let b = branch.clone();
+        self.git_run(i, "Merging…", "Merged:", move |root| match local::merge(root, &b)? {
+            local::Merged::Done(summary) => Ok(summary),
+            local::Merged::UpToDate => Ok("already up to date".into()),
+            local::Merged::Conflicts(files) => Err(format!("{} file{} in conflict: resolve them, then Commit here to finish the merge (or Abort).", files.len(), if files.len() == 1 { "" } else { "s" })),
+        });
     }
 
     /// Shows pull request `number` of `full`'s files as a diff.
@@ -1577,6 +1618,7 @@ fn init() -> App {
         git_job: None,
         git_error: None,
         merge_method: 0,
+        merge_preview: None,
         status: if live || cfg!(target_arch = "wasm32") { Status::Starting } else { Status::Sample },
         handle: None,
         branches: HashMap::new(),
