@@ -26,6 +26,7 @@
 | `src/harness.rs` | Coding assistants: the Claude switch and the harnesses (name and command), saved in the preferences; Settings → Coding assistants is `lists::assistants_panel` |
 | `src/terminal.rs`, `src/terminal_page.rs` | Embedded terminal (desktop): `portable-pty` runs the login shell, `vt100` keeps the screen; key mapping, colours, the Terminal tab |
 | `src/local.rs`, `src/local_page.rs` | The local clone read from disk: `git` run on the computer, the file list (`git ls-files`, `git status`), reading a file safely, and the Code tab's folder listing and file viewer |
+| `src/diffs.rs`, `src/changes_page.rs` | Diffs with rune-kit's `DiffView`: the local changes (`local::changes`, commit, push, pull) in the Changes tab, and a pull request's files (`github::load_pull_files`) with Merge, Squash and Rebase |
 | `src/clones.rs` | Finding and remembering each repository's local clone |
 | `assets/fonts/` | Inter and IBM Plex Mono (SIL OFL), bundled so mono text is monospaced everywhere |
 | `server/` | `repohub-server`: static files, `config.json`, the `/gh/*` GitHub proxy that holds the token, and `/api/notes` (drawings in `DATA_DIR`) |

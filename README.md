@@ -249,12 +249,15 @@ With a token that has write access, the everyday changes happen in RepoHub:
 | Code or Pull requests tab | **New pull request**: pick its branch and the one it goes into, title, description, draft. |
 | Issues tab | **New issue**: title and Markdown description. |
 | Issue rows | **Close**. |
-| Pull request rows | **Merge**, after a confirmation: a merge commit or **Squash**. |
+| Pull request rows | **Files** shows what it changes as a diff, unified or side by side, with syntax colours and word changes. From there **Merge** with a merge commit, **Squash** or **Rebase**. **Merge** on the row asks first. |
+| Changes tab (desktop, with a local clone) | What changed since the last commit, as a diff, new files included. **Commit** or **Commit and push** everything with a message. **Push**, **Pull** (fast-forward only), and **New pull request** from the branch. |
 
 What GitHub creates shows at once; the lists catch up on the next refresh. GitHub's error, if
 any, shows in the form (for example "A pull request already exists").
 
 RepoHub still doesn't delete repositories or branches or rewrite history: those stay on GitHub.
+Commit, push and pull run the `git` installed on your computer, in the clone, with your own
+credentials.
 In Docker the same actions go through `repohub-server`, which forwards only these writes.
 
 The token needs, as a fine-grained token: **Contents**, **Issues** and **Pull requests** read

@@ -330,6 +330,25 @@ impl Gh {
         self.write("PATCH", &format!("/repos/{full}/issues/{number}"), json!({ "state": "closed", "state_reason": "completed" })).await.map(|_| ())
     }
 
+    /// The files a pull request changes, with each one's patch (GitHub leaves out the patch of
+    /// very large or binary files). At most 300 files.
+    pub async fn pull_files(&self, full: &str, number: u32) -> Result<Vec<PullFile>, String> {
+        let mut out = Vec::new();
+        for page in 1..=3 {
+            let v = self.get(&format!("/repos/{full}/pulls/{number}/files?per_page=100&page={page}")).await?;
+            let list = v.as_array().cloned().unwrap_or_default();
+            let n = list.len();
+            out.extend(list.iter().map(|f| {
+                let s = |k: &str| f.get(k).and_then(Value::as_str).map(str::to_owned);
+                PullFile { path: s("filename").unwrap_or_default(), previous: s("previous_filename"), status: s("status").unwrap_or_default(), patch: s("patch") }
+            }));
+            if n < 100 {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
     pub async fn merge_pull(&self, full: &str, number: u32, method: &str) -> Result<(), String> {
         self.write("PUT", &format!("/repos/{full}/pulls/{number}/merge"), json!({ "merge_method": method })).await.map(|_| ())
     }
@@ -366,6 +385,22 @@ pub async fn load_all(cfg: &Config) -> Result<Data, String> {
     }
     runs.truncate(20);
     Ok(Data { profile, repos, pulls, issues, runs, activity, sample: false })
+}
+
+/// One file of a pull request, as GitHub lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PullFile {
+    pub path: String,
+    /// Its old name, for a renamed file.
+    pub previous: Option<String>,
+    /// added, removed, modified, renamed, copied, changed, unchanged.
+    pub status: String,
+    /// The unified diff's hunks (no file headers); `None` for binary or very large files.
+    pub patch: Option<String>,
+}
+
+pub async fn load_pull_files(cfg: &Config, full: &str, number: u32) -> Result<Vec<PullFile>, String> {
+    Gh::new(cfg).pull_files(full, number).await
 }
 
 pub async fn load_detail(cfg: &Config, full: &str, at: &str) -> Detail {

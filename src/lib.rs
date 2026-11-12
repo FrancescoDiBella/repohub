@@ -26,8 +26,10 @@ mod github;
 mod harness;
 mod icons;
 mod lists;
+mod diffs;
 mod local;
 mod local_page;
+mod changes_page;
 mod markdown;
 mod mobile;
 mod model;
@@ -145,6 +147,19 @@ pub struct App {
     /// The Code tab's folder in the local clone (`""`: its root), and the file open in it.
     local_dir: String,
     local_file: Option<(String, Load<local::Content>)>,
+    /// The diff on screen (local changes or a pull request's files) and what it is of.
+    diff: rune_kit::diff::DiffState,
+    diff_of: Option<diffs::DiffOf>,
+    diff_load: Option<Load<()>>,
+    /// The local clone's branch, upstream and changes, for the Changes tab.
+    changes: Option<local::Changes>,
+    /// The Changes tab's commit message.
+    commit_msg: TextEdit,
+    /// A git command running in the background ("Committing…"), and the last one's error.
+    git_job: Option<&'static str>,
+    git_error: Option<String>,
+    /// How a pull request is merged from its diff: merge, squash or rebase.
+    merge_method: usize,
     /// The Code tab shows GitHub's files although a local clone is known.
     files_from_github: bool,
     /// Repository details by (full name, branch); a missing entry hasn't been asked for.
@@ -308,7 +323,11 @@ impl App {
     /// Switches the repository page of repository `i` to `tab`.
     /// The sections a repository's page shows, in order: Claude only while it's on.
     fn tabs(&self) -> Vec<RepoTab> {
-        RepoTab::ALL.into_iter().filter(|t| *t != RepoTab::Claude || self.assist.claude).collect()
+        let local = match self.page {
+            Page::Repo(i) => self.data.repos.get(i).is_some_and(|r| self.local.contains_key(&r.full_name)),
+            _ => false,
+        };
+        RepoTab::ALL.into_iter().filter(|t| (*t != RepoTab::Claude || self.assist.claude) && (*t != RepoTab::Changes || local)).collect()
     }
 
     fn set_tab(&mut self, i: usize, tab: RepoTab) {
@@ -323,6 +342,7 @@ impl App {
         match tab {
             RepoTab::Notes => self.load_notes(i),
             RepoTab::Terminal => self.open_terminal(i),
+            RepoTab::Changes => self.load_changes(i),
             _ => {}
         }
     }
@@ -754,6 +774,108 @@ impl App {
         net::spawn(h, move || async move { local::scan(&dir) }, move |s: &mut App, r| {
             s.local.insert(full, r.into());
         });
+    }
+
+    /// Reads what changed in repository `i`'s local clone, and shows it as a diff.
+    fn load_changes(&mut self, i: usize) {
+        let Some(r) = self.data.repos.get(i) else { return };
+        let full = r.full_name.clone();
+        let Some(root) = clones_shim::find(&full) else { return };
+        let Some(h) = self.handle.clone() else { return };
+        if self.diff_of.as_ref() != Some(&diffs::DiffOf::Local(full.clone())) {
+            self.diff.set_files(Vec::new());
+            self.changes = None;
+        }
+        self.diff_of = Some(diffs::DiffOf::Local(full.clone()));
+        self.diff_load = Some(Load::Loading);
+        net::spawn(h, move || async move { local::changes(&root) }, move |s: &mut App, r| {
+            if s.diff_of != Some(diffs::DiffOf::Local(full)) {
+                return;
+            }
+            match r {
+                Ok(c) => {
+                    s.diff.set_files(diffs::local_files(&c));
+                    s.changes = Some(c);
+                    s.diff_load = Some(Load::Ready(()));
+                }
+                Err(e) => s.diff_load = Some(Load::Failed(e)),
+            }
+        });
+    }
+
+    /// Runs a git command (`job` names it on screen) in repository `i`'s clone, then reads the
+    /// changes and the file list again.
+    fn git_run(&mut self, i: usize, job: &'static str, done: &'static str, f: impl FnOnce(&std::path::Path) -> Result<String, String> + Send + 'static) {
+        if self.git_job.is_some() {
+            return;
+        }
+        let Some(root) = self.data.repos.get(i).and_then(|r| clones_shim::find(&r.full_name)) else { return };
+        let Some(h) = self.handle.clone() else { return };
+        self.git_job = Some(job);
+        self.git_error = None;
+        net::spawn(h, move || async move { f(&root) }, move |s: &mut App, r| {
+            s.git_job = None;
+            match r {
+                Ok(extra) => {
+                    s.notify(if extra.is_empty() { done.to_owned() } else { format!("{done} {extra}") });
+                    if done.starts_with("Committed") {
+                        s.commit_msg.clear();
+                    }
+                }
+                Err(e) => s.git_error = Some(e),
+            }
+            s.load_changes(i);
+            s.load_local(i, true);
+        });
+    }
+
+    fn commit(&mut self, i: usize, then_push: bool) {
+        let msg = self.commit_msg.text.clone();
+        if msg.trim().is_empty() {
+            self.git_error = Some("Write a commit message first.".into());
+            return;
+        }
+        if then_push {
+            self.git_run(i, "Committing and pushing…", "Committed and pushed", move |root| {
+                let sha = local::commit_all(root, &msg)?;
+                local::push(root).map(|_| sha)
+            });
+        } else {
+            self.git_run(i, "Committing…", "Committed", move |root| local::commit_all(root, &msg));
+        }
+    }
+
+    /// Shows pull request `number` of `full`'s files as a diff.
+    fn open_pull_diff(&mut self, full: String, number: u32) {
+        let Some(h) = self.handle.clone() else { return };
+        self.diff_of = Some(diffs::DiffOf::Pull(full.clone(), number));
+        self.diff_load = Some(Load::Loading);
+        self.diff.set_files(Vec::new());
+        if self.data.sample {
+            self.diff.set_files(diffs::pull_files(&diffs::sample_pull_files()));
+            self.diff_load = Some(Load::Ready(()));
+            return;
+        }
+        let cfg = self.cfg.clone();
+        let key = diffs::DiffOf::Pull(full.clone(), number);
+        net::spawn(h, move || async move { github::load_pull_files(&cfg, &full, number).await }, move |s: &mut App, r| {
+            if s.diff_of != Some(key) {
+                return;
+            }
+            match r {
+                Ok(files) => {
+                    s.diff.set_files(diffs::pull_files(&files));
+                    s.diff_load = Some(Load::Ready(()));
+                }
+                Err(e) => s.diff_load = Some(Load::Failed(e)),
+            }
+        });
+    }
+
+    fn close_diff(&mut self) {
+        self.diff_of = None;
+        self.diff_load = None;
+        self.diff.set_files(Vec::new());
     }
 
     /// Opens `path` in repository `i`'s local clone: a folder lists it, a file shows it.
@@ -1447,6 +1569,14 @@ fn init() -> App {
         local_dir: String::new(),
         local_file: None,
         files_from_github: false,
+        diff: rune_kit::diff::DiffState::new(Vec::new()),
+        diff_of: None,
+        diff_load: None,
+        changes: None,
+        commit_msg: TextEdit::new(""),
+        git_job: None,
+        git_error: None,
+        merge_method: 0,
         status: if live || cfg!(target_arch = "wasm32") { Status::Starting } else { Status::Sample },
         handle: None,
         branches: HashMap::new(),

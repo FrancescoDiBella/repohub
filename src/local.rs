@@ -258,6 +258,81 @@ pub fn read(root: &Path, rel: &str) -> Result<Content, String> {
     Ok(Content::Text { text, lines, cut })
 }
 
+/// What changed in the clone since the last commit, and where its branch stands.
+#[derive(Clone, Debug, Default)]
+pub struct Changes {
+    pub branch: String,
+    /// The branch it pushes to (`origin/main`), if it has one.
+    pub upstream: Option<String>,
+    /// Commits not pushed yet, and commits on the upstream not pulled yet.
+    pub ahead: u32,
+    pub behind: u32,
+    /// `git diff HEAD`: staged and unstaged changes to tracked files.
+    pub patch: String,
+    /// New files git doesn't track yet, with their text (`None`: binary or too large).
+    pub untracked: Vec<(String, Option<String>)>,
+}
+
+impl Changes {
+    pub fn is_empty(&self) -> bool {
+        self.patch.trim().is_empty() && self.untracked.is_empty()
+    }
+}
+
+/// Reads what changed in the clone at `root`.
+pub fn changes(root: &Path) -> Result<Changes, String> {
+    if !root.join(".git").exists() {
+        return Err(format!("{} isn't a git checkout.", root.display()));
+    }
+    let mut c = Changes { branch: git(root, &["branch", "--show-current"])?.trim().to_owned(), ..Changes::default() };
+    // A repository with no commit yet has no HEAD to compare with: everything staged is new.
+    c.patch = match git(root, &["diff", "HEAD", "--no-color", "--no-ext-diff", "-M"]) {
+        Ok(p) => p,
+        Err(_) => git(root, &["diff", "--cached", "--no-color", "--no-ext-diff"]).unwrap_or_default(),
+    };
+    for path in git(root, &["ls-files", "-z", "--others", "--exclude-standard"])?.split('\0').filter(|p| !p.is_empty()) {
+        let text = match read(root, path) {
+            Ok(Content::Text { text, cut: false, .. }) => Some(text),
+            _ => None,
+        };
+        c.untracked.push((path.to_owned(), text));
+    }
+    c.upstream = git(root, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]).ok().map(|u| u.trim().to_owned()).filter(|u| !u.is_empty());
+    if c.upstream.is_some()
+        && let Ok(counts) = git(root, &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"])
+    {
+        let mut n = counts.split_whitespace().map(|x| x.parse::<u32>().unwrap_or(0));
+        c.behind = n.next().unwrap_or(0);
+        c.ahead = n.next().unwrap_or(0);
+    }
+    Ok(c)
+}
+
+/// Commits everything that changed (`git add -A`) with `message`.
+pub fn commit_all(root: &Path, message: &str) -> Result<String, String> {
+    let message = message.trim();
+    if message.is_empty() {
+        return Err("Write a commit message first.".into());
+    }
+    git(root, &["add", "-A"])?;
+    git(root, &["commit", "-m", message])?;
+    Ok(git(root, &["rev-parse", "--short", "HEAD"])?.trim().to_owned())
+}
+
+/// Pushes the branch, setting its upstream on `origin` the first time.
+pub fn push(root: &Path) -> Result<(), String> {
+    let branch = git(root, &["branch", "--show-current"])?.trim().to_owned();
+    if branch.is_empty() {
+        return Err("No branch is checked out (detached HEAD): check one out to push.".into());
+    }
+    git(root, &["push", "-u", "origin", &branch]).map(|_| ())
+}
+
+/// Pulls the upstream (fast-forward only, so it never makes a merge by surprise).
+pub fn pull(root: &Path) -> Result<(), String> {
+    git(root, &["pull", "--ff-only"]).map(|_| ())
+}
+
 /// The fence name syntax highlighting knows a file by, from its extension.
 pub fn language(name: &str) -> Option<&'static str> {
     let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase())?;
@@ -301,6 +376,37 @@ mod tests {
         let src: Vec<_> = t.entries("src").into_iter().map(|e| (e.path, e.dir)).collect();
         assert_eq!(src, [("src/x".into(), true), ("src/a.rs".into(), false), ("src/b.rs".into(), false)]);
         assert_eq!(t.entries("src/x")[0].change, Some(Change::Conflicted));
+    }
+
+    #[test]
+    fn changes_commit_and_push() {
+        let dir = std::env::temp_dir().join(format!("repohub-changes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (origin, work) = (dir.join("origin.git"), dir.join("work"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let g = |at: &Path, args: &[&str]| git(at, args).unwrap();
+        g(&dir, &["init", "-q", "--bare", "-b", "main", origin.to_str().unwrap()]);
+        g(&dir, &["clone", "-q", origin.to_str().unwrap(), work.to_str().unwrap()]);
+        for (k, v) in [("user.name", "Test"), ("user.email", "test@example.com"), ("commit.gpgsign", "false")] {
+            g(&work, &["config", k, v]);
+        }
+        std::fs::write(work.join("a.txt"), "one\n").unwrap();
+        assert!(commit_all(&work, "  ").is_err());
+        commit_all(&work, "first").unwrap();
+        push(&work).unwrap();
+        std::fs::write(work.join("a.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(work.join("b.txt"), "new\n").unwrap();
+        let c = changes(&work).unwrap();
+        assert_eq!((c.branch.as_str(), c.upstream.as_deref(), c.ahead, c.behind), ("main", Some("origin/main"), 0, 0));
+        assert!(c.patch.contains("+two"), "{}", c.patch);
+        assert_eq!(c.untracked, vec![("b.txt".to_owned(), Some("new\n".to_owned()))]);
+        commit_all(&work, "second").unwrap();
+        let c = changes(&work).unwrap();
+        assert!(c.is_empty());
+        assert_eq!(c.ahead, 1);
+        push(&work).unwrap();
+        assert_eq!(changes(&work).unwrap().ahead, 0);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
