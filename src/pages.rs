@@ -218,7 +218,8 @@ fn repo_card(k: &Kit, i: usize, r: &Repo, show_owner: bool, pinned: bool) -> El 
 // ---------------------------------------------------------------- repository detail
 
 
-pub fn repo_detail(s: &App, k: &Kit, i: usize) -> El {
+/// `plugin`: what the open plugin section draws, when one is open (`App::plugin_tab`).
+pub fn repo_detail(s: &App, k: &Kit, i: usize, plugin: Option<El>) -> El {
     let r = &s.data.repos[i];
     let back = Button::new("Repositories").icon(&icons::BACK).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
         .on_press(|s: &mut App| s.go(Page::Repos)).build(k).key("back").self_start();
@@ -235,17 +236,27 @@ pub fn repo_detail(s: &App, k: &Kit, i: usize) -> El {
                 .on_press_tx({ let u = format!("{}/fork", r.url); move |_: &mut App, tx| { let _ = tx.open_url(&u); } }).build(k).key("fork"))
             .child(pin_button(k, i, r, s.is_pinned(i), true))
             .child(star_button(k, i, r, true, "detail-star".into())));
+    // The app's sections, then the plugins' ones.
     let shown = s.tabs();
-    let labels: Vec<&str> = shown.iter().map(|t| RepoTab::LABELS[t.index()]).collect();
-    let tabs = SegmentedControl::new(&labels, shown.iter().position(|t| *t == s.tab)).label("Section").fit()
+    let extra = s.plugins.repo_tabs();
+    let mut labels: Vec<String> = shown.iter().map(|t| RepoTab::LABELS[t.index()].to_owned()).collect();
+    labels.extend(extra.iter().map(|(_, l)| l.clone()));
+    let at = match s.plugin_tab {
+        Some(p) => extra.iter().position(|(q, _)| *q == p).map(|n| shown.len() + n),
+        None => shown.iter().position(|t| *t == s.tab),
+    };
+    let tabs = SegmentedControl::new(&labels, at).label("Section").fit()
         .on_pick(move |s: &mut App, t, _| {
-            let tab = s.tabs().get(t).copied().unwrap_or_default();
-            s.set_tab(i, tab)
+            let shown = s.tabs();
+            match shown.get(t) {
+                Some(tab) => s.set_tab(i, *tab),
+                None => s.open_plugin_tab(i, s.plugins.repo_tabs().get(t - shown.len()).map(|(p, _)| *p)),
+            }
         }).build(k).key("tabs");
     // Seven sections don't fit a phone's width: there the strip scrolls sideways.
     let tabs = if s.compact { row().w_full().scroll_x().child(tabs) } else { tabs };
     let in_repo = |name: &str| name.eq_ignore_ascii_case(&r.full_name) || name.eq_ignore_ascii_case(&r.name);
-    let body = match s.tab {
+    let body = if let Some(p) = plugin.filter(|_| s.plugin_tab.is_some()) { p } else { match s.tab {
         RepoTab::Code => code_tab(s, k, i, r),
         RepoTab::Issues => list_of(k, "Open issues", Some(actions::open_form_button(k, i, Compose::Issue)),
             s.data.issues.iter().filter(|x| in_repo(&x.repo)).map(|x| actions::issue_line(s, k, x)).collect()),
@@ -256,7 +267,7 @@ pub fn repo_detail(s: &App, k: &Kit, i: usize) -> El {
         RepoTab::Claude => crate::claude_page::claude_tab(s, k, i),
         RepoTab::Terminal => crate::terminal_page::terminal_tab(s, k, i, k.c.page.r + k.c.page.g + k.c.page.b < 1.5),
         RepoTab::Settings => crate::lists::repo_settings(s, k, r),
-    };
+    } };
     col().w_full().gap(16.0).child(back).child(header).child(tabs).child(actions::form_panel(s, k, i)).child(body)
 }
 

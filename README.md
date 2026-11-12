@@ -325,6 +325,23 @@ the repository's local copy, much like the Claude Code extension for VS Code.
 - RepoHub looks for `claude` in the usual install places, then on your login shell's PATH. If it
   lives elsewhere, set `REPOHUB_CLAUDE` to its path.
 
+## Plugins (desktop app)
+
+Plugins add a section to repository pages, a page of their own in the sidebar, or both. Anyone
+can write one. A plugin is a folder with a `plugin.json` and a small [Luau](https://luau.org)
+script that draws with Rune's UI. It runs sandboxed: no files, programs or network, only what
+RepoHub shows it and a few actions (open a link, copy, notify, open a repository).
+
+- **Settings → Plugins → Create a plugin** writes the example, *Checklist*: a release checklist
+  on each repository and a page with everyone's progress. Edit its files and it reloads as you
+  save.
+- **Install** takes a folder or a Git address (it's cloned). Each plugin can be turned off,
+  reloaded or removed. Errors show in place of the plugin, never crashing the app.
+- ⌘K lists plugin sections and pages too.
+
+The guide is [`docs/PLUGINS.md`](docs/PLUGINS.md), and the example is
+[`plugins/checklist`](plugins/checklist).
+
 ## Coding assistants
 
 **Settings → Coding assistants** chooses which assistants RepoHub offers:

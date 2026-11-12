@@ -22,6 +22,7 @@
 | `src/prefs.rs` | What outlives the app: theme, pins, the place you were (`state::Place`) and the arrangement (`state::Layout`), one key each in `prefs.json` / `localStorage` |
 | `src/tray.rs` | The status-bar widget: the menu (a pure function of the state, tested), Rune's `Tray` on Windows and Linux, `tray-icon` on macOS; icons in `assets/tray-*.rgba` |
 | `src/claude.rs`, `src/claude_page.rs` | The Claude tab (desktop): runs `claude -p --output-format stream-json` in the clone, parses the stream into chat items (`Run`, `Mode`, `Item`), the chat UI |
+| `src/plugins.rs`, `src/plugins_page.rs`, `plugins/checklist/` | Plugins (desktop): the manifest, finding, installing and starting Luau scripts with `rune-luau`, the `@repohub` module and its context; Settings → Plugins; the example plugin. `src/plugins_web.rs` stands in on the web. Guide: [`docs/PLUGINS.md`](docs/PLUGINS.md) |
 | `src/harness.rs` | Coding assistants: the Claude switch and the harnesses (name and command), saved in the preferences; Settings → Coding assistants is `lists::assistants_panel` |
 | `src/terminal.rs`, `src/terminal_page.rs` | Embedded terminal (desktop): `portable-pty` runs the login shell, `vt100` keeps the screen; key mapping, colours, the Terminal tab |
 | `src/clones.rs` | Finding and remembering each repository's local clone |
@@ -106,6 +107,8 @@ the same; the clients bypass HTTP proxies for `localhost` and `NO_PROXY` hosts.
   nothing more: deleting repositories or branches and rewriting history stay on GitHub. A new
   write goes through `github::Write`, the proxy allowlist (`server/src/main.rs`) and its test.
 - Text in the UI is plain and specific: say what happened and how to fix it.
+- Plugins see the app only through `@repohub` (`plugins::context` and the actions in
+  `Plugins::make`). Give them more only on purpose: no files, processes or network.
 - A pull request that changes the app adds a line to [`CHANGELOG.md`](CHANGELOG.md) under
   **Unreleased** (Added, Changed or Fixed), written for the people who use RepoHub. CI warns
   when it's missing.

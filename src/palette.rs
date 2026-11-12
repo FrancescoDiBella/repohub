@@ -45,6 +45,8 @@ pub enum Command {
     Owner(crate::state::OwnerFilter),
     /// Use a theme (look) and its appearance.
     Look(String),
+    /// Open a plugin's section (its position in `App::plugins`) on a repository's page.
+    PluginTab(usize, usize),
     /// Start a harness (its position in `Assistants::harnesses`) in a repository's terminal.
     Harness(usize, usize),
 }
@@ -95,6 +97,9 @@ pub fn entries(s: &App) -> Vec<Entry> {
         out.push(entry(format!("Open a terminal in {n}"), "Action", &icons::TERMINAL, Command::Tab(i, RepoTab::Terminal)));
         out.push(entry(format!("Open {n} on GitHub"), "Action", &icons::EXTERNAL, Command::OpenUrl(r.url.clone())));
         out.push(entry(format!("Copy the clone URL of {n}"), "Action", &icons::COPY, Command::CopyClone(format!("{}.git", r.url))));
+        for (p, label) in s.plugins.repo_tabs() {
+            out.push(Entry { detail: "plugin".into(), ..entry(format!("{label} · {n}"), "Plugin", &icons::SPARK, Command::PluginTab(i, p)) });
+        }
         for t in s.tabs() {
             if t != s.tab {
                 out.push(entry(format!("{} · {n}", RepoTab::LABELS[t.index()]), "Section", &icons::REPO, Command::Tab(i, t)));
@@ -132,6 +137,9 @@ pub fn entries(s: &App) -> Vec<Entry> {
         if *t != s.theme {
             out.push(entry(format!("Mode: {label}"), "Appearance", if *t == Theme::Dark { &icons::MOON } else { &icons::SUN }, Command::Theme(*t)));
         }
+    }
+    for (p, label) in s.plugins.pages() {
+        out.push(Entry { detail: "plugin page".into(), ..entry(label, "Plugin", &icons::SPARK, Command::Go(Page::Plugin(p))) });
     }
     for t in &s.looks.all {
         if s.looks.light != t.id && s.looks.dark != t.id {
@@ -236,6 +244,7 @@ pub fn run(s: &mut App, cmd: Command, tx: &mut Tx) {
         Command::Refresh => s.refresh(),
         Command::Theme(t) => s.set_theme(t),
         Command::Harness(i, h) => s.run_harness(i, h),
+        Command::PluginTab(i, p) => s.open_plugin_tab(i, Some(p)),
         Command::Look(id) => {
             let dark = s.looks.get(&id).is_some_and(|t| t.dark);
             s.choose_look(&id, !dark);
