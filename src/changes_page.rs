@@ -82,12 +82,87 @@ pub fn changes_tab(s: &App, k: &Kit, i: usize) -> El {
     if let Some(e) = &s.git_error {
         commit = commit.child(text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap());
     }
-    let top = panel(k).key("changes-status").child(status).child(rule(k)).child(commit);
+    let mut top = panel(k).key("changes-status").child(status).child(rule(k));
+    if let Some(m) = merge_section(s, k, i) {
+        top = top.child(m).child(rule(k));
+    }
+    let top = top.child(commit);
+    let (title, empty) = match &s.diff_of {
+        Some(DiffOf::Merge(_, b)) => (format!("What {b} brings"), "It brings no changes."),
+        _ => ("Changes since the last commit".to_owned(), "Nothing changed since the last commit."),
+    };
+    let mut head = row().gap(8.0).center_y().child(diff_head(s, k));
+    if matches!(s.diff_of, Some(DiffOf::Merge(..))) {
+        head = head.child(Button::new("My changes").variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
+            .on_press(move |s: &mut App| s.load_changes(i)).build(k).key("merge-back"));
+    }
     let diff = panel(k).key("changes-diff").clip_rounded(k.radius.lg)
-        .child(panel_head(k, "Changes since the last commit", Some(diff_head(s, k))))
+        .child(panel_head(k, &title, Some(head)))
         .child(rule(k))
-        .child(diff_body(s, k, "Nothing changed since the last commit."));
+        .child(diff_body(s, k, empty));
     col().w_full().gap(16.0).child(top).child(diff)
+}
+
+/// Merging a local branch into the checked-out one: pick a branch, preview, merge; during a
+/// merge, its conflicts and Abort.
+fn merge_section(s: &App, k: &Kit, i: usize) -> Option<El> {
+    let c = s.changes.as_ref()?;
+    let busy = s.git_job.is_some();
+    if c.merging {
+        let tint = if c.conflicts.is_empty() { k.c.success.icon } else { k.c.warning.icon };
+        let msg = if c.conflicts.is_empty() {
+            "A merge is under way and every conflict is resolved: Commit finishes it.".to_owned()
+        } else {
+            format!("A merge is under way. {} file{} in conflict: fix them in your editor or the Terminal, then Commit finishes the merge.", c.conflicts.len(), if c.conflicts.len() == 1 { "" } else { "s" })
+        };
+        let files = c.conflicts.iter().take(12).map(|f| row().gap(8.0).center_y()
+            .child(text("!").font(k.ty.mono).color(k.c.danger.icon).w(14.0))
+            .child(text(f.clone()).font(k.ty.mono).color(k.c.text_base)));
+        return Some(col().w_full().px(16.0).py(12.0).gap(8.0).fill(tint.alpha(0.08)).key("merge-state")
+            .child(text(msg).font(k.ty.small).color(k.c.text_base).wrap())
+            .children(files)
+            .child(row().gap(8.0)
+                .child(Button::new("Abort merge").variant(ButtonVariant::Danger).control_size(ControlSize::Small).disabled(busy)
+                    .on_press(move |s: &mut App| s.git_run(i, "Aborting the merge…", "Merge aborted", |root| crate::local::abort_merge(root).map(|_| String::new()))).build(k).key("merge-abort"))
+                .child(Button::new("Open Terminal").icon(&icons::TERMINAL).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
+                    .on_press(move |s: &mut App| s.set_tab(i, crate::state::RepoTab::Terminal)).build(k).key("merge-terminal"))));
+    }
+    if c.branches.is_empty() || c.branch.is_empty() {
+        return None;
+    }
+    let picked = match &s.diff_of {
+        Some(DiffOf::Merge(_, b)) => Some(b.clone()),
+        _ => None,
+    };
+    let chips = c.branches.iter().take(12).map(|b| {
+        let on = picked.as_deref() == Some(b.as_str());
+        let name = b.clone();
+        Button::new(b.clone()).icon(&icons::BRANCH).variant(if on { ButtonVariant::Neutral } else { ButtonVariant::Ghost }).control_size(ControlSize::Small)
+            .help(format!("Preview merging {b} into {}", c.branch))
+            .on_press(move |s: &mut App| s.preview_merge(i, name.clone())).build(k).key(format!("merge-pick-{b}"))
+    });
+    let mut out = col().w_full().px(16.0).py(12.0).gap(8.0).key("merge-pick")
+        .child(text(format!("Merge a branch into {}", c.branch)).font(k.ty.small_medium).color(k.c.text_base))
+        .child(row().w_full().gap(4.0).flex_wrap().children(chips));
+    if let (Some(b), Some(p)) = (picked, s.merge_preview.as_ref().filter(|p| picked_is(&s.diff_of, &p.branch))) {
+        let n = p.commits.len();
+        let commits = p.commits.iter().take(8).map(|l| text(l.clone()).font(k.ty.mono).color(k.c.text_muted).max_lines(1));
+        let dirty = !c.patch.trim().is_empty();
+        out = out
+            .child(text(if n == 0 { format!("{b} has no commits that {} doesn't have.", c.branch) } else { format!("{n} commit{} to bring in:", if n == 1 { "" } else { "s" }) })
+                .font(k.ty.text_small).color(k.c.text_muted))
+            .children(commits)
+            .child(row().gap(8.0).center_y()
+                .child(Button::new(format!("Merge {b} into {}", c.branch)).icon(&icons::MERGE).variant(ButtonVariant::Submit).control_size(ControlSize::Small)
+                    .disabled(busy || n == 0 || dirty)
+                    .on_press(move |s: &mut App| s.merge_local(i, b.clone())).build(k).key("merge-local"))
+                .child(if dirty { text("Commit your changes first.").font(k.ty.text_small).color(k.c.warning.icon) } else { rune::el() }));
+    }
+    Some(out)
+}
+
+fn picked_is(of: &Option<DiffOf>, branch: &str) -> bool {
+    matches!(of, Some(DiffOf::Merge(_, b)) if b == branch)
 }
 
 /// A pull request's files, when one is open (`DiffOf::Pull`), with the merge buttons.

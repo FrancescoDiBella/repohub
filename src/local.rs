@@ -271,6 +271,11 @@ pub struct Changes {
     pub patch: String,
     /// New files git doesn't track yet, with their text (`None`: binary or too large).
     pub untracked: Vec<(String, Option<String>)>,
+    /// A merge is under way (`MERGE_HEAD`), and the files still in conflict.
+    pub merging: bool,
+    pub conflicts: Vec<String>,
+    /// The other local branches, most recently changed first.
+    pub branches: Vec<String>,
 }
 
 impl Changes {
@@ -297,6 +302,10 @@ pub fn changes(root: &Path) -> Result<Changes, String> {
         };
         c.untracked.push((path.to_owned(), text));
     }
+    c.merging = git_dir(root).join("MERGE_HEAD").exists();
+    c.conflicts = conflicts(root);
+    c.branches = git(root, &["for-each-ref", "--sort=-committerdate", "--format=%(refname:short)", "refs/heads"])
+        .unwrap_or_default().lines().map(str::trim).filter(|b| !b.is_empty() && *b != c.branch).map(str::to_owned).collect();
     c.upstream = git(root, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]).ok().map(|u| u.trim().to_owned()).filter(|u| !u.is_empty());
     if c.upstream.is_some()
         && let Ok(counts) = git(root, &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"])
@@ -308,11 +317,93 @@ pub fn changes(root: &Path) -> Result<Changes, String> {
     Ok(c)
 }
 
+/// The clone's git folder (`.git`, or where a worktree's `.git` file points).
+fn git_dir(root: &Path) -> PathBuf {
+    match git(root, &["rev-parse", "--git-dir"]) {
+        Ok(d) => {
+            let d = PathBuf::from(d.trim());
+            if d.is_absolute() { d } else { root.join(d) }
+        }
+        Err(_) => root.join(".git"),
+    }
+}
+
+/// The files with unresolved conflicts.
+pub fn conflicts(root: &Path) -> Vec<String> {
+    git(root, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default().lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_owned).collect()
+}
+
+/// What merging `branch` into the checked-out branch would bring.
+#[derive(Clone, Debug, Default)]
+pub struct MergePreview {
+    pub branch: String,
+    /// Its commits that the checked-out branch doesn't have (`git log --oneline HEAD..branch`).
+    pub commits: Vec<String>,
+    /// The changes it brings: `git diff HEAD...branch` (from where they parted).
+    pub patch: String,
+}
+
+pub fn merge_preview(root: &Path, branch: &str) -> Result<MergePreview, String> {
+    check_branch(branch)?;
+    let range = format!("HEAD..{branch}");
+    let commits = git(root, &["log", "--oneline", "--no-decorate", "-n", "200", &range])?.lines().map(str::to_owned).collect();
+    let patch = git(root, &["diff", "--no-color", "--no-ext-diff", "-M", &format!("HEAD...{branch}")])?;
+    Ok(MergePreview { branch: branch.to_owned(), commits, patch })
+}
+
+/// How a merge ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Merged {
+    /// Done: git's one-line summary (a fast-forward or a merge commit).
+    Done(String),
+    /// Nothing to merge.
+    UpToDate,
+    /// Stopped on conflicts in these files: resolve them and commit, or abort.
+    Conflicts(Vec<String>),
+}
+
+/// A branch name to hand git: no option-like or odd names.
+fn check_branch(branch: &str) -> Result<(), String> {
+    if branch.is_empty() || branch.starts_with('-') || branch.contains("..") || branch.chars().any(|c| c.is_whitespace() || "~^:?*[\\".contains(c)) {
+        return Err(format!("{branch} isn't a branch name."));
+    }
+    Ok(())
+}
+
+/// Merges `branch` into the checked-out branch (`git merge --no-edit`). It refuses while there
+/// are uncommitted changes, so a merge never mixes with work in progress.
+pub fn merge(root: &Path, branch: &str) -> Result<Merged, String> {
+    check_branch(branch)?;
+    if !git(root, &["status", "--porcelain", "--untracked-files=no"])?.trim().is_empty() {
+        return Err("Commit or stash your changes first: a merge needs a clean working tree.".into());
+    }
+    match git(root, &["merge", "--no-edit", branch]) {
+        Ok(out) if out.contains("Already up to date") => Ok(Merged::UpToDate),
+        Ok(out) => Ok(Merged::Done(out.lines().find(|l| l.contains("Fast-forward") || l.contains("Merge made")).unwrap_or("Merged").trim().to_owned())),
+        Err(e) => {
+            let files = conflicts(root);
+            if files.is_empty() { Err(e) } else { Ok(Merged::Conflicts(files)) }
+        }
+    }
+}
+
+/// Gives up the merge under way and goes back to before it.
+pub fn abort_merge(root: &Path) -> Result<(), String> {
+    git(root, &["merge", "--abort"]).map(|_| ())
+}
+
 /// Commits everything that changed (`git add -A`) with `message`.
 pub fn commit_all(root: &Path, message: &str) -> Result<String, String> {
     let message = message.trim();
     if message.is_empty() {
         return Err("Write a commit message first.".into());
+    }
+    // During a merge, `add -A` marks conflicts resolved: refuse while a file still has markers.
+    let marked: Vec<String> = conflicts(root).into_iter().filter(|f| {
+        std::fs::read_to_string(root.join(f)).is_ok_and(|t| t.lines().any(|l| l.starts_with("<<<<<<< ") || l.starts_with(">>>>>>> ")))
+    }).collect();
+    if !marked.is_empty() {
+        return Err(format!("Still in conflict: {}. Remove the <<<<<<< / >>>>>>> markers first.", marked.join(", ")));
     }
     git(root, &["add", "-A"])?;
     git(root, &["commit", "-m", message])?;
@@ -406,6 +497,55 @@ mod tests {
         assert_eq!(c.ahead, 1);
         push(&work).unwrap();
         assert_eq!(changes(&work).unwrap().ahead, 0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn merges_and_conflicts() {
+        let dir = std::env::temp_dir().join(format!("repohub-merge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let g = |args: &[&str]| git(&dir, args).unwrap();
+        g(&["init", "-q", "-b", "main"]);
+        for (k, v) in [("user.name", "Test"), ("user.email", "test@example.com"), ("commit.gpgsign", "false")] {
+            g(&["config", k, v]);
+        }
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        commit_all(&dir, "first").unwrap();
+        // A branch that adds a file merges cleanly (fast-forward).
+        g(&["checkout", "-q", "-b", "feature"]);
+        std::fs::write(dir.join("b.txt"), "feature\n").unwrap();
+        commit_all(&dir, "add b").unwrap();
+        g(&["checkout", "-q", "main"]);
+        let p = merge_preview(&dir, "feature").unwrap();
+        assert_eq!(p.commits.len(), 1);
+        assert!(p.patch.contains("+feature"));
+        assert_eq!(changes(&dir).unwrap().branches, ["feature"]);
+        assert!(matches!(merge(&dir, "feature").unwrap(), Merged::Done(_)));
+        assert_eq!(merge(&dir, "feature").unwrap(), Merged::UpToDate);
+        // Both sides change the same line: conflicts, then abort.
+        g(&["checkout", "-q", "-b", "other"]);
+        std::fs::write(dir.join("a.txt"), "other\n").unwrap();
+        commit_all(&dir, "other side").unwrap();
+        g(&["checkout", "-q", "main"]);
+        std::fs::write(dir.join("a.txt"), "main\n").unwrap();
+        // Not with uncommitted work.
+        assert!(merge(&dir, "other").unwrap_err().contains("clean"));
+        commit_all(&dir, "main side").unwrap();
+        assert_eq!(merge(&dir, "other").unwrap(), Merged::Conflicts(vec!["a.txt".into()]));
+        let c = changes(&dir).unwrap();
+        assert!(c.merging && c.conflicts == ["a.txt"]);
+        assert!(commit_all(&dir, "finish").unwrap_err().contains("Still in conflict"), "markers left");
+        abort_merge(&dir).unwrap();
+        assert!(!changes(&dir).unwrap().merging);
+        // Resolved by hand: Commit finishes the merge.
+        merge(&dir, "other").unwrap();
+        std::fs::write(dir.join("a.txt"), "both\n").unwrap();
+        commit_all(&dir, "Merge other").unwrap();
+        let c = changes(&dir).unwrap();
+        assert!(!c.merging && c.conflicts.is_empty());
+        assert_eq!(git(&dir, &["log", "-1", "--format=%p"]).unwrap().split_whitespace().count(), 2, "a merge commit");
+        assert!(merge(&dir, "--help").is_err() && merge(&dir, "a b").is_err());
         let _ = std::fs::remove_dir_all(dir);
     }
 

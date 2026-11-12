@@ -12,6 +12,8 @@ pub enum DiffOf {
     Local(String),
     /// A pull request: the repository's full name and its number.
     Pull(String, u32),
+    /// What merging a local branch would bring: the repository's full name and the branch.
+    Merge(String, String),
 }
 
 /// The files of the local changes: `git diff HEAD`, then each new file as all-added.

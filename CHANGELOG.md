@@ -10,6 +10,8 @@ The sections are **Added**, **Changed** and **Fixed**.
 ## Unreleased
 
 ### Added
+- Merge local branches from the Changes tab. You preview the commits and the diff first. On
+  conflicts you see the files and can abort; Commit finishes the merge once they're fixed.
 - Diffs in the app. **Files** on a pull request shows what it changes, unified or side by side,
   and it can be merged from there with a merge commit, squash or rebase. A new **Changes** tab
   shows what changed in the local clone, with **Commit**, **Commit and push**, **Push**, **Pull**
