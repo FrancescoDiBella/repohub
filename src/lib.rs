@@ -23,6 +23,7 @@ mod clones;
 mod clones_shim;
 mod config;
 mod github;
+mod harness;
 mod icons;
 mod lists;
 mod markdown;
@@ -94,6 +95,12 @@ pub struct App {
     pr_filter: PullState,
     search: TextEdit,
     theme: Theme,
+    /// The coding assistants (harnesses) and whether the Claude section is on.
+    assist: harness::Assistants,
+    /// The Settings form that adds a harness.
+    harness_name: TextEdit,
+    harness_cmd: TextEdit,
+    harness_error: Option<String>,
     /// The looks (themes) and which one each appearance uses; edited in Settings.
     looks: themes::Looks,
     /// The theme editor's fields, for one of your looks.
@@ -267,7 +274,13 @@ impl App {
     }
 
     /// Switches the repository page of repository `i` to `tab`.
+    /// The sections a repository's page shows, in order: Claude only while it's on.
+    fn tabs(&self) -> Vec<RepoTab> {
+        RepoTab::ALL.into_iter().filter(|t| *t != RepoTab::Claude || self.assist.claude).collect()
+    }
+
     fn set_tab(&mut self, i: usize, tab: RepoTab) {
+        let tab = if self.tabs().contains(&tab) { tab } else { RepoTab::Code };
         if self.tab != tab {
             state::trace("tab", &self.tab, &tab);
             self.leave_tab();
@@ -1118,6 +1131,64 @@ impl App {
         }
     }
 
+    /// Turns the Claude section on or off.
+    fn set_claude(&mut self, on: bool) {
+        state::trace("claude", &self.assist.claude, &on);
+        self.assist.claude = on;
+        self.assist.save();
+        if !on && self.tab == RepoTab::Claude {
+            self.tab = RepoTab::Code;
+            self.save_place();
+        }
+    }
+
+    /// Adds the harness typed in Settings (or `suggested`, a name and command).
+    fn add_harness(&mut self, suggested: Option<(&str, &str)>) {
+        let (name, cmd) = match suggested {
+            Some((n, c)) => (n.to_owned(), c.to_owned()),
+            None => (self.harness_name.text.clone(), self.harness_cmd.text.clone()),
+        };
+        match self.assist.add(&name, &cmd) {
+            Ok(()) => {
+                self.assist.save();
+                self.harness_error = None;
+                if suggested.is_none() {
+                    self.harness_name.clear();
+                    self.harness_cmd.clear();
+                }
+                self.notify(format!("Added {}", name.trim()));
+            }
+            Err(e) => self.harness_error = Some(e),
+        }
+    }
+
+    fn remove_harness(&mut self, n: usize) {
+        if let Some(h) = self.assist.remove(n) {
+            self.assist.save();
+            self.notify(format!("Removed {}", h.name));
+        }
+    }
+
+    /// Starts harness `n` in repository `i`'s Terminal: typed into the running shell, or as the
+    /// first command of a new one in the known clone.
+    fn run_harness(&mut self, i: usize, n: usize) {
+        let Some(h) = self.assist.harnesses.get(n).cloned() else { return };
+        self.go(Page::Repo(i));
+        self.set_tab(i, RepoTab::Terminal);
+        let line = format!("{}\r", h.command);
+        let running = self.data.repos.get(i).and_then(|r| self.terms.get(&r.full_name)).is_some_and(|t| t.is_running());
+        if running {
+            self.term_type(i, &line);
+        } else if let Some(dir) = self.data.repos.get(i).and_then(|r| clones_shim::find(&r.full_name)) {
+            if let Some(r) = self.data.repos.get(i) {
+                self.terms.remove(&r.full_name);
+            }
+            self.start_terminal(i, dir, Some(line));
+        } else {
+            self.term_error = Some(format!("Choose the repository's folder below, then start {} again.", h.name));
+        }
+    }
+
     /// Opens the terminal in the repository's known clone, if any.
     fn open_terminal(&mut self, i: usize) {
         let Some(r) = self.data.repos.get(i) else { return };
@@ -1220,6 +1291,10 @@ fn init() -> App {
         pr_filter: PullState::Open,
         search: TextEdit::new(""),
         theme: prefs::load_theme().unwrap_or(cfg.theme),
+        assist: harness::Assistants::load(),
+        harness_name: TextEdit::new(""),
+        harness_cmd: TextEdit::new(""),
+        harness_error: None,
         looks: themes::Looks::load(),
         look_edit: LookEditor::default(),
         backdrop_size: [1180.0, 760.0],

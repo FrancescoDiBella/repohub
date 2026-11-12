@@ -235,8 +235,13 @@ pub fn repo_detail(s: &App, k: &Kit, i: usize) -> El {
                 .on_press_tx({ let u = format!("{}/fork", r.url); move |_: &mut App, tx| { let _ = tx.open_url(&u); } }).build(k).key("fork"))
             .child(pin_button(k, i, r, s.is_pinned(i), true))
             .child(star_button(k, i, r, true, "detail-star".into())));
-    let tabs = SegmentedControl::new(&RepoTab::LABELS, Some(s.tab.index())).label("Section").fit()
-        .on_pick(move |s: &mut App, t, _| s.set_tab(i, RepoTab::from_index(t))).build(k).key("tabs");
+    let shown = s.tabs();
+    let labels: Vec<&str> = shown.iter().map(|t| RepoTab::LABELS[t.index()]).collect();
+    let tabs = SegmentedControl::new(&labels, shown.iter().position(|t| *t == s.tab)).label("Section").fit()
+        .on_pick(move |s: &mut App, t, _| {
+            let tab = s.tabs().get(t).copied().unwrap_or_default();
+            s.set_tab(i, tab)
+        }).build(k).key("tabs");
     // Seven sections don't fit a phone's width: there the strip scrolls sideways.
     let tabs = if s.compact { row().w_full().scroll_x().child(tabs) } else { tabs };
     let in_repo = |name: &str| name.eq_ignore_ascii_case(&r.full_name) || name.eq_ignore_ascii_case(&r.name);

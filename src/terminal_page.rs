@@ -39,8 +39,8 @@ pub fn terminal_tab(s: &App, k: &Kit, i: usize, dark: bool) -> El {
                 .child(row().gap(8.0)
                     .child(Button::new("Open terminal").icon(&icons::TERMINAL).variant(ButtonVariant::Submit).control_size(ControlSize::Small)
                         .on_press(move |s: &mut App| s.start_terminal(i, d.clone(), None)).build(k).key("open-terminal"))
-                    .child(Button::new("Open with claude").icon(&icons::SPARK).control_size(ControlSize::Small)
-                        .on_press({ let d = dir.clone(); move |s: &mut App| s.start_terminal(i, d.clone(), Some("claude\r".into())) }).build(k).key("open-claude"))))
+                    .children(s.assist.shown().map(|(n, h)| Button::new(format!("Open with {}", h.name)).icon(&icons::SPARK).control_size(ControlSize::Small)
+                        .on_press(move |s: &mut App| s.run_harness(i, n)).build(k).key(format!("open-harness-{n}"))))))
                 .child(pick_folder(s, k, i, true))
         }
         Panel::Missing => out.child(pick_folder(s, k, i, false)),
@@ -97,7 +97,12 @@ pub(crate) fn pick_folder(s: &App, k: &Kit, i: usize, found: bool) -> El {
 
 fn toolbar(s: &App, k: &Kit, i: usize, cwd: &str, running: bool) -> El {
     let mut cmds = row().gap(6.0).center_y().flex_wrap();
-    for c in &s.cfg.terminal_commands {
+    for (n, h) in s.assist.shown() {
+        cmds = cmds.child(Button::new(h.name.clone()).icon(&icons::SPARK).control_size(ControlSize::Small)
+            .variant(ButtonVariant::Submit).help(h.command.clone()).disabled(!running)
+            .on_press(move |s: &mut App| s.run_harness(i, n)).build(k).key(format!("harness-{n}")));
+    }
+    for c in s.cfg.terminal_commands.iter().filter(|c| s.assist.allows(c)) {
         let line = format!("{c}\r");
         let icon = if c.starts_with("claude") { &icons::SPARK } else { &icons::PLAY };
         cmds = cmds.child(Button::new(c.clone()).icon(icon).control_size(ControlSize::Small)

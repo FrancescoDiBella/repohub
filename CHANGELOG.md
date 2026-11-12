@@ -10,6 +10,9 @@ The sections are **Added**, **Changed** and **Fixed**.
 ## Unreleased
 
 ### Added
+- Coding assistants. The Claude section can be turned off in Settings. You can add any harness,
+  such as Codex, Aider, opencode, Gemini CLI or your own, with a name and the command that starts
+  it. Each gets a button in the Terminal and a ⌘K command.
 - Themes: nine ready-made themes, plus your own. You choose a colour for each part of the
   window, a background (a pattern or a picture), a glow on buttons, corner roundness and accent
   buttons. Pick one for the light appearance and one for the dark one.
@@ -40,6 +43,8 @@ The sections are **Added**, **Changed** and **Fixed**.
 - Docker image for amd64 and arm64.
 
 ### Changed
+- The Terminal's default command buttons no longer include `claude`: it's the Claude Code harness
+  now.
 - The app's states (loading, saving, theme, tabs, filters…) are explicit state machines,
   drawn in `docs/STATE.md`.
 - A new look, with a more readable layout.

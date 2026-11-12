@@ -22,6 +22,7 @@
 | `src/prefs.rs` | What outlives the app: theme, pins, the place you were (`state::Place`) and the arrangement (`state::Layout`), one key each in `prefs.json` / `localStorage` |
 | `src/tray.rs` | The status-bar widget: the menu (a pure function of the state, tested), Rune's `Tray` on Windows and Linux, `tray-icon` on macOS; icons in `assets/tray-*.rgba` |
 | `src/claude.rs`, `src/claude_page.rs` | The Claude tab (desktop): runs `claude -p --output-format stream-json` in the clone, parses the stream into chat items (`Run`, `Mode`, `Item`), the chat UI |
+| `src/harness.rs` | Coding assistants: the Claude switch and the harnesses (name and command), saved in the preferences; Settings → Coding assistants is `lists::assistants_panel` |
 | `src/terminal.rs`, `src/terminal_page.rs` | Embedded terminal (desktop): `portable-pty` runs the login shell, `vt100` keeps the screen; key mapping, colours, the Terminal tab |
 | `src/clones.rs` | Finding and remembering each repository's local clone |
 | `assets/fonts/` | Inter and IBM Plex Mono (SIL OFL), bundled so mono text is monospaced everywhere |

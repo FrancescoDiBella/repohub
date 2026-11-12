@@ -45,6 +45,8 @@ pub enum Command {
     Owner(crate::state::OwnerFilter),
     /// Use a theme (look) and its appearance.
     Look(String),
+    /// Start a harness (its position in `Assistants::harnesses`) in a repository's terminal.
+    Harness(usize, usize),
 }
 
 #[derive(Clone, Debug)]
@@ -77,7 +79,14 @@ pub fn entries(s: &App) -> Vec<Entry> {
         out.push(entry(format!("New issue in {n}"), "Action", &icons::ISSUE, Command::Compose(i, Compose::Issue)));
         out.push(entry(format!("New pull request in {n}"), "Action", &icons::PULL, Command::Compose(i, Compose::Pull)));
         out.push(entry(format!("New branch in {n}"), "Action", &icons::BRANCH, Command::Compose(i, Compose::Branch)));
-        out.push(entry(format!("Ask Claude about {n}"), "Action", &icons::SPARK, Command::Tab(i, RepoTab::Claude)));
+        if s.assist.claude {
+            out.push(entry(format!("Ask Claude about {n}"), "Action", &icons::SPARK, Command::Tab(i, RepoTab::Claude)));
+        }
+        if cfg!(not(target_arch = "wasm32")) {
+            for (h, harness) in s.assist.shown() {
+                out.push(Entry { detail: harness.command.clone(), ..entry(format!("Start {} in {n}", harness.name), "Assistant", &icons::SPARK, Command::Harness(i, h)) });
+            }
+        }
         out.push(if s.is_pinned(i) {
             entry(format!("Unpin {n}"), "Action", &icons::PIN, Command::TogglePin(i))
         } else {
@@ -86,9 +95,9 @@ pub fn entries(s: &App) -> Vec<Entry> {
         out.push(entry(format!("Open a terminal in {n}"), "Action", &icons::TERMINAL, Command::Tab(i, RepoTab::Terminal)));
         out.push(entry(format!("Open {n} on GitHub"), "Action", &icons::EXTERNAL, Command::OpenUrl(r.url.clone())));
         out.push(entry(format!("Copy the clone URL of {n}"), "Action", &icons::COPY, Command::CopyClone(format!("{}.git", r.url))));
-        for (t, label) in RepoTab::ALL.iter().zip(RepoTab::LABELS) {
-            if *t != s.tab {
-                out.push(entry(format!("{label} · {n}"), "Section", &icons::REPO, Command::Tab(i, *t)));
+        for t in s.tabs() {
+            if t != s.tab {
+                out.push(entry(format!("{} · {n}", RepoTab::LABELS[t.index()]), "Section", &icons::REPO, Command::Tab(i, t)));
             }
         }
     }
@@ -226,6 +235,7 @@ pub fn run(s: &mut App, cmd: Command, tx: &mut Tx) {
         }
         Command::Refresh => s.refresh(),
         Command::Theme(t) => s.set_theme(t),
+        Command::Harness(i, h) => s.run_harness(i, h),
         Command::Look(id) => {
             let dark = s.looks.get(&id).is_some_and(|t| t.dark);
             s.choose_look(&id, !dark);

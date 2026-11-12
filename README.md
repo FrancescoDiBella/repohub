@@ -325,6 +325,17 @@ the repository's local copy, much like the Claude Code extension for VS Code.
 - RepoHub looks for `claude` in the usual install places, then on your login shell's PATH. If it
   lives elsewhere, set `REPOHUB_CLAUDE` to its path.
 
+## Coding assistants
+
+**Settings → Coding assistants** chooses which assistants RepoHub offers:
+
+- **Claude** turns the Claude section on or off: the Claude tab of each repository, and every
+  harness or terminal button that runs `claude`. It's on by default.
+- **Harnesses** are any program that works in a repository's folder: Claude Code, Codex, Aider,
+  opencode, Gemini CLI, Goose, or your own. Give it a name and the command that starts it (for
+  example `codex --full-auto`), or add a well-known one with a click. Each gets a button in the
+  Terminal tab and a ⌘K command that starts it in the local clone.
+
 ## Terminal (desktop app)
 
 Each repository has a **Terminal** tab: your login shell in a real pseudo-terminal, opened in the
@@ -338,9 +349,10 @@ with colours, scrollback (mouse wheel) and paste.
   `REPOHUB_REPOS_DIR` (comma-separated folders) or in `~/Developer`, `~/Projects`, `~/code`,
   `~/src`, `~/GitHub`, `~/repos` and `~/Documents/GitHub`. You can also type the folder, or press
   **Clone into …** to clone it there. A folder you pick is remembered.
-- **Command buttons:** one click types `claude`, `git status`, `git pull` or `git log`. Set your
-  own list with `REPOHUB_TERMINAL_COMMANDS` (`;`-separated). **Open with claude** starts Claude Code
-  right away.
+- **Coding assistants:** each harness in **Settings → Coding assistants** gets a button, such as
+  **Claude Code** or **Codex**, that starts it in the clone. ⌘K → *Start … in …* does the same.
+- **Command buttons:** one click types `git status`, `git pull` or `git log`. Set your own list
+  with `REPOHUB_TERMINAL_COMMANDS` (`;`-separated).
 - **Keys:** click the terminal to type. Ctrl+C, arrows, Tab, Ctrl+R… go to the shell;
   Ctrl/⌘+V pastes.
 
