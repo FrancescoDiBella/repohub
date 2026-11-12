@@ -47,6 +47,11 @@ The sections are **Added**, **Changed** and **Fixed**.
 - Docker image for amd64 and arm64.
 
 ### Changed
+- A lighter desktop app: 31 MB instead of 50 MB (no debug symbols, optimized for size and at
+  link time), with the same speed.
+- A refresh keeps the details already loaded for repositories nobody pushed to since, so opening
+  them again needs no new requests to GitHub.
+- Plugins get a new context only when what it shows changes, not on every frame.
 - The Terminal's default command buttons no longer include `claude`: it's the Claude Code harness
   now.
 - The app's states (loading, saving, theme, tabs, filters…) are explicit state machines,

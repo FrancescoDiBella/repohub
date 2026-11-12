@@ -112,6 +112,9 @@ pub struct App {
     plugin_error: Option<String>,
     /// The plugin whose Remove was pressed once (press again to remove it).
     plugin_confirm: Option<String>,
+    /// What the plugins' context was last built from (`plugins::context_key`).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    plugin_ctx_key: u64,
     /// Whether the dark look is on screen (set while drawing; plugins' context).
     shown_dark: std::cell::Cell<bool>,
     /// The coding assistants (harnesses) and whether the Claude section is on.
@@ -670,8 +673,15 @@ impl App {
     fn apply(&mut self, result: Result<Data, String>) {
         match result {
             Ok(d) => {
+                // Details of repositories nobody pushed to since stay: no new requests for them.
+                let same = |full: &str| {
+                    let pushed = |data: &Data| data.repos.iter().find(|r| r.full_name == full).map(|r| r.pushed);
+                    pushed(&self.data).is_some_and(|p| Some(p) == pushed(&d))
+                };
+                let kept: HashMap<_, _> = std::mem::take(&mut self.details).into_iter()
+                    .filter(|((full, _), v)| matches!(v, Load::Ready(_)) && same(full)).collect();
                 self.data = d;
-                self.details.clear();
+                self.details = kept;
                 self.loaded_at = Some(net::now());
                 self.loaded_clock = Some(self.clock);
                 self.now = net::now();
@@ -1366,6 +1376,7 @@ fn init() -> App {
         plugin_src: TextEdit::new(""),
         plugin_error: None,
         plugin_confirm: None,
+        plugin_ctx_key: 0,
         shown_dark: std::cell::Cell::new(false),
         assist: harness::Assistants::load(),
         harness_name: TextEdit::new(""),
@@ -1848,8 +1859,13 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
     #[cfg(not(target_arch = "wasm32"))]
     let plugins_ran = {
         if s.plugins.list.iter().any(|p| p.running()) {
-            let ctx = plugins::context(s, s.shown_dark.get());
-            s.plugins.set_context(ctx);
+            // The context is rebuilt only when what it shows may have changed.
+            let key = plugins::context_key(s, s.shown_dark.get());
+            if s.plugin_ctx_key != key {
+                s.plugin_ctx_key = key;
+                let ctx = plugins::context(s, s.shown_dark.get());
+                s.plugins.set_context(ctx);
+            }
         }
         s.plugins.poll(clock, tx)
     };
@@ -2003,5 +2019,28 @@ mod pin_tests {
         assert_eq!(saved.len(), 3);
         assert!(saved[2].eq_ignore_ascii_case(&s.data.repos[4].full_name), "remembered by full name");
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use crate::state::Load;
+
+    #[test]
+    fn a_refresh_keeps_details_of_repositories_nobody_pushed_to() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = crate::init();
+        s.data = crate::model::Data::sample();
+        let (a, b) = (s.data.repos[0].full_name.clone(), s.data.repos[1].full_name.clone());
+        for full in [&a, &b] {
+            s.details.insert((full.clone(), "main".into()), Load::Ready(crate::model::Detail::default()));
+        }
+        s.details.insert(("gone/repo".into(), "main".into()), Load::Ready(crate::model::Detail::default()));
+        let mut next = crate::model::Data::sample();
+        next.repos[1].pushed += 60;
+        s.apply(Ok(next));
+        assert!(s.details.contains_key(&(a, "main".into())), "not pushed since: kept");
+        assert!(!s.details.contains_key(&(b, "main".into())), "pushed since: loaded again");
+        assert!(!s.details.contains_key(&("gone/repo".into(), "main".into())));
     }
 }
