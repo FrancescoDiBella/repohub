@@ -68,9 +68,9 @@ The sections are **Added**, **Changed** and **Fixed**.
 - A new look, with a more readable layout.
 
 ### Fixed
-- Signing out or switching accounts in Settings while data is still loading no longer lets late
-  responses overwrite the sample data or the newly selected account, and clears previous account
-  caches and open forms.
+- Signing out or switching accounts in Settings no longer lets late responses overwrite the sample
+  data or the new account, and resets the page, saved place, open forms and previous account
+  caches.
 - In-app updates can be cancelled while downloading, stalled downloads time out, and ready updates
   stay available if a background check fails (with checks paused until you install or dismiss).
 - Relative times ("… ago") across repositories, pull requests, issues, runs, commits, and notes

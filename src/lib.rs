@@ -633,19 +633,21 @@ impl App {
     }
 
     /// Drops in-flight background work from the previous account and clears every per-account
-    /// cache and transient view state.
+    /// cache, session, filter and saved place.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     fn reset_account_state(&mut self) {
         self.load_gen = self.load_gen.wrapping_add(1);
         self.leave_tab();
+        self.data = Data::default();
         self.tab = RepoTab::Code;
         self.plugin_tab = None;
         self.pending_place = None;
         self.save_places = true;
+        self.filter = RepoFilter::All;
         self.owner = OwnerFilter::All;
-        if self.page != Page::Settings {
-            self.go(Page::Overview);
-        }
+        self.pr_filter = PullState::Open;
+        self.search.clear();
+        self.branch_filter.clear();
         self.details.clear();
         self.branches.clear();
         self.branch_of.clear();
@@ -667,10 +669,16 @@ impl App {
         self.git_job = None;
         self.git_error = None;
         self.merge_preview = None;
+        self.chats.clear();
+        self.claude_prompt.clear();
+        self.terms.clear();
+        self.clone_path.clear();
         self.loaded_at = None;
         self.last_load = None;
         self.load_clock = None;
         self.loaded_clock = None;
+        prefs::set("place", state::Place { page: "overview".into(), tab: None, repo: None }.to_json());
+        self.go(Page::Overview);
     }
 
     /// Saves the account typed in Settings and loads its data. An empty token field keeps the
@@ -704,7 +712,6 @@ impl App {
         }
         self.reset_account_state();
         if self.cfg.live() {
-            self.data = Data::default();
             self.set_status(Status::Starting);
             self.refresh();
             self.notify("Account saved. Loading your repositories…");
@@ -1444,7 +1451,11 @@ impl App {
         let (repo, branch, name, json) = (b.repo.clone(), b.branch.clone(), b.name.clone(), b.to_json());
         let Some(h) = self.handle.clone() else { return };
         let id = (repo.clone(), branch.clone(), name.clone());
+        let epoch = self.load_gen;
         net::spawn(h, move || async move { notes::save(&repo, &branch, &name, json).await }, move |s: &mut App, r| {
+            if s.load_gen != epoch {
+                return;
+            }
             // Only the drawing this write belongs to hears about it.
             let same = s.board.as_ref().is_some_and(|b| (b.repo.as_str(), b.branch.as_str(), b.name.as_str()) == (id.0.as_str(), id.1.as_str(), id.2.as_str()));
             if same && s.board.as_mut().is_some_and(|b| b.save.written(r)) {
@@ -2479,8 +2490,40 @@ mod cache_tests {
 
 #[cfg(test)]
 mod load_gen_tests {
-    use crate::model::{Data, Detail, Profile, Repo};
-    use crate::state::{Compose, Load, OwnerFilter, Refresh, RepoTab, Status, Submit};
+    use crate::model::{Data, Detail, Profile, PullState, Repo};
+    use crate::state::{Compose, Layout, Load, OwnerFilter, Place, Refresh, RepoFilter, RepoSort, RepoTab, Status, Submit};
+
+    #[cfg(not(target_arch = "wasm32"))]
+    struct TempDataDir {
+        dir: std::path::PathBuf,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl TempDataDir {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("repohub-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let prev = std::env::var_os("REPOHUB_DATA_DIR");
+            // SAFETY: ENV_LOCK serializes tests mutating environment variables.
+            unsafe { std::env::set_var("REPOHUB_DATA_DIR", &dir) };
+            Self { dir, prev }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl Drop for TempDataDir {
+        fn drop(&mut self) {
+            // SAFETY: ENV_LOCK is still held while TempDataDir drops inside each test.
+            unsafe {
+                match &self.prev {
+                    Some(v) => std::env::set_var("REPOHUB_DATA_DIR", v),
+                    None => std::env::remove_var("REPOHUB_DATA_DIR"),
+                }
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
 
     fn account_data(login: &str, repo_name: &str, private: bool) -> Data {
         Data {
@@ -2510,10 +2553,17 @@ mod load_gen_tests {
         s.notes.entry((full.clone(), "main".into())).or_default().state = Refresh::Fresh;
         s.diff_of = Some(crate::diffs::DiffOf::Pull(full.clone(), 42));
         s.diff_load = Some(Load::Ready(()));
+        s.filter = RepoFilter::Private;
+        s.pr_filter = PullState::Merged;
         s.owner = OwnerFilter::Org(owner.into());
+        s.search = rune::TextEdit::new("secret");
+        s.branch_filter = rune::TextEdit::new("dev");
+        s.chats.entry(full.clone()).or_default().session = Some("sess-1".into());
+        s.claude_prompt = rune::TextEdit::new("ask");
+        s.clone_path = rune::TextEdit::new("/tmp/secret");
         s.busy.insert(format!("{full}#42"));
         s.form = Some(crate::actions::Form {
-            repo: full,
+            repo: full.clone(),
             kind: Compose::Issue,
             title: rune::TextEdit::new("Draft"),
             body: rune::TextEdit::new(""),
@@ -2522,16 +2572,17 @@ mod load_gen_tests {
             draft: false,
             submit: Submit::Editing,
         });
+        crate::prefs::set("place", Place { page: "repo".into(), tab: Some(RepoTab::Notes), repo: Some(full) }.to_json());
+        let old_layout = Layout { sidebar_width: 248.0, sidebar_open: true, sort: RepoSort::Recent, owner: OwnerFilter::Org(owner.into()) };
+        crate::prefs::set("layout", old_layout.to_json());
+        s.saved_layout = Some(old_layout);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn sign_out_during_load_keeps_sample_data_and_drops_stale_callbacks() {
         let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = std::env::temp_dir().join(format!("repohub-load-gen-signout-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        // SAFETY: ENV_LOCK serializes tests mutating environment variables.
-        unsafe { std::env::set_var("REPOHUB_DATA_DIR", &dir) };
+        let _tmp = TempDataDir::new("load-gen-signout");
 
         let mut s = crate::init();
         let mut cfg = (*s.cfg).clone();
@@ -2540,9 +2591,10 @@ mod load_gen_tests {
         cfg.account_locked = false;
         s.cfg = std::sync::Arc::new(cfg);
         s.acct_user = rune::TextEdit::new("alice");
-        s.page = crate::Page::Repo(0);
+        s.data = Data::default();
+        s.page = crate::Page::Settings;
         s.tab = RepoTab::Notes;
-        s.set_status(Status::Ready);
+        s.set_status(Status::Starting);
         seed_caches(&mut s, "alice");
 
         s.refresh();
@@ -2553,9 +2605,16 @@ mod load_gen_tests {
         assert_eq!(s.status, Status::Sample);
         assert!(s.data.sample);
         assert!(s.load_gen > old_gen);
-        assert_eq!(s.page, crate::Page::Overview);
+        assert_eq!(s.page, crate::Page::Overview, "Settings resets to Overview on sign-out");
         assert_eq!(s.tab, RepoTab::Code);
+        assert_eq!(s.filter, RepoFilter::All);
+        assert_eq!(s.pr_filter, PullState::Open);
         assert_eq!(s.owner, OwnerFilter::All);
+        assert!(s.search.text.is_empty());
+        assert!(s.branch_filter.text.is_empty());
+        assert!(s.chats.is_empty());
+        assert!(s.claude_prompt.text.is_empty());
+        assert!(s.clone_path.text.is_empty());
         assert!(s.details.is_empty());
         assert!(s.branches.is_empty());
         assert!(s.branch_of.is_empty());
@@ -2565,6 +2624,11 @@ mod load_gen_tests {
         assert!(s.diff_of.is_none());
         assert!(s.diff_load.is_none());
         assert!(s.busy.is_empty());
+
+        let saved_place = crate::prefs::get("place").as_ref().and_then(Place::from_json).expect("place saved");
+        assert_eq!(saved_place, Place { page: "overview".into(), tab: None, repo: None });
+        let saved_layout = crate::prefs::get("layout").as_ref().and_then(Layout::from_json).expect("layout saved");
+        assert_eq!(saved_layout.owner, OwnerFilter::All);
 
         // Deliver late results from before sign-out.
         s.apply(old_gen, Ok(account_data("alice", "secret", true)));
@@ -2581,18 +2645,13 @@ mod load_gen_tests {
         assert!(s.branches.is_empty());
         assert!(s.notes.is_empty());
         assert!(s.diff.files().is_empty());
-
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn overlapping_account_loads_apply_only_the_newer_account() {
         let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = std::env::temp_dir().join(format!("repohub-load-gen-switch-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        // SAFETY: ENV_LOCK serializes tests mutating environment variables.
-        unsafe { std::env::set_var("REPOHUB_DATA_DIR", &dir) };
+        let _tmp = TempDataDir::new("load-gen-switch");
 
         let mut s = crate::init();
         let mut cfg = (*s.cfg).clone();
@@ -2601,22 +2660,29 @@ mod load_gen_tests {
         cfg.token = None;
         s.cfg = std::sync::Arc::new(cfg);
 
-        // Start load for account A.
+        // Start load for account A from Settings.
+        s.page = crate::Page::Settings;
         s.acct_user = rune::TextEdit::new("alice");
         s.acct_token = rune::TextEdit::new("tok_a");
         s.save_account(false);
+        assert_eq!(s.page, crate::Page::Overview);
         assert_eq!(s.status, Status::Loading);
         let gen_a = s.load_gen;
         seed_caches(&mut s, "alice");
 
-        // Switch to account B while A is still loading.
+        // Switch to account B from Settings while A is still loading.
+        s.page = crate::Page::Settings;
         s.acct_user = rune::TextEdit::new("bob");
         s.acct_token = rune::TextEdit::new("tok_b");
         s.save_account(false);
+        assert_eq!(s.page, crate::Page::Overview);
         assert_eq!(s.status, Status::Loading);
         let gen_b = s.load_gen;
         assert!(gen_b > gen_a);
-        assert!(s.details.is_empty() && s.branches.is_empty() && s.notes.is_empty() && s.form.is_none());
+        assert!(s.details.is_empty() && s.branches.is_empty() && s.notes.is_empty() && s.form.is_none() && s.chats.is_empty());
+
+        let saved_place = crate::prefs::get("place").as_ref().and_then(Place::from_json).expect("place reset");
+        assert_eq!(saved_place, Place { page: "overview".into(), tab: None, repo: None });
 
         // Case 1: stale A arrives while B is loading -> dropped; then B arrives -> applied.
         s.apply(gen_a, Ok(account_data("alice", "a-private", true)));
@@ -2635,18 +2701,13 @@ mod load_gen_tests {
         assert_eq!(s.status, Status::Ready);
         assert_eq!(s.data.profile.login, "bob");
         assert_eq!(s.data.repos[0].full_name, "bob/b-repo");
-
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn ui_sign_out_in_settings_drops_late_load_and_keeps_sample_data() {
+    fn ui_sign_out_in_settings_resets_to_overview_and_drops_late_load() {
         let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = std::env::temp_dir().join(format!("repohub-load-gen-ui-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        // SAFETY: ENV_LOCK serializes tests mutating environment variables.
-        unsafe { std::env::set_var("REPOHUB_DATA_DIR", &dir) };
+        let _tmp = TempDataDir::new("load-gen-ui");
 
         let mut s = crate::init();
         let mut cfg = (*s.cfg).clone();
@@ -2670,8 +2731,8 @@ mod load_gen_tests {
         rt.frame(0.0);
 
         assert_eq!(rt.state.status, Status::Sample);
-        assert_eq!(rt.state.page, crate::Page::Settings);
-        assert!(rt.find("acct-sign-out").is_none(), "Sign out hidden after signing out");
+        assert_eq!(rt.state.page, crate::Page::Overview, "signing out from Settings returns to Overview");
+        assert!(rt.find("connect").is_some(), "Overview sample banner offers Connect");
         assert!(rt.state.form.is_none());
 
         // Deliver late response for the signed-out account while UI is running.
@@ -2681,11 +2742,9 @@ mod load_gen_tests {
         rt.frame(0.0);
 
         assert_eq!(rt.state.status, Status::Sample);
+        assert_eq!(rt.state.page, crate::Page::Overview);
         assert!(rt.state.data.sample);
-        assert!(rt.find("acct-sign-out").is_none());
         assert!(rt.elements().iter().all(|e| e.text.as_deref() != Some("secret-repo")));
-
-        let _ = std::fs::remove_dir_all(dir);
     }
 }
 
