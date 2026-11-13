@@ -193,7 +193,7 @@ impl Gh {
 
     async fn search(&self, q: &str) -> Vec<Value> {
         let q = q.replace(' ', "+").replace(':', "%3A");
-        self.get(&format!("/search/issues?q={q}&sort=updated&order=desc&per_page=40")).await
+        self.get(&format!("/search/issues?q={q}&sort=updated&order=desc&per_page={}", crate::model::SEARCH_CAP)).await
             .ok().and_then(|v| v.get("items").and_then(Value::as_array).cloned()).unwrap_or_default()
     }
 
@@ -201,6 +201,7 @@ impl Gh {
         self.search(&format!("is:pr involves:{login}")).await.iter().map(|v| {
             let merged = v.get("pull_request").and_then(|p| p.get("merged_at")).is_some_and(|m| !m.is_null());
             let state = if merged { PullState::Merged } else if s(v, "state") == "closed" { PullState::Closed } else if b(v, "draft") { PullState::Draft } else { PullState::Open };
+            let updated_at = s(v, "updated_at");
             Pull {
                 number: n(v, "number"),
                 title: s(v, "title"),
@@ -208,7 +209,8 @@ impl Gh {
                 author: v.get("user").map(|u| s(u, "login")).unwrap_or_default(),
                 state,
                 checks: None,
-                age: self.ago(&s(v, "updated_at")),
+                age: self.ago(&updated_at),
+                updated_at: parse_iso(&updated_at).unwrap_or(0),
                 comments: n(v, "comments"),
                 url: s(v, "html_url"),
             }
@@ -218,14 +220,18 @@ impl Gh {
     /// Open issues in the account's repositories and in those of `orgs` (search ORs the owners).
     pub async fn issues(&self, login: &str, orgs: &[String]) -> Vec<Issue> {
         let owners: String = orgs.iter().take(10).map(|o| format!(" org:{o}")).collect();
-        self.search(&format!("is:issue is:open archived:false user:{login}{owners}")).await.iter().map(|v| Issue {
-            number: n(v, "number"),
-            title: s(v, "title"),
-            repo: repo_from_url(&s(v, "repository_url")),
-            label: v.get("labels").and_then(Value::as_array).and_then(|l| l.first()).map(|l| (s(l, "name"), hex_hue(&s(l, "color")))),
-            age: self.ago(&s(v, "created_at")),
-            comments: n(v, "comments"),
-            url: s(v, "html_url"),
+        self.search(&format!("is:issue is:open archived:false user:{login}{owners}")).await.iter().map(|v| {
+            let created_at = s(v, "created_at");
+            Issue {
+                number: n(v, "number"),
+                title: s(v, "title"),
+                repo: repo_from_url(&s(v, "repository_url")),
+                label: v.get("labels").and_then(Value::as_array).and_then(|l| l.first()).map(|l| (s(l, "name"), hex_hue(&s(l, "color")))),
+                age: self.ago(&created_at),
+                created_at: parse_iso(&created_at).unwrap_or(0),
+                comments: n(v, "comments"),
+                url: s(v, "html_url"),
+            }
         }).collect()
     }
 
@@ -249,6 +255,7 @@ impl Gh {
                     _ => String::new(),
                 },
                 age: if checks == Checks::Running { "running".into() } else { self.ago(&s(r, "updated_at")) },
+                updated_at: end.unwrap_or(0),
                 checks,
                 url: s(r, "html_url"),
             }
@@ -286,11 +293,13 @@ impl Gh {
         {
             let commit = c.get("commit").cloned().unwrap_or(Value::Null);
             let author = commit.get("author").cloned().unwrap_or(Value::Null);
+            let date = s(&author, "date");
             d.commit = Some(Commit {
                 author: c.get("author").filter(|a| !a.is_null()).map(|a| s(a, "login")).unwrap_or_else(|| s(&author, "name")),
                 message: s(&commit, "message").lines().next().unwrap_or("").to_owned(),
                 sha: s(c, "sha").chars().take(7).collect(),
-                age: self.ago(&s(&author, "date")),
+                age: self.ago(&date),
+                committed_at: parse_iso(&date).unwrap_or(0),
             });
         }
         d

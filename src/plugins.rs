@@ -427,7 +427,7 @@ pub fn context(s: &App, dark: bool) -> Data {
         ("description", text(&r.description)), ("language", text(&r.language)), ("stars", int(r.stars)),
         ("forks", int(r.forks)), ("openIssues", int(r.issues)), ("branch", text(&r.branch)), ("url", text(&r.url)),
         ("private", Data::Bool(r.private)), ("fork", Data::Bool(r.fork)), ("archived", Data::Bool(r.archived)),
-        ("starred", Data::Bool(r.starred)), ("updated", text(&r.updated)), ("pushed", Data::Integer(r.pushed)),
+        ("starred", Data::Bool(r.starred)), ("updated", text(&r.updated_ago(s.now))), ("pushed", Data::Integer(r.pushed)),
         ("topics", Data::List(r.topics.iter().map(|t| text(t)).collect())),
     ]);
     let (page, repo) = match s.page {
@@ -442,11 +442,11 @@ pub fn context(s: &App, dark: bool) -> Data {
     };
     let in_repo = |name: &str| repo.is_some_and(|r| name.eq_ignore_ascii_case(&r.full_name) || name.eq_ignore_ascii_case(&r.name));
     let issues: Vec<Data> = s.data.issues.iter().filter(|x| in_repo(&x.repo)).map(|x| map(vec![
-        ("number", int(x.number)), ("title", text(&x.title)), ("url", text(&x.url)), ("age", text(&x.age)),
+        ("number", int(x.number)), ("title", text(&x.title)), ("url", text(&x.url)), ("age", text(&x.age_ago(s.now))),
         ("comments", int(x.comments)), ("label", text(x.label.as_ref().map_or("", |l| l.0.as_str()))),
     ])).collect();
     let pulls: Vec<Data> = s.data.pulls.iter().filter(|x| in_repo(&x.repo)).map(|x| map(vec![
-        ("number", int(x.number)), ("title", text(&x.title)), ("url", text(&x.url)), ("age", text(&x.age)),
+        ("number", int(x.number)), ("title", text(&x.title)), ("url", text(&x.url)), ("age", text(&x.age_ago(s.now))),
         ("author", text(&x.author)), ("state", text(&format!("{:?}", x.state).to_lowercase())),
     ])).collect();
     map(vec![

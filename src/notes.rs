@@ -12,7 +12,14 @@ pub struct Note {
     pub name: String,
     /// "3 hours ago"
     pub updated: String,
+    pub updated_at: i64,
     pub size: u64,
+}
+
+impl Note {
+    pub fn updated_ago(&self, now: i64) -> String {
+        crate::model::ago_or(self.updated_at, &self.updated, now)
+    }
 }
 
 /// The notes list for one repository and branch.
@@ -118,7 +125,7 @@ mod local {
             let stem = f.strip_suffix(".excalidraw")?;
             let meta = e.metadata().ok()?;
             let t = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64;
-            Some((Note { name: super::decode(stem), updated: crate::model::ago(t, now), size: meta.len() }, t))
+            Some((Note { name: super::decode(stem), updated: crate::model::ago(t, now), updated_at: t, size: meta.len() }, t))
         }).collect();
         items.sort_by(|a, b| b.1.cmp(&a.1));
         Ok(items.into_iter().map(|x| x.0).collect())
@@ -160,10 +167,14 @@ pub async fn list(repo: &str, branch: &str) -> Result<Vec<Note>, String> {
         }
         let now = crate::net::now();
         let v: Value = serde_json::from_str(&r.body).map_err(|e| e.to_string())?;
-        Ok(v.as_array().cloned().unwrap_or_default().iter().map(|n| Note {
-            name: n.get("name").and_then(Value::as_str).unwrap_or("").to_owned(),
-            updated: crate::model::ago(n.get("updated").and_then(Value::as_i64).unwrap_or(now), now),
-            size: n.get("size").and_then(Value::as_u64).unwrap_or(0),
+        Ok(v.as_array().cloned().unwrap_or_default().iter().map(|n| {
+            let t = n.get("updated").and_then(Value::as_i64).unwrap_or(now);
+            Note {
+                name: n.get("name").and_then(Value::as_str).unwrap_or("").to_owned(),
+                updated: crate::model::ago(t, now),
+                updated_at: t,
+                size: n.get("size").and_then(Value::as_u64).unwrap_or(0),
+            }
         }).collect())
     }
 }

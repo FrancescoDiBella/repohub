@@ -68,6 +68,10 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
+fn plural_capped(n: usize, one: &str, many: &str) -> String {
+    format!("{} {}", crate::model::capped(n), if n == 1 { one } else { many })
+}
+
 /// The menu for the app's current state.
 pub fn menu(s: &App) -> Vec<Entry> {
     use crate::model::{Checks, PullState};
@@ -83,8 +87,8 @@ pub fn menu(s: &App) -> Vec<Entry> {
         m.push(Entry::sep());
     }
     m.extend([
-        Entry::item("go:pulls", if prs == 0 { "No open pull requests".into() } else { plural(prs, "open pull request", "open pull requests") }),
-        Entry::item("go:issues", if d.issues.is_empty() { "No open issues".into() } else { plural(d.issues.len(), "open issue", "open issues") }),
+        Entry::item("go:pulls", if prs == 0 { "No open pull requests".into() } else { plural_capped(prs, "open pull request", "open pull requests") }),
+        Entry::item("go:issues", if d.issues.is_empty() { "No open issues".into() } else { plural_capped(d.issues.len(), "open issue", "open issues") }),
         Entry::item("go:actions", if failed == 0 { "Recent runs passed".into() } else { plural(failed, "failed run", "failed runs") }),
     ]);
     let pinned = crate::pinned(s);
@@ -120,7 +124,7 @@ pub fn menu(s: &App) -> Vec<Entry> {
 /// The tooltip: the app's name and what waits for you.
 pub fn tooltip(s: &App) -> String {
     let prs = s.data.pulls.iter().filter(|p| matches!(p.state, crate::model::PullState::Open | crate::model::PullState::Draft)).count();
-    format!("{} · {}", s.cfg.title, plural(prs, "open pull request", "open pull requests"))
+    format!("{} · {}", s.cfg.title, plural_capped(prs, "open pull request", "open pull requests"))
 }
 
 /// Whether to show the widget: a desktop window (not a headless run), unless `REPOHUB_TRAY=0`.

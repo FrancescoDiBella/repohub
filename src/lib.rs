@@ -223,6 +223,8 @@ pub struct App {
     /// Updating the app itself (see `update`), whether its banner was put off, and Rune's clock
     /// at the last check.
     update: update::Update,
+    #[cfg(not(target_arch = "wasm32"))]
+    update_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     update_later: bool,
     /// The update banner shows the new version's notes (What's new).
     show_notes: bool,
@@ -387,8 +389,8 @@ impl App {
             self.refresh();
         }
         self.save_layout();
-        // A new Latest build is looked for every 6 hours.
-        if self.update_checked.is_some_and(|c| self.clock - c >= 6.0 * 3600.0) {
+        // A new Latest build is looked for every 6 hours, unless one is already waiting.
+        if self.update.available().is_none() && self.update_checked.is_some_and(|c| self.clock - c >= 6.0 * 3600.0) {
             self.check_update(false);
         }
         self.sync_tray();
@@ -398,74 +400,108 @@ impl App {
     fn check_update(&mut self, asked: bool) {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            if !self.update.can_check() {
-                return;
-            }
             let Some(h) = self.handle.clone() else { return };
-            self.update = update::Update::Checking;
+            let Some(prior) = self.update.start_check(asked) else { return };
             self.update_checked = Some(self.clock);
             net::spawn(h, || async { update::check() }, move |s: &mut App, r| {
-                s.update = match r {
-                    Ok(rel) if update::build().is_some_and(|b| update::is_newer(&rel, b, update::built_at())) => {
-                        if asked {
-                            s.notify(format!("A new version is ready ({})", rel.short()));
-                        }
-                        update::Update::Available(rel)
-                    }
-                    Ok(_) => {
-                        if asked {
-                            s.notify("RepoHub is up to date");
-                        }
-                        update::Update::Current
-                    }
-                    Err(e) => {
-                        if asked {
-                            s.notify_problem(e.clone());
-                        }
-                        update::Update::Failed(e)
-                    }
-                };
-                s.sync_tray();
+                s.apply_update_check(prior, asked, r);
             });
         }
         #[cfg(target_arch = "wasm32")]
         let _ = asked;
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn apply_update_check(&mut self, prior: Option<update::Release>, asked: bool, r: Result<update::Release, String>) {
+        let outcome = match r {
+            Ok(rel) if update::build().is_some_and(|b| update::is_newer(&rel, b, update::built_at())) => {
+                if asked {
+                    self.notify(format!("A new version is ready ({})", rel.short()));
+                }
+                Ok(Some(rel))
+            }
+            Ok(_) => {
+                if asked {
+                    self.notify("RepoHub is up to date");
+                }
+                Ok(None)
+            }
+            Err(e) => {
+                if asked {
+                    self.notify_problem(e.clone());
+                }
+                Err(e)
+            }
+        };
+        self.update.finish_check(prior, asked, outcome);
+        self.sync_tray();
+    }
+
     /// Downloads the new version, checks it, puts it in place and restarts into it.
     fn install_update(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]
         {
+            use std::sync::atomic::{AtomicBool, Ordering};
             let Some(rel) = self.update.available().cloned() else { return };
             let Some(h) = self.handle.clone() else { return };
+            let cancel = std::sync::Arc::new(AtomicBool::new(false));
+            self.update_cancel = Some(cancel.clone());
             self.update = update::Update::Downloading { release: rel.clone(), percent: 0 };
+            self.sync_tray();
             let progress = h.clone();
+            let progress_cancel = cancel.clone();
+            let done_cancel = cancel.clone();
             net::spawn(h, move || async move {
-                let bytes = update::download(&rel.url, rel.size, |pct| {
+                let bytes = update::download(&rel.url, rel.size, &cancel, |pct| {
+                    let pc = progress_cancel.clone();
                     progress.update(move |s: &mut App, _| {
-                        if let update::Update::Downloading { percent, .. } = &mut s.update {
+                        if !pc.load(Ordering::Relaxed)
+                            && let update::Update::Downloading { percent, .. } = &mut s.update
+                        {
                             *percent = pct;
                         }
                     });
                 })?;
                 let sums = rel.sums.as_deref().ok_or("This build has no checksums (SHA256SUMS), so it isn't installed. Download it from the Releases page.")?;
-                let sums = String::from_utf8_lossy(&update::download(sums, 0, |_| {})?).into_owned();
+                let sums = String::from_utf8_lossy(&update::download(sums, 0, &cancel, |_| {})?).into_owned();
                 update::verify(&bytes, &rel.asset, &sums)?;
+                if cancel.load(Ordering::Relaxed) {
+                    return Err("Download cancelled.".into());
+                }
                 let exe = std::env::current_exe().map_err(|e| e.to_string())?;
                 let target = update::install(&bytes, &rel.asset, &exe)?;
                 update::relaunch(&target)
-            }, |s: &mut App, r: Result<(), String>| match r {
-                Ok(()) => {
-                    s.update = update::Update::Installing;
-                    if let Some(h) = &s.handle {
-                        h.quit();
+            }, move |s: &mut App, r: Result<(), String>| {
+                if done_cancel.load(Ordering::Relaxed) {
+                    return;
+                }
+                s.update_cancel = None;
+                match r {
+                    Ok(()) => {
+                        s.update = update::Update::Installing;
+                        if let Some(h) = &s.handle {
+                            h.quit();
+                        }
+                    }
+                    Err(e) => {
+                        s.notify_problem(e.clone());
+                        s.update = update::Update::Failed(e);
                     }
                 }
-                Err(e) => {
-                    s.notify_problem(e.clone());
-                    s.update = update::Update::Failed(e);
-                }
+                s.sync_tray();
             });
+        }
+    }
+
+    /// Stops an in-progress update download and restores the ready update.
+    fn cancel_update(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(flag) = self.update_cancel.take() {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        if let update::Update::Downloading { release, .. } = &self.update {
+            self.update = update::Update::Available(release.clone());
+            self.sync_tray();
         }
     }
 
@@ -1091,7 +1127,7 @@ impl App {
         match done {
             github::Done::Issue(c) => {
                 let title = self.form_title.take().unwrap_or_default();
-                self.data.issues.insert(0, model::Issue { number: c.number, title, repo: repo.clone(), label: None, age: "just now".into(), comments: 0, url: c.url });
+                self.data.issues.insert(0, model::Issue { number: c.number, title, repo: repo.clone(), label: None, age: "just now".into(), created_at: self.now, comments: 0, url: c.url });
                 if let Some(r) = self.data.repos.get_mut(i) {
                     r.issues += 1;
                 }
@@ -1110,7 +1146,7 @@ impl App {
                 self.data.pulls.insert(0, model::Pull {
                     number: c.number, title, repo: repo.clone(), author,
                     state: if draft { PullState::Draft } else { PullState::Open },
-                    checks: None, age: "just now".into(), comments: 0, url: c.url,
+                    checks: None, age: "just now".into(), updated_at: self.now, comments: 0, url: c.url,
                 });
                 self.notify(format!("Opened pull request #{}", c.number));
             }
@@ -1651,6 +1687,8 @@ fn init() -> App {
         tray_menu: Vec::new(),
         palette: None,
         update: update::Update::initial(),
+        #[cfg(not(target_arch = "wasm32"))]
+        update_cancel: None,
         update_later: false,
         show_notes: false,
         update_checked: None,
@@ -1752,7 +1790,7 @@ fn kit(dark: bool) -> Kit {
     k
 }
 
-fn nav(s: &App, k: &Kit, label: &str, icon: &'static rune::Icon, page: Page, badge: Option<usize>) -> El {
+fn nav(s: &App, k: &Kit, label: &str, icon: &'static rune::Icon, page: Page, badge: Option<String>) -> El {
     let selected = s.page == page || (page == Page::Repos && matches!(s.page, Page::Repo(_)));
     // The Repositories row shows every owner again.
     let mut r = SidebarRow::new(label).icon(icon).height(32.0).selected(selected).on_select(move |s: &mut App, _| {
@@ -1761,8 +1799,8 @@ fn nav(s: &App, k: &Kit, label: &str, icon: &'static rune::Icon, page: Page, bad
         }
         s.go(page)
     });
-    if let Some(n) = badge.filter(|n| *n > 0) {
-        r = r.badge(n.to_string());
+    if let Some(b) = badge {
+        r = r.badge(b);
     }
     r.build(k).key(format!("nav-{label}"))
 }
@@ -1850,9 +1888,9 @@ fn sidebar(s: &App, k: &Kit) -> El {
         .label("Navigation")
         .header(brand)
         .header(nav(s, k, "Overview", &icons::HOME, Page::Overview, None))
-        .header(nav(s, k, "Repositories", &icons::REPO, Page::Repos, Some(s.data.repos.len())))
-        .header(nav(s, k, "Pull requests", &icons::PULL, Page::Pulls, Some(open_prs)))
-        .header(nav(s, k, "Issues", &icons::ISSUE, Page::Issues, Some(s.data.issues.len())))
+        .header(nav(s, k, "Repositories", &icons::REPO, Page::Repos, (!s.data.repos.is_empty()).then(|| s.data.repos.len().to_string())))
+        .header(nav(s, k, "Pull requests", &icons::PULL, Page::Pulls, (open_prs > 0).then(|| model::capped(open_prs))))
+        .header(nav(s, k, "Issues", &icons::ISSUE, Page::Issues, (!s.data.issues.is_empty()).then(|| model::capped(s.data.issues.len()))))
         .header(nav(s, k, "Actions", &icons::PLAY, Page::Actions, None))
         .section(SidebarSection::new("Pinned").count(pinned.len()).collapsed(!s.pinned_open)
             .on_toggle(|s: &mut App, _| s.pinned_open = !s.pinned_open).rows(pinned));
@@ -1910,6 +1948,9 @@ fn update_banner(s: &App, k: &Kit) -> Option<El> {
                 .on_press(|s: &mut App| s.update_later = true).build(k).key("update-later"))
             .child(Button::new("Install and restart").variant(ButtonVariant::Submit).control_size(ControlSize::Small)
                 .on_press(|s: &mut App| s.install_update()).build(k).key("update-install"));
+    } else if matches!(s.update, update::Update::Downloading { .. }) {
+        r = r.child(Button::new("Cancel").variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
+            .on_press(|s: &mut App| s.cancel_update()).build(k).key("update-cancel"));
     }
     match notes {
         Some(md) if s.show_notes => Some(col().w_full().gap(0.0).radius(k.radius.lg).fill(tint.alpha(0.06)).border(1.0, tint.alpha(0.45)).key("update-banner-box")
@@ -2270,3 +2311,55 @@ mod cache_tests {
         assert!(!s.details.contains_key(&("gone/repo".into(), "main".into())));
     }
 }
+
+#[cfg(test)]
+mod fix60_tests {
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn failed_background_update_check_keeps_available_and_cancel_restores_it() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = crate::init();
+        let rel = crate::update::Release {
+            sha: "abc1234def".into(),
+            published: 1_700_000_000,
+            asset: "RepoHub-linux-x86_64.tar.gz".into(),
+            url: "https://example.invalid/pkg.tar.gz".into(),
+            size: 100,
+            sums: None,
+            notes: String::new(),
+        };
+        s.update = crate::update::Update::Available(rel.clone());
+        assert_eq!(s.update.start_check(false), None);
+        s.apply_update_check(Some(rel.clone()), false, Err("offline".into()));
+        assert_eq!(s.update, crate::update::Update::Available(rel.clone()));
+
+        let flag = Arc::new(AtomicBool::new(false));
+        s.update_cancel = Some(flag.clone());
+        s.update = crate::update::Update::Downloading { release: rel.clone(), percent: 45 };
+        s.cancel_update();
+        assert!(flag.load(Ordering::Relaxed));
+        assert!(s.update_cancel.is_none());
+        assert_eq!(s.update, crate::update::Update::Available(rel));
+    }
+
+    #[test]
+    fn locally_created_items_store_timestamps_that_advance_with_now() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = crate::init();
+        s.data = crate::model::Data::sample();
+        s.now = 1_700_000_000;
+        s.form_title = Some("New bug".into());
+        s.apply_done_inner(0, crate::github::Done::Issue(crate::github::Created { number: 999, url: "https://example.invalid/999".into() }));
+        assert_eq!(s.data.issues[0].created_at, 1_700_000_000);
+        assert_eq!(s.data.issues[0].age_ago(1_700_000_300), "5 minutes ago");
+
+        s.pull_meta = Some(("New PR".into(), false));
+        s.apply_done_inner(0, crate::github::Done::Pull(crate::github::Created { number: 1000, url: "https://example.invalid/1000".into() }));
+        assert_eq!(s.data.pulls[0].updated_at, 1_700_000_000);
+        assert_eq!(s.data.pulls[0].age_ago(1_700_007_200), "2 hours ago");
+    }
+}
+

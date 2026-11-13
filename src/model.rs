@@ -27,9 +27,9 @@ pub struct Repo {
     pub stars: u32,
     pub forks: u32,
     pub issues: u32,
-    /// "2 hours ago" text, computed when loaded.
+    /// "2 hours ago" text, used when `pushed == 0` (sample data).
     pub updated: String,
-    /// When it was last pushed (Unix seconds), for ordering repositories from several owners.
+    /// When it was last pushed (Unix seconds), for ordering and formatting relative time.
     pub pushed: i64,
     pub private: bool,
     pub fork: bool,
@@ -38,6 +38,12 @@ pub struct Repo {
     pub topics: Vec<String>,
     pub url: String,
     pub starred: bool,
+}
+
+impl Repo {
+    pub fn updated_ago(&self, now: i64) -> String {
+        ago_or(self.pushed, &self.updated, now)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -49,8 +55,15 @@ pub struct Pull {
     pub state: PullState,
     pub checks: Option<Checks>,
     pub age: String,
+    pub updated_at: i64,
     pub comments: u32,
     pub url: String,
+}
+
+impl Pull {
+    pub fn age_ago(&self, now: i64) -> String {
+        ago_or(self.updated_at, &self.age, now)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -61,8 +74,15 @@ pub struct Issue {
     /// First label and its hue.
     pub label: Option<(String, f32)>,
     pub age: String,
+    pub created_at: i64,
     pub comments: u32,
     pub url: String,
+}
+
+impl Issue {
+    pub fn age_ago(&self, now: i64) -> String {
+        ago_or(self.created_at, &self.age, now)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -73,7 +93,18 @@ pub struct Run {
     pub checks: Checks,
     pub duration: String,
     pub age: String,
+    pub updated_at: i64,
     pub url: String,
+}
+
+impl Run {
+    pub fn age_ago(&self, now: i64) -> String {
+        if self.checks == Checks::Running {
+            "running".into()
+        } else {
+            ago_or(self.updated_at, &self.age, now)
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -89,6 +120,13 @@ pub struct Commit {
     pub message: String,
     pub sha: String,
     pub age: String,
+    pub committed_at: i64,
+}
+
+impl Commit {
+    pub fn age_ago(&self, now: i64) -> String {
+        ago_or(self.committed_at, &self.age, now)
+    }
 }
 
 /// What a repository's Code tab shows; loaded when the repository is opened.
@@ -191,6 +229,19 @@ pub fn ago(ts: i64, now: i64) -> String {
     }
 }
 
+/// Formats `ts` relative to `now`, or falls back to `fallback` when `ts <= 0` (sample data).
+pub fn ago_or(ts: i64, fallback: &str, now: i64) -> String {
+    if ts > 0 { ago(ts, now) } else { fallback.to_owned() }
+}
+
+/// Search listings in `github.rs` ask for at most this many items.
+pub const SEARCH_CAP: usize = 40;
+
+/// Formats a count from a capped search list ("40+" once it hits [`SEARCH_CAP`]).
+pub fn capped(n: usize) -> String {
+    if n >= SEARCH_CAP { format!("{SEARCH_CAP}+") } else { n.to_string() }
+}
+
 /// "41s", "3m 05s", "1h 02m".
 pub fn duration(secs: i64) -> String {
     let s = secs.max(0);
@@ -211,7 +262,7 @@ pub fn sample_detail(r: &Repo) -> Detail {
         files: files.iter().map(|(n, d)| (n.to_string(), *d)).collect(),
         readme: Some(format!("# {}\n\n{}\n\n## Quick start\n\n```sh\ngit clone {}.git\ncd {}\n```\n\nSee the [contributing guide](CONTRIBUTING.md) for the details.", r.name, r.description, r.url, r.name)),
         languages: vec![(r.language.clone(), 70), ("HTML".into(), 20), ("CSS".into(), 10)],
-        commit: Some(Commit { author: r.owner.clone(), message: "Add RepoHub, a Rune-based GitHub repository manager UI".into(), sha: "a6f6543".into(), age: "2 hours ago".into() }),
+        commit: Some(Commit { author: r.owner.clone(), message: "Add RepoHub, a Rune-based GitHub repository manager UI".into(), sha: "a6f6543".into(), age: "2 hours ago".into(), committed_at: 0 }),
     }
 }
 
@@ -257,7 +308,7 @@ impl Data {
             repo("university-notes", "Lecture notes in Markdown, compiled to a searchable static site.", "Markdown", 25, 6, 1, "2 months ago", false, false, "main", &["notes", "mkdocs"], false),
         ];
         let pull = |number, title: &str, repo: &str, author: &str, state, checks, age: &str, comments| Pull {
-            number, title: title.into(), repo: repo.into(), author: author.into(), state, checks: Some(checks), age: age.into(), comments,
+            number, title: title.into(), repo: repo.into(), author: author.into(), state, checks: Some(checks), age: age.into(), updated_at: 0, comments,
             url: format!("https://github.com/francescodibella/{repo}/pull/{number}"),
         };
         let pulls = vec![
@@ -268,7 +319,7 @@ impl Data {
             pull(21, "Chapter 4: latency measurements", "xr-digital-twin-thesis", "francescodibella", PullState::Merged, Checks::Passing, "3 weeks ago", 12),
         ];
         let issue = |number, title: &str, repo: &str, label: &str, hue, age: &str| Issue {
-            number, title: title.into(), repo: repo.into(), label: Some((label.into(), hue)), age: age.into(), comments: 0,
+            number, title: title.into(), repo: repo.into(), label: Some((label.into(), hue)), age: age.into(), created_at: 0, comments: 0,
             url: format!("https://github.com/francescodibella/{repo}/issues/{number}"),
         };
         let issues = vec![
@@ -278,7 +329,7 @@ impl Data {
             issue(7, "Battery drain on the CO2 sensor node", "iot-sensor-gateway", "bug", 25.0, "1 week ago"),
         ];
         let run = |workflow: &str, repo: &str, branch: &str, checks, duration: &str, age: &str| Run {
-            workflow: workflow.into(), repo: repo.into(), branch: branch.into(), checks, duration: duration.into(), age: age.into(),
+            workflow: workflow.into(), repo: repo.into(), branch: branch.into(), checks, duration: duration.into(), age: age.into(), updated_at: 0,
             url: format!("https://github.com/francescodibella/{repo}/actions"),
         };
         let runs = vec![
@@ -314,6 +365,56 @@ mod tests {
         assert_eq!(ago(t - 86400 - 10, t), "yesterday");
         assert_eq!(ago(t - 15 * 86400, t), "2 weeks ago");
         assert_eq!(duration(185), "3m 05s");
+    }
+
+    #[test]
+    fn stored_timestamps_follow_now() {
+        let t = 1_794_216_911;
+        let repo = Repo { pushed: t, updated: "frozen".into(), ..Repo::default() };
+        assert_eq!(repo.updated_ago(t + 10), "just now");
+        assert_eq!(repo.updated_ago(t + 30 * 60), "30 minutes ago");
+        assert_eq!(repo.updated_ago(t + 2 * 3600), "2 hours ago");
+
+        let issue = Issue {
+            number: 1, title: "Bug".into(), repo: "a/b".into(), label: None,
+            age: "just now".into(), created_at: t, comments: 0, url: String::new(),
+        };
+        assert_eq!(issue.age_ago(t), "just now");
+        assert_eq!(issue.age_ago(t + 5 * 60), "5 minutes ago");
+
+        let pull = Pull {
+            number: 2, title: "Fix".into(), repo: "a/b".into(), author: "u".into(),
+            state: PullState::Open, checks: None, age: "just now".into(),
+            updated_at: t, comments: 0, url: String::new(),
+        };
+        assert_eq!(pull.age_ago(t + 3600), "1 hour ago");
+
+        let run = Run {
+            workflow: "ci".into(), repo: "a/b".into(), branch: "main".into(),
+            checks: Checks::Passing, duration: "10s".into(), age: String::new(),
+            updated_at: t, url: String::new(),
+        };
+        assert_eq!(run.age_ago(t + 120), "2 minutes ago");
+        let running = Run { checks: Checks::Running, ..run };
+        assert_eq!(running.age_ago(t + 120), "running");
+
+        let commit = Commit {
+            author: "u".into(), message: "msg".into(), sha: "abc".into(),
+            age: "2 hours ago".into(), committed_at: t,
+        };
+        assert_eq!(commit.age_ago(t + 180), "3 minutes ago");
+
+        let sample = Data::sample();
+        assert_eq!(sample.repos[0].updated_ago(t), "2 hours ago");
+        assert_eq!(sample.issues[0].age_ago(t), "1 hour ago");
+    }
+
+    #[test]
+    fn capped_counts() {
+        assert_eq!(capped(0), "0");
+        assert_eq!(capped(39), "39");
+        assert_eq!(capped(40), "40+");
+        assert_eq!(capped(55), "40+");
     }
 
     #[test]

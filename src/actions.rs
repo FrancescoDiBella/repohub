@@ -219,13 +219,13 @@ pub fn issue_line(s: &App, k: &Kit, x: &Issue) -> El {
         .disabled(busy || blocked(s).is_some())
         .on_press(move |s: &mut App| s.write(&repo, github::Write::CloseIssue(number)))
         .build(k).key(format!("close-{key}"));
-    row().w_full().center_y().child(lists::issue_row(k, x).grow(1.0).shrink()).child(close.mr(12.0))
+    row().w_full().center_y().child(lists::issue_row(k, x, s.now).grow(1.0).shrink()).child(close.mr(12.0))
 }
 
 /// A pull request row with Merge (asks first) on open, non-draft pull requests.
 pub fn pull_line(s: &App, k: &Kit, p: &Pull, compact: bool) -> El {
     let key = busy_key(&p.repo, p.number);
-    let line = lists::pull_row(k, p, compact).grow(1.0).shrink();
+    let line = lists::pull_row(k, p, s.now, compact).grow(1.0).shrink();
     let files = crate::changes_page::files_button(k, p);
     if p.state != PullState::Open {
         return row().w_full().center_y().child(line).children(files.map(|f| f.mr(12.0)));
