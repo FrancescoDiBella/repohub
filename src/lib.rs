@@ -168,6 +168,9 @@ pub struct App {
     details: HashMap<(String, String), Load<Detail>>,
     /// Where the data comes from. Change it with `set_status`.
     status: Status,
+    /// Generation of the active account/session; incremented on account change or sign-out so
+    /// in-flight background loads for an older account are dropped.
+    load_gen: u64,
     handle: Option<AppHandle<App>>,
     // Notes (Excalidraw drawings), keyed by repository full name.
     branches: HashMap<String, Load<Vec<String>>>,
@@ -629,6 +632,47 @@ impl App {
         }
     }
 
+    /// Drops in-flight background work from the previous account and clears every per-account
+    /// cache and transient view state.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    fn reset_account_state(&mut self) {
+        self.load_gen = self.load_gen.wrapping_add(1);
+        self.leave_tab();
+        self.tab = RepoTab::Code;
+        self.plugin_tab = None;
+        self.pending_place = None;
+        self.save_places = true;
+        self.owner = OwnerFilter::All;
+        if self.page != Page::Settings {
+            self.go(Page::Overview);
+        }
+        self.details.clear();
+        self.branches.clear();
+        self.branch_of.clear();
+        self.local.clear();
+        self.local_dir.clear();
+        self.local_file = None;
+        self.files_from_github = false;
+        self.notes.clear();
+        self.note_name.clear();
+        self.form = None;
+        self.form_title = None;
+        self.pull_meta = None;
+        self.busy.clear();
+        self.diff.set_files(Vec::new());
+        self.diff_of = None;
+        self.diff_load = None;
+        self.changes = None;
+        self.commit_msg.clear();
+        self.git_job = None;
+        self.git_error = None;
+        self.merge_preview = None;
+        self.loaded_at = None;
+        self.last_load = None;
+        self.load_clock = None;
+        self.loaded_clock = None;
+    }
+
     /// Saves the account typed in Settings and loads its data. An empty token field keeps the
     /// saved token; `sign_out` removes both.
     #[cfg(not(target_arch = "wasm32"))]
@@ -655,16 +699,17 @@ impl App {
         self.cfg = Arc::new(cfg);
         self.acct_error = None;
         self.acct_token.clear();
-        self.details.clear();
         if sign_out {
             self.acct_user.clear();
         }
+        self.reset_account_state();
         if self.cfg.live() {
             self.data = Data::default();
             self.set_status(Status::Starting);
             self.refresh();
             self.notify("Account saved. Loading your repositories…");
         } else {
+            self.now = net::now();
             self.data = Data::sample();
             self.set_status(Status::Sample);
             self.notify("Signed out. Showing the sample data.");
@@ -788,11 +833,15 @@ impl App {
         self.set_status(Status::Loading);
         if let Some(h) = self.handle.clone() {
             let cfg = self.cfg.clone();
-            net::spawn(h, move || async move { github::load_all(&cfg).await }, |s: &mut App, r| s.apply(r));
+            let epoch = self.load_gen;
+            net::spawn(h, move || async move { github::load_all(&cfg).await }, move |s: &mut App, r| s.apply(epoch, r));
         }
     }
 
-    fn apply(&mut self, result: Result<Data, String>) {
+    fn apply(&mut self, epoch: u64, result: Result<Data, String>) {
+        if epoch != self.load_gen {
+            return;
+        }
         match result {
             Ok(d) => {
                 // Details of repositories nobody pushed to since stay: no new requests for them.
@@ -822,6 +871,12 @@ impl App {
         self.data.repos.get(i).map(|r| self.branch_of.get(&r.full_name).cloned().unwrap_or_else(|| r.branch.clone())).unwrap_or_default()
     }
 
+    fn apply_detail(&mut self, epoch: u64, key: (String, String), d: Detail) {
+        if epoch == self.load_gen {
+            self.details.insert(key, Load::Ready(d));
+        }
+    }
+
     /// Loads files, README and last commit of repository `i` at its shown branch (once).
     fn load_detail(&mut self, i: usize) {
         let Some(r) = self.data.repos.get(i) else { return };
@@ -842,8 +897,9 @@ impl App {
         if let Some(h) = self.handle.clone() {
             let cfg = self.cfg.clone();
             let at = key.1.clone();
+            let epoch = self.load_gen;
             net::spawn(h, move || async move { github::load_detail(&cfg, &full, &at).await }, move |s: &mut App, d| {
-                s.details.insert(key, Load::Ready(d));
+                s.apply_detail(epoch, key, d);
             });
         }
     }
@@ -860,8 +916,11 @@ impl App {
         if !matches!(self.local.get(&full), Some(Load::Ready(_))) {
             self.local.insert(full.clone(), Load::Loading);
         }
+        let epoch = self.load_gen;
         net::spawn(h, move || async move { local::scan(&dir) }, move |s: &mut App, r| {
-            s.local.insert(full, r.into());
+            if s.load_gen == epoch {
+                s.local.insert(full, r.into());
+            }
         });
     }
 
@@ -880,8 +939,9 @@ impl App {
         self.merge_preview = None;
         self.diff_of = Some(diffs::DiffOf::Local(full.clone()));
         self.diff_load = Some(Load::Loading);
+        let epoch = self.load_gen;
         net::spawn(h, move || async move { local::changes(&root) }, move |s: &mut App, r| {
-            if s.diff_of != Some(diffs::DiffOf::Local(full)) {
+            if s.load_gen != epoch || s.diff_of != Some(diffs::DiffOf::Local(full)) {
                 return;
             }
             match r {
@@ -905,7 +965,11 @@ impl App {
         let Some(h) = self.handle.clone() else { return };
         self.git_job = Some(job);
         self.git_error = None;
+        let epoch = self.load_gen;
         net::spawn(h, move || async move { f(&root) }, move |s: &mut App, r| {
+            if s.load_gen != epoch {
+                return;
+            }
             s.git_job = None;
             match r {
                 Ok(extra) => {
@@ -948,8 +1012,9 @@ impl App {
         self.diff_load = Some(Load::Loading);
         self.diff.set_files(Vec::new());
         self.merge_preview = None;
+        let epoch = self.load_gen;
         net::spawn(h, move || async move { local::merge_preview(&root, &branch) }, move |s: &mut App, r| {
-            if s.diff_of != Some(key) {
+            if s.load_gen != epoch || s.diff_of != Some(key) {
                 return;
             }
             match r {
@@ -973,6 +1038,19 @@ impl App {
         });
     }
 
+    fn apply_pull_diff(&mut self, epoch: u64, key: diffs::DiffOf, r: Result<Vec<github::PullFile>, String>) {
+        if epoch != self.load_gen || self.diff_of != Some(key) {
+            return;
+        }
+        match r {
+            Ok(files) => {
+                self.diff.set_files(diffs::pull_files(&files));
+                self.diff_load = Some(Load::Ready(()));
+            }
+            Err(e) => self.diff_load = Some(Load::Failed(e)),
+        }
+    }
+
     /// Shows pull request `number` of `full`'s files as a diff.
     fn open_pull_diff(&mut self, full: String, number: u32) {
         let Some(h) = self.handle.clone() else { return };
@@ -986,17 +1064,9 @@ impl App {
         }
         let cfg = self.cfg.clone();
         let key = diffs::DiffOf::Pull(full.clone(), number);
+        let epoch = self.load_gen;
         net::spawn(h, move || async move { github::load_pull_files(&cfg, &full, number).await }, move |s: &mut App, r| {
-            if s.diff_of != Some(key) {
-                return;
-            }
-            match r {
-                Ok(files) => {
-                    s.diff.set_files(diffs::pull_files(&files));
-                    s.diff_load = Some(Load::Ready(()));
-                }
-                Err(e) => s.diff_load = Some(Load::Failed(e)),
-            }
+            s.apply_pull_diff(epoch, key, r);
         });
     }
 
@@ -1017,11 +1087,26 @@ impl App {
         let Some(h) = self.handle.clone() else { return };
         self.local_file = Some((path.clone(), Load::Loading));
         let p = path.clone();
+        let epoch = self.load_gen;
         net::spawn(h, move || async move { local::read(&root, &p) }, move |s: &mut App, r| {
-            if s.local_file.as_ref().is_some_and(|(open, _)| *open == path) {
+            if s.load_gen == epoch && s.local_file.as_ref().is_some_and(|(open, _)| *open == path) {
                 s.local_file = Some((path, r.into()));
             }
         });
+    }
+
+    fn apply_branches(&mut self, epoch: u64, key: String, r: Result<Vec<String>, String>) {
+        if epoch != self.load_gen {
+            return;
+        }
+        // A pull request form opened before the list arrived starts from the first other branch.
+        if let (Ok(names), Some(f)) = (&r, self.form.as_mut())
+            && f.repo == key && f.kind == Compose::Pull && f.from == f.into
+            && let Some(other) = names.iter().find(|n| **n != f.into)
+        {
+            f.from = other.clone();
+        }
+        self.branches.insert(key, r.into());
     }
 
     /// Loads repository `i`'s branch list, once. The sample data has its default branch only.
@@ -1040,15 +1125,9 @@ impl App {
         let Some(h) = self.handle.clone() else { return };
         self.branches.insert(full.clone(), Load::Loading);
         let (cfg, default, key) = (self.cfg.clone(), r.branch.clone(), full.clone());
+        let epoch = self.load_gen;
         net::spawn(h, move || async move { github::branches(&cfg, &full, &default).await }, move |s: &mut App, r: Result<Vec<String>, String>| {
-            // A pull request form opened before the list arrived starts from the first other branch.
-            if let (Ok(names), Some(f)) = (&r, s.form.as_mut())
-                && f.repo == key && f.kind == Compose::Pull && f.from == f.into
-                && let Some(other) = names.iter().find(|n| **n != f.into)
-            {
-                f.from = other.clone();
-            }
-            s.branches.insert(key, r.into());
+            s.apply_branches(epoch, key, r);
         });
     }
 
@@ -1126,15 +1205,21 @@ impl App {
         self.pull_meta = Some((f.title.text.trim().to_owned(), f.draft));
         let Some(h) = self.handle.clone() else { return };
         let cfg = self.cfg.clone();
-        net::spawn(h, move || async move { github::run(&cfg, &repo, w).await }, move |s: &mut App, r| match r {
-            Ok(done) => {
-                s.form = None;
-                s.picker = None;
-                s.apply_done(i, done);
+        let epoch = self.load_gen;
+        net::spawn(h, move || async move { github::run(&cfg, &repo, w).await }, move |s: &mut App, r| {
+            if s.load_gen != epoch {
+                return;
             }
-            Err(e) => {
-                if let Some(f) = s.form.as_mut() {
-                    f.submit = Submit::Failed(e);
+            match r {
+                Ok(done) => {
+                    s.form = None;
+                    s.picker = None;
+                    s.apply_done(i, done);
+                }
+                Err(e) => {
+                    if let Some(f) = s.form.as_mut() {
+                        f.submit = Submit::Failed(e);
+                    }
                 }
             }
         });
@@ -1158,7 +1243,11 @@ impl App {
         let full = if i != usize::MAX { self.data.repos[i].full_name.clone() } else { repo.to_owned() };
         let Some(h) = self.handle.clone() else { return };
         let cfg = self.cfg.clone();
+        let epoch = self.load_gen;
         net::spawn(h, move || async move { github::run(&cfg, &full, w).await }, move |s: &mut App, r| {
+            if s.load_gen != epoch {
+                return;
+            }
             s.busy.remove(&key);
             match r {
                 Ok(done) => s.apply_done(i, done),
@@ -1217,7 +1306,7 @@ impl App {
         }
     }
 
-    /// Stars or unstars repository    /// Stars or unstars repository `i`: on GitHub when a token is configured, locally otherwise.
+    /// Stars or unstars repository `i`: on GitHub when a token is configured, locally otherwise.
     fn toggle_star(&mut self, i: usize) {
         let Some(r) = self.data.repos.get_mut(i) else { return };
         let on = !r.starred;
@@ -1232,7 +1321,11 @@ impl App {
         if let Some(h) = self.handle.clone() {
             let (cfg, full) = (self.cfg.clone(), r.full_name.clone());
             let key = full.clone();
+            let epoch = self.load_gen;
             net::spawn(h, move || async move { github::set_star(&cfg, &full, on).await }, move |s: &mut App, res| {
+                if s.load_gen != epoch {
+                    return;
+                }
                 if let Err(e) = res {
                     if let Some(r) = s.data.repos.iter_mut().find(|r| r.full_name == key) {
                         r.starred = !on;
@@ -1251,6 +1344,20 @@ impl App {
         Some((r.full_name.clone(), b))
     }
 
+    fn apply_notes(&mut self, epoch: u64, key: (String, String), r: Result<Vec<notes::Note>, String>) {
+        if epoch != self.load_gen {
+            return;
+        }
+        let v = self.notes.entry(key).or_default();
+        match r {
+            Ok(items) => {
+                v.items = items;
+                v.state = Refresh::Fresh;
+            }
+            Err(e) => v.state = Refresh::Failed(e),
+        }
+    }
+
     /// Loads the branch list (once) and the drawings of the selected branch.
     fn load_notes(&mut self, i: usize) {
         if !self.cfg.notes {
@@ -1259,25 +1366,19 @@ impl App {
         let Some((full, branch)) = self.notes_branch(i) else { return };
         let default = self.data.repos[i].branch.clone();
         let Some(h) = self.handle.clone() else { return };
+        let epoch = self.load_gen;
         if !self.branches.contains_key(&full) {
             self.branches.insert(full.clone(), Load::Loading);
             let (cfg, f) = (self.cfg.clone(), full.clone());
             let key = full.clone();
             net::spawn(h.clone(), move || async move { github::branches(&cfg, &f, &default).await }, move |s: &mut App, r| {
-                s.branches.insert(key, r.into());
+                s.apply_branches(epoch, key, r);
             });
         }
         let k = (full.clone(), branch.clone());
         self.notes.entry(k.clone()).or_default().state = Refresh::Loading;
         net::spawn(h, move || async move { notes::list(&full, &branch).await }, move |s: &mut App, r| {
-            let v = s.notes.entry(k).or_default();
-            match r {
-                Ok(items) => {
-                    v.items = items;
-                    v.state = Refresh::Fresh;
-                }
-                Err(e) => v.state = Refresh::Failed(e),
-            }
+            s.apply_notes(epoch, k, r);
         });
     }
 
@@ -1291,7 +1392,11 @@ impl App {
         let Some((full, branch)) = self.notes_branch(i) else { return };
         self.confirm_delete = None;
         let Some(h) = self.handle.clone() else { return };
+        let epoch = self.load_gen;
         net::spawn(h, move || async move { notes::delete(&full, &branch, &name).await }, move |s: &mut App, r| {
+            if s.load_gen != epoch {
+                return;
+            }
             match r {
                 Ok(()) => s.notify("Drawing deleted"),
                 Err(e) => s.notify_problem(e),
@@ -1311,7 +1416,11 @@ impl App {
         b.save = Save::Loading;
         self.board = Some(b);
         let Some(h) = self.handle.clone() else { return };
-        net::spawn(h, move || async move { notes::load(&full, &branch, &name).await }, |s: &mut App, r| {
+        let epoch = self.load_gen;
+        net::spawn(h, move || async move { notes::load(&full, &branch, &name).await }, move |s: &mut App, r| {
+            if s.load_gen != epoch {
+                return;
+            }
             let Some(b) = s.board.as_mut() else { return };
             let loaded = match r {
                 Ok(Some(json)) => b.load_json(&json),
@@ -1708,6 +1817,7 @@ fn init() -> App {
         merge_method: 0,
         merge_preview: None,
         status: if live || cfg!(target_arch = "wasm32") { Status::Starting } else { Status::Sample },
+        load_gen: 0,
         handle: None,
         branches: HashMap::new(),
         branch_of: HashMap::new(),
@@ -1758,7 +1868,8 @@ fn init() -> App {
     if live && std::env::var("REPOHUB_BLOCKING").is_ok_and(|v| v == "1") {
         s.set_status(Status::Loading);
         let r = pollster::block_on(github::load_all(&s.cfg));
-        s.apply(r);
+        let epoch = s.load_gen;
+        s.apply(epoch, r);
         if let Some(i) = arg("page").filter(|p| p == "repo").map(|_| 0)
             && let Some(r) = s.data.repos.get(i)
         {
@@ -2358,10 +2469,223 @@ mod cache_tests {
         s.details.insert(("gone/repo".into(), "main".into()), Load::Ready(crate::model::Detail::default()));
         let mut next = crate::model::Data::sample_at(1_700_000_000);
         next.repos[1].pushed += 60;
-        s.apply(Ok(next));
+        let epoch = s.load_gen;
+        s.apply(epoch, Ok(next));
         assert!(s.details.contains_key(&(a, "main".into())), "not pushed since: kept");
         assert!(!s.details.contains_key(&(b, "main".into())), "pushed since: loaded again");
         assert!(!s.details.contains_key(&("gone/repo".into(), "main".into())));
+    }
+}
+
+#[cfg(test)]
+mod load_gen_tests {
+    use crate::model::{Data, Detail, Profile, Repo};
+    use crate::state::{Compose, Load, OwnerFilter, Refresh, RepoTab, Status, Submit};
+
+    fn account_data(login: &str, repo_name: &str, private: bool) -> Data {
+        Data {
+            profile: Profile { login: login.into(), name: login.into(), bio: String::new() },
+            repos: vec![Repo {
+                owner: login.into(),
+                name: repo_name.into(),
+                full_name: format!("{login}/{repo_name}"),
+                language: "Rust".into(),
+                stars: 1,
+                branch: "main".into(),
+                private,
+                pushed: 1_700_000_000,
+                hue: 210.0,
+                url: format!("https://github.com/{login}/{repo_name}"),
+                ..Repo::default()
+            }],
+            ..Data::default()
+        }
+    }
+
+    fn seed_caches(s: &mut crate::App, owner: &str) {
+        let full = format!("{owner}/secret");
+        s.details.insert((full.clone(), "main".into()), Load::Ready(Detail::default()));
+        s.branches.insert(full.clone(), Load::Ready(vec!["main".into()]));
+        s.branch_of.insert(full.clone(), "dev".into());
+        s.notes.entry((full.clone(), "main".into())).or_default().state = Refresh::Fresh;
+        s.diff_of = Some(crate::diffs::DiffOf::Pull(full.clone(), 42));
+        s.diff_load = Some(Load::Ready(()));
+        s.owner = OwnerFilter::Org(owner.into());
+        s.busy.insert(format!("{full}#42"));
+        s.form = Some(crate::actions::Form {
+            repo: full,
+            kind: Compose::Issue,
+            title: rune::TextEdit::new("Draft"),
+            body: rune::TextEdit::new(""),
+            from: "main".into(),
+            into: "main".into(),
+            draft: false,
+            submit: Submit::Editing,
+        });
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn sign_out_during_load_keeps_sample_data_and_drops_stale_callbacks() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("repohub-load-gen-signout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // SAFETY: ENV_LOCK serializes tests mutating environment variables.
+        unsafe { std::env::set_var("REPOHUB_DATA_DIR", &dir) };
+
+        let mut s = crate::init();
+        let mut cfg = (*s.cfg).clone();
+        cfg.user = Some("alice".into());
+        cfg.token = Some("tok_alice".into());
+        cfg.account_locked = false;
+        s.cfg = std::sync::Arc::new(cfg);
+        s.acct_user = rune::TextEdit::new("alice");
+        s.page = crate::Page::Repo(0);
+        s.tab = RepoTab::Notes;
+        s.set_status(Status::Ready);
+        seed_caches(&mut s, "alice");
+
+        s.refresh();
+        assert_eq!(s.status, Status::Loading);
+        let old_gen = s.load_gen;
+
+        s.save_account(true);
+        assert_eq!(s.status, Status::Sample);
+        assert!(s.data.sample);
+        assert!(s.load_gen > old_gen);
+        assert_eq!(s.page, crate::Page::Overview);
+        assert_eq!(s.tab, RepoTab::Code);
+        assert_eq!(s.owner, OwnerFilter::All);
+        assert!(s.details.is_empty());
+        assert!(s.branches.is_empty());
+        assert!(s.branch_of.is_empty());
+        assert!(s.local.is_empty());
+        assert!(s.notes.is_empty());
+        assert!(s.form.is_none());
+        assert!(s.diff_of.is_none());
+        assert!(s.diff_load.is_none());
+        assert!(s.busy.is_empty());
+
+        // Deliver late results from before sign-out.
+        s.apply(old_gen, Ok(account_data("alice", "secret", true)));
+        s.apply_detail(old_gen, ("alice/secret".into(), "main".into()), Detail::default());
+        s.apply_branches(old_gen, "alice/secret".into(), Ok(vec!["main".into()]));
+        s.diff_of = Some(crate::diffs::DiffOf::Pull("alice/secret".into(), 9));
+        s.apply_pull_diff(old_gen, crate::diffs::DiffOf::Pull("alice/secret".into(), 9), Ok(crate::diffs::sample_pull_files()));
+        s.apply_notes(old_gen, ("alice/secret".into(), "main".into()), Ok(vec![crate::notes::Note { name: "arch".into(), updated_at: 1, size: 10 }]));
+
+        assert_eq!(s.status, Status::Sample);
+        assert!(s.data.sample, "late load after sign-out must not replace sample data");
+        assert!(s.data.repos.iter().all(|r| r.owner != "alice"));
+        assert!(s.details.is_empty());
+        assert!(s.branches.is_empty());
+        assert!(s.notes.is_empty());
+        assert!(s.diff.files().is_empty());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn overlapping_account_loads_apply_only_the_newer_account() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("repohub-load-gen-switch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // SAFETY: ENV_LOCK serializes tests mutating environment variables.
+        unsafe { std::env::set_var("REPOHUB_DATA_DIR", &dir) };
+
+        let mut s = crate::init();
+        let mut cfg = (*s.cfg).clone();
+        cfg.account_locked = false;
+        cfg.user = None;
+        cfg.token = None;
+        s.cfg = std::sync::Arc::new(cfg);
+
+        // Start load for account A.
+        s.acct_user = rune::TextEdit::new("alice");
+        s.acct_token = rune::TextEdit::new("tok_a");
+        s.save_account(false);
+        assert_eq!(s.status, Status::Loading);
+        let gen_a = s.load_gen;
+        seed_caches(&mut s, "alice");
+
+        // Switch to account B while A is still loading.
+        s.acct_user = rune::TextEdit::new("bob");
+        s.acct_token = rune::TextEdit::new("tok_b");
+        s.save_account(false);
+        assert_eq!(s.status, Status::Loading);
+        let gen_b = s.load_gen;
+        assert!(gen_b > gen_a);
+        assert!(s.details.is_empty() && s.branches.is_empty() && s.notes.is_empty() && s.form.is_none());
+
+        // Case 1: stale A arrives while B is loading -> dropped; then B arrives -> applied.
+        s.apply(gen_a, Ok(account_data("alice", "a-private", true)));
+        assert_eq!(s.status, Status::Loading);
+        assert!(s.data.repos.is_empty());
+
+        s.apply(gen_b, Ok(account_data("bob", "b-repo", false)));
+        assert_eq!(s.status, Status::Ready);
+        assert_eq!(s.data.profile.login, "bob");
+        assert_eq!(s.data.repos.len(), 1);
+        assert_eq!(s.data.repos[0].full_name, "bob/b-repo");
+
+        // Case 2: B already landed, then another stale callback from A arrives -> ignored.
+        s.apply(gen_a, Err("stale failure".into()));
+        s.apply(gen_a, Ok(account_data("alice", "a-private", true)));
+        assert_eq!(s.status, Status::Ready);
+        assert_eq!(s.data.profile.login, "bob");
+        assert_eq!(s.data.repos[0].full_name, "bob/b-repo");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn ui_sign_out_in_settings_drops_late_load_and_keeps_sample_data() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("repohub-load-gen-ui-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // SAFETY: ENV_LOCK serializes tests mutating environment variables.
+        unsafe { std::env::set_var("REPOHUB_DATA_DIR", &dir) };
+
+        let mut s = crate::init();
+        let mut cfg = (*s.cfg).clone();
+        cfg.user = Some("alice".into());
+        cfg.token = Some("tok_alice".into());
+        cfg.account_locked = false;
+        s.cfg = std::sync::Arc::new(cfg);
+        s.acct_user = rune::TextEdit::new("alice");
+        s.page = crate::Page::Settings;
+        s.refresh();
+        let stale_gen = s.load_gen;
+        seed_caches(&mut s, "alice");
+
+        let mut rt = rune::Runtime::new(s, crate::view, (1180.0, 2400.0), rune::Env::new(true, 1.0));
+        rt.frame(0.0);
+
+        let (x, y) = rt.find("acct-sign-out").expect("Sign out button shown when signed in");
+        rt.pointer_move(x, y);
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(0.0);
+
+        assert_eq!(rt.state.status, Status::Sample);
+        assert_eq!(rt.state.page, crate::Page::Settings);
+        assert!(rt.find("acct-sign-out").is_none(), "Sign out hidden after signing out");
+        assert!(rt.state.form.is_none());
+
+        // Deliver late response for the signed-out account while UI is running.
+        rt.update(|s, _| {
+            s.apply(stale_gen, Ok(account_data("alice", "secret-repo", true)));
+        });
+        rt.frame(0.0);
+
+        assert_eq!(rt.state.status, Status::Sample);
+        assert!(rt.state.data.sample);
+        assert!(rt.find("acct-sign-out").is_none());
+        assert!(rt.elements().iter().all(|e| e.text.as_deref() != Some("secret-repo")));
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 
