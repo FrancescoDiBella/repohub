@@ -81,15 +81,15 @@ impl Update {
         Some(prior)
     }
 
-    /// Applies the result of an update check. A failed background check keeps `Available` if one
-    /// was already ready instead of overwriting it with `Failed`.
-    pub fn finish_check(&mut self, prior: Option<Release>, asked: bool, outcome: Result<Option<Release>, String>) {
+    /// Applies the result of an update check. Keeping any previously available release instead of
+    /// overwriting it with `Failed` ensures a transient network failure never hides a ready update.
+    pub fn finish_check(&mut self, prior: Option<Release>, outcome: Result<Option<Release>, String>) {
         *self = match outcome {
             Ok(Some(rel)) => Update::Available(rel),
             Ok(None) => Update::Current,
             Err(e) => match prior {
-                Some(rel) if !asked => Update::Available(rel),
-                _ => Update::Failed(e),
+                Some(rel) => Update::Available(rel),
+                None => Update::Failed(e),
             },
         };
     }
@@ -446,19 +446,28 @@ mod tests {
     #[test]
     fn background_check_keeps_available() {
         let r = parse_release(RELEASE, "-linux-x86_64.tar.gz").unwrap();
+
+        // Background -> background: skipped while Available, Failed when Idle.
         let mut u = Update::Available(r.clone());
         assert_eq!(u.start_check(false), None, "background check skips Available");
         assert_eq!(u, Update::Available(r.clone()));
 
+        let mut u = Update::Idle;
+        let prior = u.start_check(false).unwrap();
+        assert_eq!(u, Update::Checking);
+        u.finish_check(prior, Err("offline".into()));
+        assert_eq!(u, Update::Failed("offline".into()));
+
+        // Manual -> manual: preserves Available on transient failure, or updates to newer.
         let mut u = Update::Available(r.clone());
         let prior = u.start_check(true).expect("manual check can run from Available");
         assert_eq!(u, Update::Checking);
-        u.finish_check(prior, false, Err("offline".into()));
-        assert_eq!(u, Update::Available(r.clone()), "failed background check keeps Available");
+        u.finish_check(prior, Err("offline".into()));
+        assert_eq!(u, Update::Available(r.clone()), "failed manual check preserves Available");
 
         let mut u = Update::Idle;
-        let prior = u.start_check(false).unwrap();
-        u.finish_check(prior, false, Err("offline".into()));
+        let prior = u.start_check(true).unwrap();
+        u.finish_check(prior, Err("offline".into()));
         assert_eq!(u, Update::Failed("offline".into()));
     }
 

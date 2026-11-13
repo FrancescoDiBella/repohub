@@ -224,7 +224,7 @@ pub struct App {
     /// at the last check.
     update: update::Update,
     #[cfg(not(target_arch = "wasm32"))]
-    update_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    update_cancel: Option<UpdateJob>,
     update_later: bool,
     /// The update banner shows the new version's notes (What's new).
     show_notes: bool,
@@ -235,6 +235,44 @@ pub struct App {
     #[cfg(not(target_arch = "wasm32"))]
     tray: Option<tray::Native>,
     tray_menu: Vec<tray::Entry>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
+struct UpdateJob {
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    phase: std::sync::Arc<std::sync::atomic::AtomicU8>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl UpdateJob {
+    const DOWNLOADING: u8 = 0;
+    const CANCELLED: u8 = 1;
+    const INSTALLING: u8 = 2;
+
+    fn new() -> Self {
+        use std::sync::{Arc, atomic::{AtomicBool, AtomicU8}};
+        Self { cancel: Arc::new(AtomicBool::new(false)), phase: Arc::new(AtomicU8::new(Self::DOWNLOADING)) }
+    }
+
+    fn try_cancel(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        if self.phase.compare_exchange(Self::DOWNLOADING, Self::CANCELLED, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+            self.cancel.store(true, Ordering::SeqCst);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn begin_install(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        self.phase.compare_exchange(Self::DOWNLOADING, Self::INSTALLING, Ordering::SeqCst, Ordering::SeqCst).is_ok()
+    }
+
+    fn was_cancelled(&self) -> bool {
+        self.cancel.load(std::sync::atomic::Ordering::SeqCst)
+    }
 }
 
 impl App {
@@ -433,7 +471,7 @@ impl App {
                 Err(e)
             }
         };
-        self.update.finish_check(prior, asked, outcome);
+        self.update.finish_check(prior, outcome);
         self.sync_tray();
     }
 
@@ -441,21 +479,20 @@ impl App {
     fn install_update(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            use std::sync::atomic::{AtomicBool, Ordering};
             let Some(rel) = self.update.available().cloned() else { return };
             let Some(h) = self.handle.clone() else { return };
-            let cancel = std::sync::Arc::new(AtomicBool::new(false));
-            self.update_cancel = Some(cancel.clone());
+            let job = UpdateJob::new();
+            self.update_cancel = Some(job.clone());
             self.update = update::Update::Downloading { release: rel.clone(), percent: 0 };
             self.sync_tray();
             let progress = h.clone();
-            let progress_cancel = cancel.clone();
-            let done_cancel = cancel.clone();
+            let progress_job = job.clone();
+            let done_job = job.clone();
             net::spawn(h, move || async move {
-                let bytes = update::download(&rel.url, rel.size, &cancel, |pct| {
-                    let pc = progress_cancel.clone();
+                let bytes = update::download(&rel.url, rel.size, &job.cancel, |pct| {
+                    let pj = progress_job.clone();
                     progress.update(move |s: &mut App, _| {
-                        if !pc.load(Ordering::Relaxed)
+                        if !pj.was_cancelled()
                             && let update::Update::Downloading { percent, .. } = &mut s.update
                         {
                             *percent = pct;
@@ -463,16 +500,23 @@ impl App {
                     });
                 })?;
                 let sums = rel.sums.as_deref().ok_or("This build has no checksums (SHA256SUMS), so it isn't installed. Download it from the Releases page.")?;
-                let sums = String::from_utf8_lossy(&update::download(sums, 0, &cancel, |_| {})?).into_owned();
-                update::verify(&bytes, &rel.asset, &sums)?;
-                if cancel.load(Ordering::Relaxed) {
+                let sums = String::from_utf8_lossy(&update::download(sums, 0, &job.cancel, |_| {})?).into_owned();
+                if !job.begin_install() {
                     return Err("Download cancelled.".into());
                 }
+                progress.update(move |s: &mut App, _| {
+                    s.update_cancel = None;
+                    if matches!(s.update, update::Update::Downloading { .. }) {
+                        s.update = update::Update::Installing;
+                        s.sync_tray();
+                    }
+                });
+                update::verify(&bytes, &rel.asset, &sums)?;
                 let exe = std::env::current_exe().map_err(|e| e.to_string())?;
                 let target = update::install(&bytes, &rel.asset, &exe)?;
                 update::relaunch(&target)
             }, move |s: &mut App, r: Result<(), String>| {
-                if done_cancel.load(Ordering::Relaxed) {
+                if done_job.was_cancelled() {
                     return;
                 }
                 s.update_cancel = None;
@@ -495,9 +539,16 @@ impl App {
 
     /// Stops an in-progress update download and restores the ready update.
     fn cancel_update(&mut self) {
+        if !matches!(self.update, update::Update::Downloading { .. }) {
+            return;
+        }
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(flag) = self.update_cancel.take() {
-            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(job) = self.update_cancel.take()
+            && !job.try_cancel()
+        {
+            self.update = update::Update::Installing;
+            self.sync_tray();
+            return;
         }
         if let update::Update::Downloading { release, .. } = &self.update {
             self.update = update::Update::Available(release.clone());
@@ -1127,7 +1178,7 @@ impl App {
         match done {
             github::Done::Issue(c) => {
                 let title = self.form_title.take().unwrap_or_default();
-                self.data.issues.insert(0, model::Issue { number: c.number, title, repo: repo.clone(), label: None, age: "just now".into(), created_at: self.now, comments: 0, url: c.url });
+                self.data.issues.insert(0, model::Issue { number: c.number, title, repo: repo.clone(), label: None, created_at: self.now, comments: 0, url: c.url });
                 if let Some(r) = self.data.repos.get_mut(i) {
                     r.issues += 1;
                 }
@@ -1146,7 +1197,7 @@ impl App {
                 self.data.pulls.insert(0, model::Pull {
                     number: c.number, title, repo: repo.clone(), author,
                     state: if draft { PullState::Draft } else { PullState::Open },
-                    checks: None, age: "just now".into(), updated_at: self.now, comments: 0, url: c.url,
+                    checks: None, updated_at: self.now, comments: 0, url: c.url,
                 });
                 self.notify(format!("Opened pull request #{}", c.number));
             }
@@ -1606,6 +1657,7 @@ fn init() -> App {
     let arg = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     let cfg = Arc::new(Config::load());
     let live = cfg.live();
+    let now = net::now();
     let mut s = App {
         sidebar: PaneState::new(248.0).range(180.0, 360.0),
         page: Page::Overview,
@@ -1640,7 +1692,7 @@ fn init() -> App {
         pinned_open: true,
         toast: None,
         // The web build waits for repohub-server's config.json before choosing (see `start`).
-        data: if live || cfg!(target_arch = "wasm32") { Data::default() } else { Data::sample() },
+        data: if live || cfg!(target_arch = "wasm32") { Data::default() } else { Data::sample_at(now) },
         details: HashMap::new(),
         local: HashMap::new(),
         local_dir: String::new(),
@@ -1694,7 +1746,7 @@ fn init() -> App {
         update_checked: None,
         loaded_at: None,
         last_load: None,
-        now: net::now(),
+        now,
         clock: 0.0,
         tick_at: 0.0,
         load_clock: None,
@@ -1868,6 +1920,7 @@ fn pinned(s: &App) -> Vec<usize> {
 }
 
 fn sidebar(s: &App, k: &Kit) -> El {
+    let prs_capped = s.data.pulls.len() >= model::SEARCH_CAP;
     let open_prs = s.data.pulls.iter().filter(|p| matches!(p.state, PullState::Open | PullState::Draft)).count();
     let brand = row().w_full().h(40.0).px(10.0).gap(10.0).center_y()
         .child(row().size(26.0, 26.0).radius(7.0).center().fill(k.c.text_strong)
@@ -1889,7 +1942,7 @@ fn sidebar(s: &App, k: &Kit) -> El {
         .header(brand)
         .header(nav(s, k, "Overview", &icons::HOME, Page::Overview, None))
         .header(nav(s, k, "Repositories", &icons::REPO, Page::Repos, (!s.data.repos.is_empty()).then(|| s.data.repos.len().to_string())))
-        .header(nav(s, k, "Pull requests", &icons::PULL, Page::Pulls, (open_prs > 0).then(|| model::capped(open_prs))))
+        .header(nav(s, k, "Pull requests", &icons::PULL, Page::Pulls, (open_prs > 0 || prs_capped).then(|| model::capped_if(open_prs, prs_capped))))
         .header(nav(s, k, "Issues", &icons::ISSUE, Page::Issues, (!s.data.issues.is_empty()).then(|| model::capped(s.data.issues.len()))))
         .header(nav(s, k, "Actions", &icons::PLAY, Page::Actions, None))
         .section(SidebarSection::new("Pinned").count(pinned.len()).collapsed(!s.pinned_open)
@@ -2297,13 +2350,13 @@ mod cache_tests {
     fn a_refresh_keeps_details_of_repositories_nobody_pushed_to() {
         let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut s = crate::init();
-        s.data = crate::model::Data::sample();
+        s.data = crate::model::Data::sample_at(1_700_000_000);
         let (a, b) = (s.data.repos[0].full_name.clone(), s.data.repos[1].full_name.clone());
         for full in [&a, &b] {
             s.details.insert((full.clone(), "main".into()), Load::Ready(crate::model::Detail::default()));
         }
         s.details.insert(("gone/repo".into(), "main".into()), Load::Ready(crate::model::Detail::default()));
-        let mut next = crate::model::Data::sample();
+        let mut next = crate::model::Data::sample_at(1_700_000_000);
         next.repos[1].pushed += 60;
         s.apply(Ok(next));
         assert!(s.details.contains_key(&(a, "main".into())), "not pushed since: kept");
@@ -2314,15 +2367,8 @@ mod cache_tests {
 
 #[cfg(test)]
 mod fix60_tests {
-    #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn failed_background_update_check_keeps_available_and_cancel_restores_it() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut s = crate::init();
-        let rel = crate::update::Release {
+    fn sample_release() -> crate::update::Release {
+        crate::update::Release {
             sha: "abc1234def".into(),
             published: 1_700_000_000,
             asset: "RepoHub-linux-x86_64.tar.gz".into(),
@@ -2330,27 +2376,122 @@ mod fix60_tests {
             size: 100,
             sums: None,
             notes: String::new(),
-        };
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn failed_background_update_check_keeps_available_and_cancel_restores_it() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = crate::init();
+        let rel = sample_release();
+
+        // Background check skips Available.
         s.update = crate::update::Update::Available(rel.clone());
         assert_eq!(s.update.start_check(false), None);
-        s.apply_update_check(Some(rel.clone()), false, Err("offline".into()));
         assert_eq!(s.update, crate::update::Update::Available(rel.clone()));
 
-        let flag = Arc::new(AtomicBool::new(false));
-        s.update_cancel = Some(flag.clone());
+        // Manual check from Available preserves Available on transient failure.
+        let prior = s.update.start_check(true).expect("manual check runs from Available");
+        s.apply_update_check(prior, true, Err("offline".into()));
+        assert_eq!(s.update, crate::update::Update::Available(rel.clone()));
+
+        // Cancelling during Downloading restores Available and marks job cancelled.
+        let job = crate::UpdateJob::new();
+        s.update_cancel = Some(job.clone());
         s.update = crate::update::Update::Downloading { release: rel.clone(), percent: 45 };
         s.cancel_update();
-        assert!(flag.load(Ordering::Relaxed));
+        assert!(job.was_cancelled());
+        assert!(!job.begin_install(), "cancelled job must not proceed to install");
         assert!(s.update_cancel.is_none());
-        assert_eq!(s.update, crate::update::Update::Available(rel));
+        assert_eq!(s.update, crate::update::Update::Available(rel.clone()));
+
+        // Once the worker begins Installing, cancel_update refuses to revert to Available.
+        let job2 = crate::UpdateJob::new();
+        assert!(job2.begin_install());
+        s.update_cancel = Some(job2.clone());
+        s.update = crate::update::Update::Downloading { release: rel.clone(), percent: 100 };
+        s.cancel_update();
+        assert!(!job2.was_cancelled());
+        assert_eq!(s.update, crate::update::Update::Installing);
+
+        // Once already Installing, cancel_update is a no-op.
+        s.cancel_update();
+        assert_eq!(s.update, crate::update::Update::Installing);
+    }
+
+    #[test]
+    fn ui_cancel_only_during_download_and_mixed_pr_count_capped() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = crate::init();
+        s.now = 1_700_000_000;
+        s.data = crate::model::Data::sample_at(s.now);
+        let rel = sample_release();
+        s.page = crate::Page::Settings;
+        s.update = crate::update::Update::Downloading { release: rel.clone(), percent: 40 };
+
+        let mut rt = rune::Runtime::new(s, crate::view, (1180.0, 2400.0), rune::Env::new(true, 1.0));
+        rt.frame(0.0);
+
+        // Both banner and Settings show Cancel during Downloading.
+        let (x, y) = rt.find("update-cancel").expect("banner Cancel shown while downloading");
+        assert!(rt.find("update-cancel-settings").is_some(), "settings Cancel shown while downloading");
+
+        // Clicking Cancel in the banner restores Available and hides both Cancel buttons.
+        rt.pointer_move(x, y);
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(0.0);
+        assert_eq!(rt.state.update, crate::update::Update::Available(rel));
+        assert!(rt.find("update-cancel").is_none(), "no banner Cancel when Available");
+        assert!(rt.find("update-cancel-settings").is_none(), "no settings Cancel when Available");
+
+        // Past downloading (Installing): Cancel must not be offered anywhere.
+        rt.update(|s, _| s.update = crate::update::Update::Installing);
+        rt.frame(0.0);
+        assert!(rt.find("update-cancel").is_none(), "no banner Cancel when Installing");
+        assert!(rt.find("update-cancel-settings").is_none(), "no settings Cancel when Installing");
+
+        // 40 mixed PRs (12 open + 28 merged) shows "12+" on Overview and Sidebar; 39 shows "12".
+        rt.update(|s, _| {
+            s.page = crate::Page::Overview;
+            s.data.pulls = (0..crate::model::SEARCH_CAP).map(|i| crate::model::Pull {
+                number: i as u32 + 1,
+                title: format!("PR #{i}"),
+                repo: "a/b".into(),
+                author: "u".into(),
+                state: if i < 12 { crate::model::PullState::Open } else { crate::model::PullState::Merged },
+                checks: None,
+                updated_at: s.now,
+                comments: 0,
+                url: String::new(),
+            }).collect();
+        });
+        rt.frame(0.0);
+        let has_text = |rt: &rune::Runtime<crate::App>, needle: &str| {
+            rt.elements().iter().any(|e| e.text.as_deref() == Some(needle))
+        };
+        let metric_has = |rt: &rune::Runtime<crate::App>, key: &str, needle: &str| {
+            rt.elements().iter().any(|e| e.key.as_deref() == Some(key) && e.label.as_deref().is_some_and(|l| l.starts_with(needle)))
+        };
+        assert!(metric_has(&rt, "metric-Open pull requests", "12+ "), "Overview metric shows 12+");
+        assert!(has_text(&rt, "12+"), "Sidebar badge shows 12+");
+
+        rt.update(|s, _| {
+            s.data.pulls.pop();
+        });
+        rt.frame(0.0);
+        assert!(metric_has(&rt, "metric-Open pull requests", "12 "), "Overview metric shows 12 below cap");
+        assert!(!has_text(&rt, "12+"), "12+ disappears below cap");
+        assert!(has_text(&rt, "12"), "Sidebar badge shows 12 below cap");
     }
 
     #[test]
     fn locally_created_items_store_timestamps_that_advance_with_now() {
         let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut s = crate::init();
-        s.data = crate::model::Data::sample();
         s.now = 1_700_000_000;
+        s.data = crate::model::Data::sample_at(s.now);
         s.form_title = Some("New bug".into());
         s.apply_done_inner(0, crate::github::Done::Issue(crate::github::Created { number: 999, url: "https://example.invalid/999".into() }));
         assert_eq!(s.data.issues[0].created_at, 1_700_000_000);
@@ -2362,4 +2503,5 @@ mod fix60_tests {
         assert_eq!(s.data.pulls[0].age_ago(1_700_007_200), "2 hours ago");
     }
 }
+
 

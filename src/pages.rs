@@ -37,6 +37,7 @@ pub fn open_button(k: &Kit, label: &str, url: &str, key: &str) -> El {
 
 pub fn overview(s: &App, k: &Kit) -> El {
     let d = &s.data;
+    let prs_capped = d.pulls.len() >= crate::model::SEARCH_CAP;
     let open_prs = d.pulls.iter().filter(|p| matches!(p.state, PullState::Open | PullState::Draft)).count();
     let issues = d.issues.len();
     let metric = |icon, value: String, caption, tint, page: Page| {
@@ -47,7 +48,7 @@ pub fn overview(s: &App, k: &Kit) -> El {
     let metrics = row().w_full().gap(12.0).flex_wrap()
         .child(metric(&icons::REPO, d.repos.len().to_string(), "Repositories", k.c.info.icon, Page::Repos))
         .child(metric(&icons::STAR, s.starred_count().to_string(), "Stars received", k.c.warning.icon, Page::Repos))
-        .child(metric(&icons::PULL, crate::model::capped(open_prs), "Open pull requests", k.c.success.icon, Page::Pulls))
+        .child(metric(&icons::PULL, crate::model::capped_if(open_prs, prs_capped), "Open pull requests", k.c.success.icon, Page::Pulls))
         .child(metric(&icons::ISSUE, crate::model::capped(issues), "Open issues", k.c.danger.icon, Page::Issues));
     let commits: u32 = d.activity.iter().sum();
     let activity = panel(k)

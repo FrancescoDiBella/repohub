@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use crate::config::Config;
 use crate::net::{self, Resp, Transport};
-use crate::model::{Checks, Commit, Data, Detail, Issue, Profile, Pull, PullState, Repo, Run, ago, duration, hex_hue, lang_hue, parse_iso};
+use crate::model::{Checks, Commit, Data, Detail, Issue, Profile, Pull, PullState, Repo, Run, duration, hex_hue, lang_hue, parse_iso};
 
 pub struct Gh {
     t: Transport,
@@ -88,10 +88,6 @@ impl Gh {
         }
     }
 
-    fn ago(&self, iso: &str) -> String {
-        parse_iso(iso).map(|t| ago(t, self.now)).unwrap_or_default()
-    }
-
     pub async fn profile(&self, cfg: &Config) -> Result<Profile, String> {
         let v = match (&cfg.user, self.t.has_token()) {
             (Some(u), _) => self.get(&format!("/users/{u}")).await?,
@@ -122,7 +118,6 @@ impl Gh {
             stars: n(v, "stargazers_count"),
             forks: n(v, "forks_count"),
             issues: n(v, "open_issues_count"),
-            updated: self.ago(&s(v, "pushed_at")),
             pushed: parse_iso(&s(v, "pushed_at")).unwrap_or(0),
             private: b(v, "private"),
             fork: b(v, "fork"),
@@ -209,7 +204,6 @@ impl Gh {
                 author: v.get("user").map(|u| s(u, "login")).unwrap_or_default(),
                 state,
                 checks: None,
-                age: self.ago(&updated_at),
                 updated_at: parse_iso(&updated_at).unwrap_or(0),
                 comments: n(v, "comments"),
                 url: s(v, "html_url"),
@@ -227,7 +221,6 @@ impl Gh {
                 title: s(v, "title"),
                 repo: repo_from_url(&s(v, "repository_url")),
                 label: v.get("labels").and_then(Value::as_array).and_then(|l| l.first()).map(|l| (s(l, "name"), hex_hue(&s(l, "color")))),
-                age: self.ago(&created_at),
                 created_at: parse_iso(&created_at).unwrap_or(0),
                 comments: n(v, "comments"),
                 url: s(v, "html_url"),
@@ -254,7 +247,6 @@ impl Gh {
                     (Some(a), _) => duration(self.now - a),
                     _ => String::new(),
                 },
-                age: if checks == Checks::Running { "running".into() } else { self.ago(&s(r, "updated_at")) },
                 updated_at: end.unwrap_or(0),
                 checks,
                 url: s(r, "html_url"),
@@ -298,7 +290,6 @@ impl Gh {
                 author: c.get("author").filter(|a| !a.is_null()).map(|a| s(a, "login")).unwrap_or_else(|| s(&author, "name")),
                 message: s(&commit, "message").lines().next().unwrap_or("").to_owned(),
                 sha: s(c, "sha").chars().take(7).collect(),
-                age: self.ago(&date),
                 committed_at: parse_iso(&date).unwrap_or(0),
             });
         }

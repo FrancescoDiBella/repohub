@@ -68,14 +68,16 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
-fn plural_capped(n: usize, one: &str, many: &str) -> String {
-    format!("{} {}", crate::model::capped(n), if n == 1 { one } else { many })
+fn plural_capped(n: usize, full: bool, one: &str, many: &str) -> String {
+    format!("{} {}", crate::model::capped_if(n, full), if n == 1 && !full { one } else { many })
 }
 
 /// The menu for the app's current state.
 pub fn menu(s: &App) -> Vec<Entry> {
-    use crate::model::{Checks, PullState};
+    use crate::model::{Checks, PullState, SEARCH_CAP};
     let d = &s.data;
+    let prs_capped = d.pulls.len() >= SEARCH_CAP;
+    let issues_capped = d.issues.len() >= SEARCH_CAP;
     let prs = d.pulls.iter().filter(|p| matches!(p.state, PullState::Open | PullState::Draft)).count();
     let failed = d.runs.iter().filter(|r| r.checks == Checks::Failing).count();
     let mut m = vec![
@@ -87,8 +89,8 @@ pub fn menu(s: &App) -> Vec<Entry> {
         m.push(Entry::sep());
     }
     m.extend([
-        Entry::item("go:pulls", if prs == 0 { "No open pull requests".into() } else { plural_capped(prs, "open pull request", "open pull requests") }),
-        Entry::item("go:issues", if d.issues.is_empty() { "No open issues".into() } else { plural_capped(d.issues.len(), "open issue", "open issues") }),
+        Entry::item("go:pulls", if prs == 0 && !prs_capped { "No open pull requests".into() } else { plural_capped(prs, prs_capped, "open pull request", "open pull requests") }),
+        Entry::item("go:issues", if d.issues.is_empty() { "No open issues".into() } else { plural_capped(d.issues.len().min(SEARCH_CAP), issues_capped, "open issue", "open issues") }),
         Entry::item("go:actions", if failed == 0 { "Recent runs passed".into() } else { plural(failed, "failed run", "failed runs") }),
     ]);
     let pinned = crate::pinned(s);
@@ -123,8 +125,9 @@ pub fn menu(s: &App) -> Vec<Entry> {
 
 /// The tooltip: the app's name and what waits for you.
 pub fn tooltip(s: &App) -> String {
+    let prs_capped = s.data.pulls.len() >= crate::model::SEARCH_CAP;
     let prs = s.data.pulls.iter().filter(|p| matches!(p.state, crate::model::PullState::Open | crate::model::PullState::Draft)).count();
-    format!("{} · {}", s.cfg.title, plural_capped(prs, "open pull request", "open pull requests"))
+    format!("{} · {}", s.cfg.title, plural_capped(prs, prs_capped, "open pull request", "open pull requests"))
 }
 
 /// Whether to show the widget: a desktop window (not a headless run), unless `REPOHUB_TRAY=0`.
@@ -278,5 +281,31 @@ mod tests {
         assert_eq!(parse("nope"), None);
         assert_eq!(COLOR.len(), 32 * 32 * 4);
         assert_eq!(TEMPLATE.len(), 32 * 32 * 4);
+    }
+
+    #[test]
+    fn mixed_pulls_at_search_cap_show_plus_on_open_count() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = crate::init();
+        s.data = crate::model::Data::sample_at(1_700_000_000);
+        s.data.pulls = (0..crate::model::SEARCH_CAP).map(|i| crate::model::Pull {
+            number: i as u32 + 1,
+            title: format!("PR #{i}"),
+            repo: "a/b".into(),
+            author: "u".into(),
+            state: if i < 12 { crate::model::PullState::Open } else { crate::model::PullState::Merged },
+            checks: None,
+            updated_at: 1_700_000_000,
+            comments: 0,
+            url: String::new(),
+        }).collect();
+        let m = menu(&s);
+        assert!(m.iter().any(|e| e.id == "go:pulls" && e.label == "12+ open pull requests"), "{m:#?}");
+        assert!(tooltip(&s).ends_with("12+ open pull requests"));
+
+        s.data.pulls.pop();
+        let m = menu(&s);
+        assert!(m.iter().any(|e| e.id == "go:pulls" && e.label == "12 open pull requests"), "{m:#?}");
+        assert!(tooltip(&s).ends_with("12 open pull requests"));
     }
 }
