@@ -68,6 +68,13 @@ The sections are **Added**, **Changed** and **Fixed**.
 - A new look, with a more readable layout.
 
 ### Fixed
+- In-app updates can be cancelled while downloading, stalled downloads time out, and ready updates
+  stay available if a background check fails (with checks paused until you install or dismiss).
+- Relative times ("… ago") across repositories, pull requests, issues, runs, commits, and notes
+  stay up to date with the clock instead of freezing at the last refresh.
+- Pull request and issue counts match across Overview, the sidebar, and the tray menu, showing `+`
+  (such as `40+` or `12+`) when GitHub's 40-item search limit is reached; Repository Settings now
+  notes that archiving or deleting happens on GitHub.
 - Linux builds no longer depend on Ubuntu's package mirrors, so they keep working when the
   mirrors are down.
 - Switching the theme works again.

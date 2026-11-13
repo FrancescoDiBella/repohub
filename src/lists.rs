@@ -17,9 +17,9 @@ fn link(e: El, url: &str) -> El {
     e.on_press_tx(move |_: &mut App, tx| { let _ = tx.open_url(&url); })
 }
 
-pub fn pull_row(k: &Kit, p: &Pull, compact: bool) -> El {
+pub fn pull_row(k: &Kit, p: &Pull, now: i64, compact: bool) -> El {
     let mut meta = row().gap(10.0).center_y().flex_wrap()
-        .child(text(format!("#{} · {} · {}", p.number, p.repo, p.age)).font(k.ty.text_small).color(k.c.text_muted));
+        .child(text(format!("#{} · {} · {}", p.number, p.repo, p.age_ago(now))).font(k.ty.text_small).color(k.c.text_muted));
     match p.state {
         PullState::Draft => meta = meta.child(ui::pill(k, "Draft", k.c.text_faint)),
         PullState::Closed => meta = meta.child(ui::pill(k, "Closed", k.c.danger.icon)),
@@ -39,7 +39,7 @@ pub fn pull_row(k: &Kit, p: &Pull, compact: bool) -> El {
     link(r.key(format!("pr-{}-{}", p.repo, p.number)), &p.url)
 }
 
-pub fn issue_row(k: &Kit, i: &Issue) -> El {
+pub fn issue_row(k: &Kit, i: &Issue, now: i64) -> El {
     let mut title = row().gap(8.0).center_y().flex_wrap().child(text(i.title.clone()).font(k.ty.ui_medium).color(k.c.text_base));
     if let Some((name, hue)) = &i.label {
         title = title.child(ui::label_chip(k, name, *hue));
@@ -48,18 +48,18 @@ pub fn issue_row(k: &Kit, i: &Issue) -> El {
         .child(ui::ico(&icons::ISSUE, 16.0, k.c.success.icon))
         .child(col().grow(1.0).shrink().gap(3.0)
             .child(title)
-            .child(text(format!("#{} · {} · opened {}", i.number, i.repo, i.age)).font(k.ty.text_small).color(k.c.text_muted)))
+            .child(text(format!("#{} · {} · opened {}", i.number, i.repo, i.age_ago(now))).font(k.ty.text_small).color(k.c.text_muted)))
         .child(ui::stat(k, &icons::COMMENT, i.comments.to_string()));
     link(r.key(format!("issue-{}-{}", i.repo, i.number)), &i.url)
 }
 
-pub fn run_row(k: &Kit, r: &Run, compact: bool) -> El {
+pub fn run_row(k: &Kit, r: &Run, now: i64, compact: bool) -> El {
     let state = match r.checks {
         Checks::Passing => ("Succeeded", k.c.success.icon),
         Checks::Failing => ("Failed", k.c.danger.icon),
         Checks::Running => ("Running", k.c.warning.icon),
     };
-    let when = text(format!("{} · {}", r.duration, r.age)).font(k.ty.text_small).color(k.c.text_faint);
+    let when = text(format!("{} · {}", r.duration, r.age_ago(now))).font(k.ty.text_small).color(k.c.text_faint);
     let mut meta = row().gap(10.0).center_y().flex_wrap()
         .child(text(r.repo.clone()).font(k.ty.text_small).color(k.c.text_muted))
         .child(ui::stat(k, &icons::BRANCH, r.branch.clone()));
@@ -95,7 +95,13 @@ pub const PR_LABELS: [&str; 4] = ["Open", "Drafts", "Merged", "Closed"];
 
 pub fn pulls(s: &App, k: &Kit) -> El {
     let rows: Vec<El> = s.data.pulls.iter().filter(|p| p.state == s.pr_filter).map(|p| crate::actions::pull_line(s, k, p, s.compact)).collect();
-    let sub = if s.data.sample { "Pull requests you opened or that wait for your review." } else { "Pull requests you're involved in (author, reviewer, assignee or mentioned). Click one to open it on GitHub." };
+    let sub = if s.data.sample {
+        "Pull requests you opened or that wait for your review."
+    } else if s.data.pulls.len() >= crate::model::SEARCH_CAP {
+        "The 40 most recently updated pull requests you're involved in (author, reviewer, assignee or mentioned). Click one to open it on GitHub."
+    } else {
+        "Pull requests you're involved in (author, reviewer, assignee or mentioned). Click one to open it on GitHub."
+    };
     col().w_full().gap(16.0)
         .child(heading(k, "Pull requests", sub, None))
         .children(crate::changes_page::pull_panel(s, k))
@@ -105,8 +111,13 @@ pub fn pulls(s: &App, k: &Kit) -> El {
 }
 
 pub fn issues(s: &App, k: &Kit) -> El {
+    let sub = if s.data.issues.len() >= crate::model::SEARCH_CAP {
+        "The 40 most recently updated open issues in your repositories. Click one to open it on GitHub."
+    } else {
+        "Open issues in your repositories. Click one to open it on GitHub."
+    };
     col().w_full().gap(16.0)
-        .child(heading(k, "Issues", "Open issues in your repositories. Click one to open it on GitHub.", None))
+        .child(heading(k, "Issues", sub, None))
         .child(listing(k, s.data.issues.iter().map(|i| crate::actions::issue_line(s, k, i)).collect(), "No open issues"))
 }
 
@@ -115,7 +126,7 @@ pub fn actions(s: &App, k: &Kit) -> El {
     let sub = format!("{ok} of {} recent runs succeeded · {} most recently pushed repositories", s.data.runs.len(), s.cfg.activity_repos);
     col().w_full().gap(16.0)
         .child(heading(k, "Actions", &sub, None))
-        .child(listing(k, s.data.runs.iter().map(|r| run_row(k, r, s.compact)).collect(), "No recent runs"))
+        .child(listing(k, s.data.runs.iter().map(|r| run_row(k, r, s.now, s.compact)).collect(), "No recent runs"))
 }
 
 fn info(k: &Kit, label: &str, value: String) -> El {
@@ -317,6 +328,10 @@ fn version_panel(s: &App, k: &Kit) -> El {
         buttons = buttons.child(Button::new("Install and restart").variant(ButtonVariant::Submit).control_size(ControlSize::Small)
             .on_press(|s: &mut App| s.install_update()).build(k).key("update-install-settings"));
     }
+    if matches!(s.update, Update::Downloading { .. }) {
+        buttons = buttons.child(Button::new("Cancel").variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
+            .on_press(|s: &mut App| s.cancel_update()).build(k).key("update-cancel-settings"));
+    }
     panel(k).child(panel_head(k, "App version", Some(buttons))).child(rule(k))
         .child(info(k, "This build", build))
         .child(rule(k))
@@ -346,14 +361,13 @@ pub fn repo_settings(s: &App, k: &Kit, r: &Repo) -> El {
         .child(row().w_full().px(16.0).py(12.0).gap(12.0).center_y().justify_between()
             .child(col().grow(1.0).shrink().gap(2.0)
                 .child(text("Archive or delete the repository").font(k.ty.ui_medium).color(k.c.text_base))
-                .child(text("RepoHub never changes repositories: do this on GitHub.").font(k.ty.text_small).color(k.c.text_muted).wrap()))
+                .child(text("RepoHub doesn't archive or delete repositories: do this on GitHub.").font(k.ty.text_small).color(k.c.text_muted).wrap()))
             .child(open_button(k, "Settings on GitHub", &settings_url, "gh-settings")));
     let general = panel(k).child(panel_head(k, &format!("General · {}", r.name), None))
         .child(rule(k)).child(info(k, "Full name", r.full_name.clone()))
         .child(rule(k)).child(info(k, "Visibility", if r.private { "private".into() } else { "public".into() }))
         .child(rule(k)).child(info(k, "Default branch", r.branch.clone()))
-        .child(rule(k)).child(info(k, "Last push", r.updated.clone()));
-    let _ = s;
+        .child(rule(k)).child(info(k, "Last push", r.updated_ago(s.now)));
     col().w_full().gap(16.0).child(general).child(danger.child(row().h(0.0)))
         .child(Button::new("Open the repository on GitHub").variant(ButtonVariant::Ghost).icon(&icons::EXTERNAL).control_size(ControlSize::Small)
             .on_press_tx({ let u = r.url.clone(); move |_: &mut App, tx| { let _ = tx.open_url(&u); } }).build(k).self_start())

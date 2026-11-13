@@ -120,7 +120,7 @@ fn note_row(s: &App, k: &Kit, i: usize, full: &str, branch: &str, n: &notes::Not
         .child(ui::ico(&icons::PEN, 16.0, k.c.icon_muted))
         .child(col().grow(1.0).shrink().gap(2.0)
             .child(text(n.name.clone()).font(k.ty.ui_medium).color(k.c.text_base))
-            .child(text(format!("Edited {} · {}", n.updated, notes::size(n.size))).font(k.ty.text_small).color(k.c.text_muted)))
+            .child(text(format!("Edited {} · {}", n.updated_ago(s.now), notes::size(n.size))).font(k.ty.text_small).color(k.c.text_muted)))
         .child(open)
         .child(delete)
 }

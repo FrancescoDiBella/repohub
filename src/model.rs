@@ -27,9 +27,7 @@ pub struct Repo {
     pub stars: u32,
     pub forks: u32,
     pub issues: u32,
-    /// "2 hours ago" text, computed when loaded.
-    pub updated: String,
-    /// When it was last pushed (Unix seconds), for ordering repositories from several owners.
+    /// When it was last pushed (Unix seconds), for ordering and formatting relative time.
     pub pushed: i64,
     pub private: bool,
     pub fork: bool,
@@ -40,6 +38,12 @@ pub struct Repo {
     pub starred: bool,
 }
 
+impl Repo {
+    pub fn updated_ago(&self, now: i64) -> String {
+        fmt_ago(self.pushed, now)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Pull {
     pub number: u32,
@@ -48,9 +52,15 @@ pub struct Pull {
     pub author: String,
     pub state: PullState,
     pub checks: Option<Checks>,
-    pub age: String,
+    pub updated_at: i64,
     pub comments: u32,
     pub url: String,
+}
+
+impl Pull {
+    pub fn age_ago(&self, now: i64) -> String {
+        fmt_ago(self.updated_at, now)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -60,9 +70,15 @@ pub struct Issue {
     pub repo: String,
     /// First label and its hue.
     pub label: Option<(String, f32)>,
-    pub age: String,
+    pub created_at: i64,
     pub comments: u32,
     pub url: String,
+}
+
+impl Issue {
+    pub fn age_ago(&self, now: i64) -> String {
+        fmt_ago(self.created_at, now)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -72,8 +88,18 @@ pub struct Run {
     pub branch: String,
     pub checks: Checks,
     pub duration: String,
-    pub age: String,
+    pub updated_at: i64,
     pub url: String,
+}
+
+impl Run {
+    pub fn age_ago(&self, now: i64) -> String {
+        if self.checks == Checks::Running {
+            "running".into()
+        } else {
+            fmt_ago(self.updated_at, now)
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -88,7 +114,13 @@ pub struct Commit {
     pub author: String,
     pub message: String,
     pub sha: String,
-    pub age: String,
+    pub committed_at: i64,
+}
+
+impl Commit {
+    pub fn age_ago(&self, now: i64) -> String {
+        fmt_ago(self.committed_at, now)
+    }
 }
 
 /// What a repository's Code tab shows; loaded when the repository is opened.
@@ -191,6 +223,24 @@ pub fn ago(ts: i64, now: i64) -> String {
     }
 }
 
+/// Formats `ts` relative to `now`, or returns empty when `ts <= 0`.
+pub fn fmt_ago(ts: i64, now: i64) -> String {
+    if ts > 0 { ago(ts, now) } else { String::new() }
+}
+
+/// Search listings in `github.rs` ask for at most this many items.
+pub const SEARCH_CAP: usize = 40;
+
+/// Formats a count with `+` when the underlying search result hit [`SEARCH_CAP`].
+pub fn capped_if(n: usize, full: bool) -> String {
+    if full { format!("{n}+") } else { n.to_string() }
+}
+
+/// Formats a count from a search list that is itself filtered to what it counts ("40+" at [`SEARCH_CAP`]).
+pub fn capped(n: usize) -> String {
+    capped_if(n.min(SEARCH_CAP), n >= SEARCH_CAP)
+}
+
 /// "41s", "3m 05s", "1h 02m".
 pub fn duration(secs: i64) -> String {
     let s = secs.max(0);
@@ -211,7 +261,7 @@ pub fn sample_detail(r: &Repo) -> Detail {
         files: files.iter().map(|(n, d)| (n.to_string(), *d)).collect(),
         readme: Some(format!("# {}\n\n{}\n\n## Quick start\n\n```sh\ngit clone {}.git\ncd {}\n```\n\nSee the [contributing guide](CONTRIBUTING.md) for the details.", r.name, r.description, r.url, r.name)),
         languages: vec![(r.language.clone(), 70), ("HTML".into(), 20), ("CSS".into(), 10)],
-        commit: Some(Commit { author: r.owner.clone(), message: "Add RepoHub, a Rune-based GitHub repository manager UI".into(), sha: "a6f6543".into(), age: "2 hours ago".into() }),
+        commit: Some(Commit { author: r.owner.clone(), message: "Add RepoHub, a Rune-based GitHub repository manager UI".into(), sha: "a6f6543".into(), committed_at: r.pushed }),
     }
 }
 
@@ -223,7 +273,14 @@ impl Data {
 
     /// Built-in sample data, shown when no GitHub configuration is present. Everything is made up.
     pub fn sample() -> Data {
-        let repo_of = |owner: &str, name: &str, desc: &str, lang: &str, stars, forks, issues, updated: &str, private, fork, branch: &str, topics: &[&str], starred| Repo {
+        Self::sample_at(crate::net::now())
+    }
+
+    /// Built-in sample data anchored to `now` (Unix seconds).
+    pub fn sample_at(now: i64) -> Data {
+        const HOUR: i64 = 3600;
+        const DAY: i64 = 86400;
+        let repo_of = |owner: &str, name: &str, desc: &str, lang: &str, stars, forks, issues, age_secs: i64, private, fork, branch: &str, topics: &[&str], starred| Repo {
             full_name: format!("{owner}/{name}"),
             owner: owner.into(),
             name: name.into(),
@@ -233,8 +290,7 @@ impl Data {
             stars,
             forks,
             issues,
-            updated: updated.into(),
-            pushed: 0,
+            pushed: now - age_secs,
             private,
             fork,
             archived: false,
@@ -243,50 +299,50 @@ impl Data {
             url: format!("https://github.com/{owner}/{name}"),
             starred,
         };
-        let repo = |name: &str, desc: &str, lang: &str, stars, forks, issues, updated: &str, private, fork, branch: &str, topics: &[&str], starred|
-            repo_of("francescodibella", name, desc, lang, stars, forks, issues, updated, private, fork, branch, topics, starred);
+        let repo = |name: &str, desc: &str, lang: &str, stars, forks, issues, age_secs: i64, private, fork, branch: &str, topics: &[&str], starred|
+            repo_of("francescodibella", name, desc, lang, stars, forks, issues, age_secs, private, fork, branch, topics, starred);
         let repos = vec![
-            repo("francescodibella.github.io", "Personal site and playground: shell UI, widgets and a procedural Three.js bunny.", "JavaScript", 12, 2, 3, "2 hours ago", false, false, "main", &["github-pages", "threejs", "portfolio"], false),
-            repo("ngsi-ld-xr-contexts", "JSON-LD contexts for AR, VR and MR entities in NGSI-LD smart data models.", "JSON-LD", 41, 9, 5, "yesterday", false, false, "main", &["fiware", "ngsi-ld", "xr"], true),
-            repo("xr-digital-twin-thesis", "Master thesis: a digital twin of an industrial cell streamed to a WebXR headset.", "TypeScript", 7, 0, 11, "3 days ago", true, false, "dev", &["webxr", "digital-twin"], false),
-            repo_of("xr-lab", "spatial-anchors", "Shared spatial anchors for multi-user WebXR sessions (organization repository).", "TypeScript", 64, 12, 8, "4 days ago", false, false, "main", &["webxr", "anchors"], false),
-            repo("dotfiles", "Shell, editor and terminal configuration, bootstrapped with one script.", "Shell", 3, 1, 0, "last week", false, false, "main", &["zsh", "neovim"], false),
-            repo("rune", "A native GPU-rendered Rust UI framework for macOS, Windows, Linux and the web.", "Rust", 0, 0, 0, "2 weeks ago", false, true, "dev", &["rust", "gpu", "ui"], false),
-            repo_of("xr-lab", "lab-handbook", "How the lab works: onboarding, hardware booking, publishing (organization repository).", "Markdown", 5, 3, 2, "3 weeks ago", true, false, "main", &["docs"], false),
-            repo("iot-sensor-gateway", "MQTT to NGSI-LD bridge for low-power environmental sensors.", "Python", 18, 4, 2, "last month", true, false, "main", &["mqtt", "iot", "fiware"], false),
-            repo("university-notes", "Lecture notes in Markdown, compiled to a searchable static site.", "Markdown", 25, 6, 1, "2 months ago", false, false, "main", &["notes", "mkdocs"], false),
+            repo("francescodibella.github.io", "Personal site and playground: shell UI, widgets and a procedural Three.js bunny.", "JavaScript", 12, 2, 3, 2 * HOUR, false, false, "main", &["github-pages", "threejs", "portfolio"], false),
+            repo("ngsi-ld-xr-contexts", "JSON-LD contexts for AR, VR and MR entities in NGSI-LD smart data models.", "JSON-LD", 41, 9, 5, DAY + 60, false, false, "main", &["fiware", "ngsi-ld", "xr"], true),
+            repo("xr-digital-twin-thesis", "Master thesis: a digital twin of an industrial cell streamed to a WebXR headset.", "TypeScript", 7, 0, 11, 3 * DAY, true, false, "dev", &["webxr", "digital-twin"], false),
+            repo_of("xr-lab", "spatial-anchors", "Shared spatial anchors for multi-user WebXR sessions (organization repository).", "TypeScript", 64, 12, 8, 4 * DAY, false, false, "main", &["webxr", "anchors"], false),
+            repo("dotfiles", "Shell, editor and terminal configuration, bootstrapped with one script.", "Shell", 3, 1, 0, 7 * DAY, false, false, "main", &["zsh", "neovim"], false),
+            repo("rune", "A native GPU-rendered Rust UI framework for macOS, Windows, Linux and the web.", "Rust", 0, 0, 0, 14 * DAY, false, true, "dev", &["rust", "gpu", "ui"], false),
+            repo_of("xr-lab", "lab-handbook", "How the lab works: onboarding, hardware booking, publishing (organization repository).", "Markdown", 5, 3, 2, 21 * DAY, true, false, "main", &["docs"], false),
+            repo("iot-sensor-gateway", "MQTT to NGSI-LD bridge for low-power environmental sensors.", "Python", 18, 4, 2, 30 * DAY, true, false, "main", &["mqtt", "iot", "fiware"], false),
+            repo("university-notes", "Lecture notes in Markdown, compiled to a searchable static site.", "Markdown", 25, 6, 1, 60 * DAY, false, false, "main", &["notes", "mkdocs"], false),
         ];
-        let pull = |number, title: &str, repo: &str, author: &str, state, checks, age: &str, comments| Pull {
-            number, title: title.into(), repo: repo.into(), author: author.into(), state, checks: Some(checks), age: age.into(), comments,
+        let pull = |number, title: &str, repo: &str, author: &str, state, checks, age_secs: i64, comments| Pull {
+            number, title: title.into(), repo: repo.into(), author: author.into(), state, checks: Some(checks), updated_at: now - age_secs, comments,
             url: format!("https://github.com/francescodibella/{repo}/pull/{number}"),
         };
         let pulls = vec![
-            pull(14, "Add procedural Three.js Blue Bunny model", "francescodibella.github.io", "claude", PullState::Open, Checks::Passing, "2 hours ago", 3),
-            pull(9, "Mixed reality context v0.2: anchors and spatial meshes", "ngsi-ld-xr-contexts", "francescodibella", PullState::Draft, Checks::Running, "yesterday", 1),
-            pull(8, "Fix @vocab for VR entity relationships", "ngsi-ld-xr-contexts", "contributor42", PullState::Open, Checks::Failing, "4 days ago", 6),
-            pull(3, "Repo manager example on the web target", "rune", "francescodibella", PullState::Open, Checks::Passing, "2 weeks ago", 0),
-            pull(21, "Chapter 4: latency measurements", "xr-digital-twin-thesis", "francescodibella", PullState::Merged, Checks::Passing, "3 weeks ago", 12),
+            pull(14, "Add procedural Three.js Blue Bunny model", "francescodibella.github.io", "claude", PullState::Open, Checks::Passing, 2 * HOUR, 3),
+            pull(9, "Mixed reality context v0.2: anchors and spatial meshes", "ngsi-ld-xr-contexts", "francescodibella", PullState::Draft, Checks::Running, DAY + 60, 1),
+            pull(8, "Fix @vocab for VR entity relationships", "ngsi-ld-xr-contexts", "contributor42", PullState::Open, Checks::Failing, 4 * DAY, 6),
+            pull(3, "Repo manager example on the web target", "rune", "francescodibella", PullState::Open, Checks::Passing, 14 * DAY, 0),
+            pull(21, "Chapter 4: latency measurements", "xr-digital-twin-thesis", "francescodibella", PullState::Merged, Checks::Passing, 21 * DAY, 12),
         ];
-        let issue = |number, title: &str, repo: &str, label: &str, hue, age: &str| Issue {
-            number, title: title.into(), repo: repo.into(), label: Some((label.into(), hue)), age: age.into(), comments: 0,
+        let issue = |number, title: &str, repo: &str, label: &str, hue, age_secs: i64| Issue {
+            number, title: title.into(), repo: repo.into(), label: Some((label.into(), hue)), created_at: now - age_secs, comments: 0,
             url: format!("https://github.com/francescodibella/{repo}/issues/{number}"),
         };
         let issues = vec![
-            issue(31, "Bunny poncho clips through lowered arms", "francescodibella.github.io", "bug", 25.0, "1 hour ago"),
-            issue(12, "Document the MR context with examples", "ngsi-ld-xr-contexts", "docs", 240.0, "2 days ago"),
-            issue(44, "Measure headset frame pacing over Wi-Fi 6", "xr-digital-twin-thesis", "research", 300.0, "5 days ago"),
-            issue(7, "Battery drain on the CO2 sensor node", "iot-sensor-gateway", "bug", 25.0, "1 week ago"),
+            issue(31, "Bunny poncho clips through lowered arms", "francescodibella.github.io", "bug", 25.0, HOUR),
+            issue(12, "Document the MR context with examples", "ngsi-ld-xr-contexts", "docs", 240.0, 2 * DAY),
+            issue(44, "Measure headset frame pacing over Wi-Fi 6", "xr-digital-twin-thesis", "research", 300.0, 5 * DAY),
+            issue(7, "Battery drain on the CO2 sensor node", "iot-sensor-gateway", "bug", 25.0, 7 * DAY),
         ];
-        let run = |workflow: &str, repo: &str, branch: &str, checks, duration: &str, age: &str| Run {
-            workflow: workflow.into(), repo: repo.into(), branch: branch.into(), checks, duration: duration.into(), age: age.into(),
+        let run = |workflow: &str, repo: &str, branch: &str, checks, duration: &str, age_secs: i64| Run {
+            workflow: workflow.into(), repo: repo.into(), branch: branch.into(), checks, duration: duration.into(), updated_at: now - age_secs,
             url: format!("https://github.com/francescodibella/{repo}/actions"),
         };
         let runs = vec![
-            run("pages-build-deployment", "francescodibella.github.io", "main", Checks::Passing, "41s", "2 hours ago"),
-            run("validate-jsonld", "ngsi-ld-xr-contexts", "mr-v0.2", Checks::Running, "1m 12s", "running"),
-            run("validate-jsonld", "ngsi-ld-xr-contexts", "fix-vocab", Checks::Failing, "38s", "4 days ago"),
-            run("latex-build", "xr-digital-twin-thesis", "dev", Checks::Passing, "3m 05s", "3 days ago"),
-            run("pytest", "iot-sensor-gateway", "main", Checks::Passing, "57s", "last month"),
+            run("pages-build-deployment", "francescodibella.github.io", "main", Checks::Passing, "41s", 2 * HOUR),
+            run("validate-jsonld", "ngsi-ld-xr-contexts", "mr-v0.2", Checks::Running, "1m 12s", 60),
+            run("validate-jsonld", "ngsi-ld-xr-contexts", "fix-vocab", Checks::Failing, "38s", 4 * DAY),
+            run("latex-build", "xr-digital-twin-thesis", "dev", Checks::Passing, "3m 05s", 3 * DAY),
+            run("pytest", "iot-sensor-gateway", "main", Checks::Passing, "57s", 30 * DAY),
         ];
         Data {
             profile: Profile { login: "francescodibella".into(), name: "Francesco Di Bella".into(), bio: "XR & IoT developer".into() },
@@ -314,6 +370,61 @@ mod tests {
         assert_eq!(ago(t - 86400 - 10, t), "yesterday");
         assert_eq!(ago(t - 15 * 86400, t), "2 weeks ago");
         assert_eq!(duration(185), "3m 05s");
+    }
+
+    #[test]
+    fn stored_timestamps_follow_now() {
+        let t = 1_794_216_911;
+        let repo = Repo { pushed: t, ..Repo::default() };
+        assert_eq!(repo.updated_ago(t + 10), "just now");
+        assert_eq!(repo.updated_ago(t + 30 * 60), "30 minutes ago");
+        assert_eq!(repo.updated_ago(t + 2 * 3600), "2 hours ago");
+
+        let issue = Issue {
+            number: 1, title: "Bug".into(), repo: "a/b".into(), label: None,
+            created_at: t, comments: 0, url: String::new(),
+        };
+        assert_eq!(issue.age_ago(t), "just now");
+        assert_eq!(issue.age_ago(t + 5 * 60), "5 minutes ago");
+
+        let pull = Pull {
+            number: 2, title: "Fix".into(), repo: "a/b".into(), author: "u".into(),
+            state: PullState::Open, checks: None,
+            updated_at: t, comments: 0, url: String::new(),
+        };
+        assert_eq!(pull.age_ago(t + 3600), "1 hour ago");
+
+        let run = Run {
+            workflow: "ci".into(), repo: "a/b".into(), branch: "main".into(),
+            checks: Checks::Passing, duration: "10s".into(),
+            updated_at: t, url: String::new(),
+        };
+        assert_eq!(run.age_ago(t + 120), "2 minutes ago");
+        let running = Run { checks: Checks::Running, ..run };
+        assert_eq!(running.age_ago(t + 120), "running");
+
+        let commit = Commit {
+            author: "u".into(), message: "msg".into(), sha: "abc".into(),
+            committed_at: t,
+        };
+        assert_eq!(commit.age_ago(t + 180), "3 minutes ago");
+
+        let sample = Data::sample_at(t);
+        assert_eq!(sample.repos[0].updated_ago(t), "2 hours ago");
+        assert_eq!(sample.repos[0].updated_ago(t + 3600), "3 hours ago");
+        assert_eq!(sample.issues[0].age_ago(t), "1 hour ago");
+        assert_eq!(sample_detail(&sample.repos[0]).commit.unwrap().age_ago(t), "2 hours ago");
+    }
+
+    #[test]
+    fn capped_counts() {
+        assert_eq!(capped(0), "0");
+        assert_eq!(capped(39), "39");
+        assert_eq!(capped(40), "40+");
+        assert_eq!(capped(55), "40+");
+        assert_eq!(capped_if(12, false), "12");
+        assert_eq!(capped_if(12, true), "12+");
+        assert_eq!(capped_if(0, true), "0+");
     }
 
     #[test]

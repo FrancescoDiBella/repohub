@@ -69,6 +69,30 @@ impl Update {
             _ => None,
         }
     }
+
+    /// Begins an update check, returning the previously available release when a check should run.
+    /// Background checks (`asked == false`) are skipped while an update is already available.
+    pub fn start_check(&mut self, asked: bool) -> Option<Option<Release>> {
+        if !self.can_check() || (!asked && self.available().is_some()) {
+            return None;
+        }
+        let prior = self.available().cloned();
+        *self = Update::Checking;
+        Some(prior)
+    }
+
+    /// Applies the result of an update check. Keeping any previously available release instead of
+    /// overwriting it with `Failed` ensures a transient network failure never hides a ready update.
+    pub fn finish_check(&mut self, prior: Option<Release>, outcome: Result<Option<Release>, String>) {
+        *self = match outcome {
+            Ok(Some(rel)) => Update::Available(rel),
+            Ok(None) => Update::Current,
+            Err(e) => match prior {
+                Some(rel) => Update::Available(rel),
+                None => Update::Failed(e),
+            },
+        };
+    }
 }
 
 /// The Latest build, as this platform needs it.
@@ -176,6 +200,7 @@ mod native {
         ureq::AgentBuilder::new()
             .try_proxy_from_env(!crate::net::bypass_proxy(&api))
             .timeout_connect(std::time::Duration::from_secs(15))
+            .timeout_read(std::time::Duration::from_secs(30))
             .user_agent("RepoHub updater")
             .build()
     }
@@ -197,8 +222,12 @@ mod native {
         parse_release(&body, suffix())
     }
 
-    /// Downloads `url`, reporting progress (0–100) when the size is known.
-    pub fn download(url: &str, size: u64, progress: impl Fn(u8)) -> Result<Vec<u8>, String> {
+    /// Downloads `url`, reporting progress (0–100) when the size is known, stopping if `cancel` is set.
+    pub fn download(url: &str, size: u64, cancel: &std::sync::atomic::AtomicBool, progress: impl Fn(u8)) -> Result<Vec<u8>, String> {
+        use std::sync::atomic::Ordering;
+        if cancel.load(Ordering::Relaxed) {
+            return Err("Download cancelled.".into());
+        }
         let resp = agent().get(url).call().map_err(|e| format!("Couldn't download the update: {e}"))?;
         let total = resp.header("Content-Length").and_then(|v| v.parse::<u64>().ok()).unwrap_or(size).max(1);
         let mut out = Vec::with_capacity(total as usize);
@@ -206,6 +235,9 @@ mod native {
         let mut buf = [0u8; 64 * 1024];
         let mut last = 0u8;
         loop {
+            if cancel.load(Ordering::Relaxed) {
+                return Err("Download cancelled.".into());
+            }
             let n = reader.read(&mut buf).map_err(|e| format!("The download stopped: {e}"))?;
             if n == 0 {
                 break;
@@ -409,5 +441,41 @@ mod tests {
         assert_eq!(std::fs::metadata(&exe).unwrap().permissions().mode() & 0o111, 0o111, "executable");
         assert_eq!(std::fs::read_dir(&app).unwrap().count(), 1, "nothing left behind");
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn background_check_keeps_available() {
+        let r = parse_release(RELEASE, "-linux-x86_64.tar.gz").unwrap();
+
+        // Background -> background: skipped while Available, Failed when Idle.
+        let mut u = Update::Available(r.clone());
+        assert_eq!(u.start_check(false), None, "background check skips Available");
+        assert_eq!(u, Update::Available(r.clone()));
+
+        let mut u = Update::Idle;
+        let prior = u.start_check(false).unwrap();
+        assert_eq!(u, Update::Checking);
+        u.finish_check(prior, Err("offline".into()));
+        assert_eq!(u, Update::Failed("offline".into()));
+
+        // Manual -> manual: preserves Available on transient failure, or updates to newer.
+        let mut u = Update::Available(r.clone());
+        let prior = u.start_check(true).expect("manual check can run from Available");
+        assert_eq!(u, Update::Checking);
+        u.finish_check(prior, Err("offline".into()));
+        assert_eq!(u, Update::Available(r.clone()), "failed manual check preserves Available");
+
+        let mut u = Update::Idle;
+        let prior = u.start_check(true).unwrap();
+        u.finish_check(prior, Err("offline".into()));
+        assert_eq!(u, Update::Failed("offline".into()));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn cancelled_download_stops_immediately() {
+        let cancel = std::sync::atomic::AtomicBool::new(true);
+        let err = download("http://127.0.0.1:0/never", 0, &cancel, |_| {}).unwrap_err();
+        assert!(err.contains("cancelled"));
     }
 }

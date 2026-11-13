@@ -37,8 +37,9 @@ pub fn open_button(k: &Kit, label: &str, url: &str, key: &str) -> El {
 
 pub fn overview(s: &App, k: &Kit) -> El {
     let d = &s.data;
+    let prs_capped = d.pulls.len() >= crate::model::SEARCH_CAP;
     let open_prs = d.pulls.iter().filter(|p| matches!(p.state, PullState::Open | PullState::Draft)).count();
-    let issues = if d.sample { d.repos.iter().map(|r| r.issues).sum::<u32>() as usize } else { d.issues.len() };
+    let issues = d.issues.len();
     let metric = |icon, value: String, caption, tint, page: Page| {
         ui::metric(k, icon, &value, caption, tint).hover(k.c.hover).press(k.c.pressed)
             .role("button").label(format!("{value} {caption}")).key(format!("metric-{caption}"))
@@ -47,19 +48,19 @@ pub fn overview(s: &App, k: &Kit) -> El {
     let metrics = row().w_full().gap(12.0).flex_wrap()
         .child(metric(&icons::REPO, d.repos.len().to_string(), "Repositories", k.c.info.icon, Page::Repos))
         .child(metric(&icons::STAR, s.starred_count().to_string(), "Stars received", k.c.warning.icon, Page::Repos))
-        .child(metric(&icons::PULL, open_prs.to_string(), "Open pull requests", k.c.success.icon, Page::Pulls))
-        .child(metric(&icons::ISSUE, issues.to_string(), "Open issues", k.c.danger.icon, Page::Issues));
+        .child(metric(&icons::PULL, crate::model::capped_if(open_prs, prs_capped), "Open pull requests", k.c.success.icon, Page::Pulls))
+        .child(metric(&icons::ISSUE, crate::model::capped(issues), "Open issues", k.c.danger.icon, Page::Issues));
     let commits: u32 = d.activity.iter().sum();
     let activity = panel(k)
         .child(panel_head(k, "Activity · last 26 weeks", Some(text(format!("{commits} commits")).font(k.ty.small).color(k.c.text_muted))))
         .child(col().w_full().px(16.0).pb(16.0).child(ui::sparkline(k, &d.activity, 72.0)));
     let recent = d.repos.iter().enumerate().take(4).fold(
         panel(k).child(panel_head(k, "Recent repositories", Some(see_all(k, "See all", Page::Repos)))),
-        |p, (i, r)| p.child(rule(k)).child(compact_repo(k, i, r, &d.profile.login)),
+        |p, (i, r)| p.child(rule(k)).child(compact_repo(k, i, r, &d.profile.login, s.now)),
     );
     let review = d.pulls.iter().filter(|p| matches!(p.state, PullState::Open | PullState::Draft)).take(4).fold(
         panel(k).child(panel_head(k, "Open pull requests", Some(see_all(k, "All pull requests", Page::Pulls)))),
-        |p, pr| p.child(rule(k)).child(pull_row(k, pr, true)),
+        |p, pr| p.child(rule(k)).child(pull_row(k, pr, s.now, true)),
     );
     let first = d.profile.name.split_whitespace().next().unwrap_or("").to_owned();
     let hello = if first.is_empty() { "Welcome back".to_owned() } else { format!("Welcome back, {first}") };
@@ -80,7 +81,7 @@ fn see_all(k: &Kit, label: &str, page: Page) -> El {
         .on_press(move |s: &mut App| s.go(page)).build(k)
 }
 
-fn compact_repo(k: &Kit, i: usize, r: &Repo, me: &str) -> El {
+fn compact_repo(k: &Kit, i: usize, r: &Repo, me: &str, now: i64) -> El {
     row().w_full().px(16.0).py(10.0).gap(12.0).center_y().hover(k.c.hover).press(k.c.pressed)
         .on_press(move |s: &mut App| s.open(i)).key(format!("recent-{}", r.full_name))
         .child(ui::avatar(k, &r.name, r.hue, 28.0))
@@ -89,7 +90,7 @@ fn compact_repo(k: &Kit, i: usize, r: &Repo, me: &str) -> El {
             .child(row().gap(12.0)
                 .child(if r.owner.eq_ignore_ascii_case(&me) { el() } else { text(r.owner.clone()).font(k.ty.text_small).color(k.c.text_muted) })
                 .child(ui::language(k, &r.language, r.hue)).child(ui::stat(k, &icons::STAR, r.stars.to_string()))))
-        .child(text(r.updated.clone()).font(k.ty.text_small).color(k.c.text_faint))
+        .child(text(r.updated_ago(now)).font(k.ty.text_small).color(k.c.text_faint))
 }
 
 // ---------------------------------------------------------------- repositories
@@ -136,7 +137,7 @@ pub fn repos(s: &App, k: &Kit) -> El {
     let me = s.data.profile.login.clone();
     let mut list = col().w_full().gap(12.0);
     for &i in &shown {
-        list = list.child(repo_card(k, i, &all[i], !all[i].owner.eq_ignore_ascii_case(&me), s.is_pinned(i)));
+        list = list.child(repo_card(k, i, &all[i], !all[i].owner.eq_ignore_ascii_case(&me), s.is_pinned(i), s.now));
     }
     if shown.is_empty() {
         let msg = if all.is_empty() { "No repositories to show" } else { "No repositories match your search" };
@@ -179,7 +180,7 @@ fn star_button(k: &Kit, i: usize, r: &Repo, with_count: bool, key: String) -> El
 }
 
 /// A repository in the list; `show_owner` prefixes the name with its organization.
-fn repo_card(k: &Kit, i: usize, r: &Repo, show_owner: bool, pinned: bool) -> El {
+fn repo_card(k: &Kit, i: usize, r: &Repo, show_owner: bool, pinned: bool, now: i64) -> El {
     let vis = if r.private { Badge::new("Private").variant(BadgeVariant::Subtle).build(k) } else { Badge::new("Public").build(k) };
     let mut title = row().gap(8.0).center_y().flex_wrap();
     if show_owner {
@@ -200,8 +201,8 @@ fn repo_card(k: &Kit, i: usize, r: &Repo, show_owner: bool, pinned: bool) -> El 
         .child(ui::language(k, &r.language, r.hue))
         .child(ui::stat(k, &icons::STAR, r.stars.to_string()))
         .child(ui::stat(k, &icons::FORK, r.forks.to_string()))
-        .child(ui::stat(k, &icons::ISSUE, r.issues.to_string()))
-        .child(text(format!("Updated {}", r.updated)).font(k.ty.text_small).color(k.c.text_faint));
+        .child(ui::stat(k, &icons::ISSUE, r.issues.to_string()).help(format!("{} open issues and pull requests", r.issues)))
+        .child(text(format!("Updated {}", r.updated_ago(now))).font(k.ty.text_small).color(k.c.text_faint));
     let desc = if r.description.is_empty() { "No description".to_owned() } else { r.description.clone() };
     panel(k).padding(16.0).gap(10.0).key(format!("card-{}", r.full_name))
         .child(row().w_full().justify_between().gap(12.0)
@@ -265,7 +266,7 @@ pub fn repo_detail(s: &App, k: &Kit, i: usize, plugin: Option<El>) -> El {
             .children(crate::changes_page::pull_panel(s, k))
             .child(list_of(k, "Pull requests", Some(actions::open_form_button(k, i, Compose::Pull)),
                 s.data.pulls.iter().filter(|x| in_repo(&x.repo)).map(|x| actions::pull_line(s, k, x, s.compact)).collect())),
-        RepoTab::Actions => list_of(k, "Workflow runs", None, s.data.runs.iter().filter(|x| in_repo(&x.repo)).map(|x| run_row(k, x, s.compact)).collect()),
+        RepoTab::Actions => list_of(k, "Workflow runs", None, s.data.runs.iter().filter(|x| in_repo(&x.repo)).map(|x| run_row(k, x, s.now, s.compact)).collect()),
         RepoTab::Notes => crate::notes_page::notes_tab(s, k, i),
         RepoTab::Claude => crate::claude_page::claude_tab(s, k, i),
         RepoTab::Terminal => crate::terminal_page::terminal_tab(s, k, i, k.c.page.r + k.c.page.g + k.c.page.b < 1.5),
@@ -347,11 +348,12 @@ fn code_tab(s: &App, k: &Kit, i: usize, r: &Repo) -> El {
         Some(Load::Failed(e)) => files = files.child(col().w_full().padding(16.0).child(text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap())),
         Some(Load::Ready(d)) => {
             if let Some(c) = &d.commit {
+                let age = c.age_ago(s.now);
                 files = files.child(row().w_full().px(16.0).py(10.0).gap(10.0).center_y().fill(k.c.layer_01).radius(k.radius.lg)
                     .child(ui::user(k, &c.author, 22.0))
                     .child(text(c.author.clone()).font(k.ty.small_medium).color(k.c.text_base))
                     .child(text(c.message.clone()).font(k.ty.small).color(k.c.text_muted).grow(1.0).shrink().max_lines(1))
-                    .child(text(if s.compact { c.age.clone() } else { format!("{} · {}", c.sha, c.age) }).font(k.ty.mono).color(k.c.text_faint)));
+                    .child(text(if s.compact { age } else { format!("{} · {}", c.sha, age) }).font(k.ty.mono).color(k.c.text_faint)));
             }
             if let Some(e) = &d.error {
                 files = files.child(col().w_full().padding(16.0).child(text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap()));
