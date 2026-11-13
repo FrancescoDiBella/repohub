@@ -632,8 +632,9 @@ impl App {
         }
     }
 
-    /// Drops in-flight background work from the previous account and clears every per-account
-    /// cache, session, filter and saved place.
+    /// Drops in-flight GitHub loads from the previous account and clears per-account caches,
+    /// forms, filters and saved place, while keeping local clone sessions (terminals and Claude
+    /// chats).
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     fn reset_account_state(&mut self) {
         self.load_gen = self.load_gen.wrapping_add(1);
@@ -666,17 +667,15 @@ impl App {
         self.diff_load = None;
         self.changes = None;
         self.commit_msg.clear();
-        self.git_job = None;
         self.git_error = None;
         self.merge_preview = None;
-        self.chats.clear();
         self.claude_prompt.clear();
-        self.terms.clear();
         self.clone_path.clear();
         self.loaded_at = None;
         self.last_load = None;
         self.load_clock = None;
         self.loaded_clock = None;
+        // `self.data` is now empty, so `go()` -> `save_place()` skips writing `"place"`.
         prefs::set("place", state::Place { page: "overview".into(), tab: None, repo: None }.to_json());
         self.go(Page::Overview);
     }
@@ -974,10 +973,10 @@ impl App {
         self.git_error = None;
         let epoch = self.load_gen;
         net::spawn(h, move || async move { f(&root) }, move |s: &mut App, r| {
+            s.git_job = None;
             if s.load_gen != epoch {
                 return;
             }
-            s.git_job = None;
             match r {
                 Ok(extra) => {
                     s.notify(if extra.is_empty() { done.to_owned() } else { format!("{done} {extra}") });
@@ -2612,7 +2611,7 @@ mod load_gen_tests {
         assert_eq!(s.owner, OwnerFilter::All);
         assert!(s.search.text.is_empty());
         assert!(s.branch_filter.text.is_empty());
-        assert!(s.chats.is_empty());
+        assert_eq!(s.chats.get("alice/secret").and_then(|c| c.session.as_deref()), Some("sess-1"));
         assert!(s.claude_prompt.text.is_empty());
         assert!(s.clone_path.text.is_empty());
         assert!(s.details.is_empty());
@@ -2679,7 +2678,8 @@ mod load_gen_tests {
         assert_eq!(s.status, Status::Loading);
         let gen_b = s.load_gen;
         assert!(gen_b > gen_a);
-        assert!(s.details.is_empty() && s.branches.is_empty() && s.notes.is_empty() && s.form.is_none() && s.chats.is_empty());
+        assert!(s.details.is_empty() && s.branches.is_empty() && s.notes.is_empty() && s.form.is_none());
+        assert_eq!(s.chats.get("alice/secret").and_then(|c| c.session.as_deref()), Some("sess-1"));
 
         let saved_place = crate::prefs::get("place").as_ref().and_then(Place::from_json).expect("place reset");
         assert_eq!(saved_place, Place { page: "overview".into(), tab: None, repo: None });
@@ -2701,6 +2701,46 @@ mod load_gen_tests {
         assert_eq!(s.status, Status::Ready);
         assert_eq!(s.data.profile.login, "bob");
         assert_eq!(s.data.repos[0].full_name, "bob/b-repo");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn save_account_keeps_local_sessions_and_running_git_job() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _tmp = TempDataDir::new("load-gen-local-sessions");
+
+        let mut s = crate::init();
+        let mut cfg = (*s.cfg).clone();
+        cfg.account_locked = false;
+        cfg.user = Some("alice".into());
+        cfg.token = Some("tok_alice".into());
+        s.cfg = std::sync::Arc::new(cfg);
+
+        let full = "alice/local-repo".to_owned();
+        {
+            let chat = s.chats.entry(full.clone()).or_default();
+            chat.session = Some("sess-42".into());
+            chat.run = crate::claude::Run::Running;
+        }
+        let term = crate::terminal::Term::spawn(&std::env::temp_dir(), 24, 80, || {}).expect("shell starts");
+        s.terms.insert(full.clone(), term);
+        s.git_job = Some("Committing…");
+
+        // Switch account.
+        s.acct_user = rune::TextEdit::new("bob");
+        s.acct_token = rune::TextEdit::new("tok_bob");
+        s.save_account(false);
+        assert_eq!(s.chats.get(&full).and_then(|c| c.session.as_deref()), Some("sess-42"));
+        assert_eq!(s.chats.get(&full).map(|c| c.run), Some(crate::claude::Run::Running));
+        assert!(s.terms.get(&full).is_some_and(|t| t.is_running()), "terminal survives account switch");
+        assert_eq!(s.git_job, Some("Committing…"), "running local git job stays marked");
+
+        // Sign out.
+        s.save_account(true);
+        assert_eq!(s.chats.get(&full).and_then(|c| c.session.as_deref()), Some("sess-42"));
+        assert_eq!(s.chats.get(&full).map(|c| c.run), Some(crate::claude::Run::Running));
+        assert!(s.terms.get(&full).is_some_and(|t| t.is_running()), "terminal survives sign-out");
+        assert_eq!(s.git_job, Some("Committing…"), "running local git job stays marked");
     }
 
     #[cfg(not(target_arch = "wasm32"))]
