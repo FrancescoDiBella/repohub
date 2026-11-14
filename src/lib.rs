@@ -739,15 +739,11 @@ impl App {
         // If the token is now saved in the user settings file, ensure the API host
         // is tied to that file or the default; an external project .env or REPOHUB_ENV
         // must not redirect the newly saved token.
-        if cfg.token.is_some() {
+        if cfg.token.is_some() && cfg.sources.api.as_deref() != Some("the environment") {
             let user_env_api = std::fs::read_to_string(config::user_env_file()).ok().and_then(|s| {
-                config::parse_env(&s).into_iter().find(|(k, v)| k == "GITHUB_API_URL" && !v.trim().is_empty()).map(|(_, v)| v.trim_end_matches('/').to_owned())
-            });
-            let initial_proc_api = std::env::var("GITHUB_API_URL").ok().filter(|v| !v.trim().is_empty()).map(|v| v.trim_end_matches('/').to_owned());
-            if let Some(proc_api) = initial_proc_api {
-                cfg.api = proc_api;
-                cfg.sources.api = Some("the environment".into());
-            } else if let Some(user_api) = user_env_api {
+                    config::parse_env(&s).into_iter().find(|(k, v)| k == "GITHUB_API_URL" && !v.trim().is_empty()).map(|(_, v)| v.trim_end_matches('/').to_owned())
+                });
+            if let Some(user_api) = user_env_api {
                 cfg.api = user_api;
                 cfg.sources.api = Some(user_file);
             } else {
@@ -2963,6 +2959,25 @@ mod load_gen_tests {
         let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _tmp = TempDataDir::new("save-account-api-reset");
 
+        let prev_api = std::env::var_os("GITHUB_API_URL");
+        // Simulate REPOHUB_ENV having injected GITHUB_API_URL into the process environment:
+        // SAFETY: ENV_LOCK serializes environment access in tests.
+        unsafe { std::env::set_var("GITHUB_API_URL", "https://injected-by-project-env.example") };
+
+        struct ApiVarGuard(Option<std::ffi::OsString>);
+        impl Drop for ApiVarGuard {
+            fn drop(&mut self) {
+                // SAFETY: ENV_LOCK serializes environment access in tests.
+                unsafe {
+                    match &self.0 {
+                        Some(val) => std::env::set_var("GITHUB_API_URL", val),
+                        None => std::env::remove_var("GITHUB_API_URL"),
+                    }
+                }
+            }
+        }
+        let _guard = ApiVarGuard(prev_api);
+
         let mut s = crate::init();
         let mut cfg = (*s.cfg).clone();
         cfg.account_locked = false;
@@ -2974,7 +2989,7 @@ mod load_gen_tests {
         s.acct_token = rune::TextEdit::new("ghp_carol_tok");
         s.save_account(false);
 
-        assert_eq!(s.cfg.api, "https://api.github.com", "saving account must reset untrusted API host to default or user env");
+        assert_eq!(s.cfg.api, "https://api.github.com", "saving account must reset untrusted API host to default or user env even if GITHUB_API_URL was in process env");
         assert_eq!(s.cfg.sources.api.as_deref(), Some("default (https://api.github.com)"));
     }
 }
