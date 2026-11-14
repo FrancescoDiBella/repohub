@@ -186,6 +186,9 @@ pub fn verify(bytes: &[u8], name: &str, sums: &str) -> Result<(), String> {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::{check, cleanup, download, install, relaunch};
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(unused_imports)]
+pub use native::api;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
@@ -206,7 +209,7 @@ mod native {
     }
 
     /// GitHub's API (`REPOHUB_UPDATE_API` points it elsewhere, for tests).
-    fn api() -> String {
+    pub fn api() -> String {
         std::env::var("REPOHUB_UPDATE_API").ok().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| "https://api.github.com".into()).trim_end_matches('/').to_owned()
     }
 
