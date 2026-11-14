@@ -68,6 +68,10 @@ The sections are **Added**, **Changed** and **Fixed**.
 - A new look, with a more readable layout.
 
 ### Fixed
+- Drawings (Notes) no longer overwrite each other or lose edits: late load callbacks are ignored
+  if the drawing on screen does not match, closing a drawing chains pending saves without racing
+  concurrent writes, writes use unique temporary files on disk, and canvas gestures are ignored
+  while loading with mode reset on load and guarded point accesses.
 - Refreshing data or removing a repository no longer switches the repository page to a different
   repository: repository and plugin pages and plugin sections now track their target by identity
   instead of by numeric index, safely falling back if the item is removed.

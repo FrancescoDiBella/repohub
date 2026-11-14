@@ -191,6 +191,13 @@ pub struct App {
     notes: HashMap<(String, String), notes::NotesView>,
     note_name: TextEdit,
     confirm_delete: Option<String>,
+    /// Generation of the open board load request; incremented on board open so late load results
+    /// from an earlier board or earlier load cannot overwrite the open board.
+    board_load_gen: u64,
+    /// Drawings currently having a `notes::save` operation in-flight: `(repo, branch, name)`.
+    saving_notes: std::collections::HashSet<(String, String, String)>,
+    /// Pending drawing save payloads waiting for an in-flight write to complete.
+    pending_note_saves: HashMap<(String, String, String), String>,
     /// The drawing open in the Notes tab, if any.
     board: Option<board::Board>,
     // Claude tab (desktop): one conversation per repository, run in its local clone.
@@ -651,6 +658,9 @@ impl App {
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     fn reset_account_state(&mut self) {
         self.load_gen = self.load_gen.wrapping_add(1);
+        self.board_load_gen = self.board_load_gen.wrapping_add(1);
+        self.saving_notes.clear();
+        self.pending_note_saves.clear();
         self.leave_tab();
         self.data = Data::default();
         self.tab = RepoTab::Code;
@@ -1457,10 +1467,39 @@ impl App {
     }
 
     /// Opens drawing `name` of repository `i` (on the selected branch) in the board editor.
+    fn apply_board_load(&mut self, epoch: u64, board_epoch: u64, id: (String, String, String), r: Result<Option<String>, String>) {
+        if self.load_gen != epoch || self.board_load_gen != board_epoch {
+            return;
+        }
+        let Some(b) = self.board.as_mut() else { return };
+        if (b.repo.as_str(), b.branch.as_str(), b.name.as_str()) != (id.0.as_str(), id.1.as_str(), id.2.as_str()) {
+            return;
+        }
+        if b.save != Save::Loading {
+            return;
+        }
+        let loaded = match r {
+            Ok(Some(json)) => b.load_json(&json),
+            Ok(None) => Ok(()),
+            Err(e) => Err(e),
+        };
+        b.save.loaded(loaded);
+    }
+
+    /// Opens drawing `name` of repository `i` (on the selected branch) in the board editor.
     fn open_board(&mut self, i: usize, name: String, new: bool) {
         let Some((full, branch)) = self.notes_branch(i) else { return };
+        self.board_load_gen = self.board_load_gen.wrapping_add(1);
+        let board_epoch = self.board_load_gen;
         let mut b = board::Board::new(&full, &branch, &name);
         if new {
+            self.board = Some(b);
+            return;
+        }
+        let id = (full.clone(), branch.clone(), name.clone());
+        if let Some(json) = self.pending_note_saves.get(&id) {
+            let _ = b.load_json(json);
+            b.save = Save::Saving { dirty: false };
             self.board = Some(b);
             return;
         }
@@ -1469,59 +1508,85 @@ impl App {
         let Some(h) = self.handle.clone() else { return };
         let epoch = self.load_gen;
         net::spawn(h, move || async move { notes::load(&full, &branch, &name).await }, move |s: &mut App, r| {
-            if s.load_gen != epoch {
-                return;
-            }
-            let Some(b) = s.board.as_mut() else { return };
-            let loaded = match r {
-                Ok(Some(json)) => b.load_json(&json),
-                Ok(None) => Ok(()),
-                Err(e) => Err(e),
-            };
-            b.save.loaded(loaded);
+            s.apply_board_load(epoch, board_epoch, id, r);
         });
     }
 
     /// The open drawing changed: write it, or queue the write behind the one that is running
     /// (see [`Save`]). One write runs at a time, so an older one can't land after a newer one.
     fn save_board(&mut self) {
-        if self.board.as_mut().is_some_and(|b| b.save.edit()) {
+        let Some(b) = self.board.as_mut() else { return };
+        let id = (b.repo.clone(), b.branch.clone(), b.name.clone());
+        if self.saving_notes.contains(&id) {
+            b.save.edit();
+            return;
+        }
+        if b.save.edit() {
             self.write_board();
         }
     }
 
     fn write_board(&mut self) {
-        let Some(b) = self.board.as_ref() else { return };
-        let (repo, branch, name, json) = (b.repo.clone(), b.branch.clone(), b.name.clone(), b.to_json());
+        if let Some(b) = self.board.as_ref() {
+            let id = (b.repo.clone(), b.branch.clone(), b.name.clone());
+            let json = b.to_json();
+            self.write_note(id, json);
+        } else if let Some((id, json)) = self.pending_note_saves.iter().next().map(|(k, v)| (k.clone(), v.clone())) {
+            self.pending_note_saves.remove(&id);
+            self.write_note(id, json);
+        }
+    }
+
+    fn write_note(&mut self, id: (String, String, String), json: String) {
         let Some(h) = self.handle.clone() else { return };
-        let id = (repo.clone(), branch.clone(), name.clone());
+        self.saving_notes.insert(id.clone());
+        let (repo, branch, name) = (id.0.clone(), id.1.clone(), id.2.clone());
         let epoch = self.load_gen;
         net::spawn(h, move || async move { notes::save(&repo, &branch, &name, json).await }, move |s: &mut App, r| {
-            if s.load_gen != epoch {
-                return;
-            }
-            // Only the drawing this write belongs to hears about it.
-            let same = s.board.as_ref().is_some_and(|b| (b.repo.as_str(), b.branch.as_str(), b.name.as_str()) == (id.0.as_str(), id.1.as_str(), id.2.as_str()));
-            if same && s.board.as_mut().is_some_and(|b| b.save.written(r)) {
-                s.write_board();
-            }
+            s.apply_board_write(epoch, id, r);
         });
     }
 
+    fn apply_board_write(&mut self, epoch: u64, id: (String, String, String), r: Result<(), String>) {
+        self.saving_notes.remove(&id);
+        if self.load_gen != epoch {
+            return;
+        }
+        // If another snapshot is waiting behind this write (from flush_board or rapid edits), write it now.
+        if let Some(next_json) = self.pending_note_saves.remove(&id) {
+            if let Some(b) = self.board.as_mut().filter(|b| (b.repo.as_str(), b.branch.as_str(), b.name.as_str()) == (id.0.as_str(), id.1.as_str(), id.2.as_str())) {
+                b.save = Save::Saving { dirty: false };
+            }
+            self.write_note(id, next_json);
+            return;
+        }
+        // If the board is still open on screen, update its Save state machine.
+        let same = self.board.as_ref().is_some_and(|b| (b.repo.as_str(), b.branch.as_str(), b.name.as_str()) == (id.0.as_str(), id.1.as_str(), id.2.as_str()));
+        if same
+            && let Some(b) = self.board.as_mut()
+            && b.save.written(r.clone())
+        {
+            self.write_board();
+            return;
+        }
+        if let Err(e) = r {
+            self.notify_problem(format!("The last change to the drawing wasn't saved: {e}"));
+        }
+    }
+
     /// Before the editor goes away: edits still waiting behind a running write (or after a failed
-    /// one) are written now.
+    /// one) are written now. Never starts a parallel write if one is already running.
     fn flush_board(&mut self) {
         let Some(b) = self.board.as_ref() else { return };
         if !b.save.pending() {
             return;
         }
-        let (repo, branch, name, json) = (b.repo.clone(), b.branch.clone(), b.name.clone(), b.to_json());
-        if let Some(h) = self.handle.clone() {
-            net::spawn(h, move || async move { notes::save(&repo, &branch, &name, json).await }, |s: &mut App, r| {
-                if let Err(e) = r {
-                    s.notify_problem(format!("The last change to the drawing wasn't saved: {e}"));
-                }
-            });
+        let id = (b.repo.clone(), b.branch.clone(), b.name.clone());
+        let json = b.to_json();
+        if self.saving_notes.contains(&id) {
+            self.pending_note_saves.insert(id, json);
+        } else {
+            self.write_note(id, json);
         }
     }
 
@@ -1897,6 +1962,9 @@ fn init() -> App {
         notes: HashMap::new(),
         note_name: TextEdit::new(""),
         confirm_delete: None,
+        board_load_gen: 0,
+        saving_notes: std::collections::HashSet::new(),
+        pending_note_saves: HashMap::new(),
         board: None,
         chats: HashMap::new(),
         claude_prompt: TextEdit::new(""),
@@ -2555,14 +2623,14 @@ mod load_gen_tests {
     use crate::state::{Compose, Layout, Load, OwnerFilter, Place, Refresh, RepoFilter, RepoSort, RepoTab, Status, Submit};
 
     #[cfg(not(target_arch = "wasm32"))]
-    struct TempDataDir {
+    pub(crate) struct TempDataDir {
         dir: std::path::PathBuf,
         prev: Option<std::ffi::OsString>,
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     impl TempDataDir {
-        fn new(tag: &str) -> Self {
+        pub(crate) fn new(tag: &str) -> Self {
             let dir = std::env::temp_dir().join(format!("repohub-{tag}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             let prev = std::env::var_os("REPOHUB_DATA_DIR");
@@ -3147,5 +3215,257 @@ mod fix60_tests {
         assert_eq!(s.plugin_tab, None, "removed plugin tab resets to None");
     }
 }
+
+#[cfg(test)]
+mod fix56_tests {
+    use super::*;
+    use crate::board::{Element, Kind};
+    use crate::state::Save;
+    use super::load_gen_tests::TempDataDir;
+
+    fn setup_app() -> App {
+        let mut s = crate::init();
+        s.data = crate::model::Data::sample();
+        s.data.repos[0].owner = "owner".into();
+        s.data.repos[0].name = "repo".into();
+        s.data.repos[0].full_name = "owner/repo".into();
+        s.data.repos[0].branch = "main".into();
+        s
+    }
+
+    #[test]
+    fn stale_open_board_load_does_not_overwrite_another_drawing() {
+        let mut s = setup_app();
+        let (full, branch) = s.notes_branch(0).unwrap();
+
+        // 1. Open drawing A ("Arch").
+        s.open_board(0, "Arch".into(), false);
+        let id_a = (full.clone(), branch.clone(), "Arch".into());
+        let epoch_a = s.load_gen;
+        let board_epoch_a = s.board_load_gen;
+        assert_eq!(s.board.as_ref().map(|b| b.name.as_str()), Some("Arch"));
+        assert_eq!(s.board.as_ref().map(|b| &b.save), Some(&Save::Loading));
+
+        // 2. Before Arch finishes loading, user switches to drawing B ("Plan").
+        s.open_board(0, "Plan".into(), false);
+        let id_b = (full.clone(), branch.clone(), "Plan".into());
+        let epoch_b = s.load_gen;
+        let board_epoch_b = s.board_load_gen;
+        assert_eq!(s.board.as_ref().map(|b| b.name.as_str()), Some("Plan"));
+        assert_ne!(board_epoch_a, board_epoch_b);
+
+        // 3. Stale load result arrives for Arch with some elements.
+        let arch_json = serde_json::json!({
+            "type": "excalidraw", "version": 2,
+            "elements": [{
+                "id": "arch-rect", "type": "rectangle",
+                "x": 10.0, "y": 10.0, "width": 50.0, "height": 50.0,
+                "points": [], "strokeColor": "#1e1e1e", "backgroundColor": "transparent",
+                "strokeWidth": 2.0, "seed": 1
+            }]
+        }).to_string();
+
+        s.apply_board_load(epoch_a, board_epoch_a, id_a, Ok(Some(arch_json)));
+
+        // Stale result for Arch MUST be ignored: Plan is still open and empty.
+        let b = s.board.as_ref().unwrap();
+        assert_eq!(b.name, "Plan");
+        assert!(b.elements.is_empty(), "Plan must not receive elements from Arch");
+        assert_eq!(b.save, Save::Loading);
+
+        // 4. Now valid load result for Plan arrives.
+        let plan_json = serde_json::json!({
+            "type": "excalidraw", "version": 2,
+            "elements": [{
+                "id": "plan-ellipse", "type": "ellipse",
+                "x": 20.0, "y": 20.0, "width": 60.0, "height": 60.0,
+                "points": [], "strokeColor": "#1e1e1e", "backgroundColor": "transparent",
+                "strokeWidth": 2.0, "seed": 2
+            }]
+        }).to_string();
+
+        s.apply_board_load(epoch_b, board_epoch_b, id_b, Ok(Some(plan_json)));
+        let b = s.board.as_ref().unwrap();
+        assert_eq!(b.name, "Plan");
+        assert_eq!(b.elements.len(), 1);
+        assert_eq!(b.elements[0].id, "plan-ellipse");
+        assert_eq!(b.save, Save::Saved);
+    }
+
+    #[test]
+    fn stale_open_board_load_does_not_overwrite_newly_created_drawing() {
+        let mut s = setup_app();
+        let (full, branch) = s.notes_branch(0).unwrap();
+
+        // 1. Open drawing A ("Arch") to load.
+        s.open_board(0, "Arch".into(), false);
+        let id_a = (full.clone(), branch.clone(), "Arch".into());
+        let epoch_a = s.load_gen;
+        let board_epoch_a = s.board_load_gen;
+
+        // 2. User creates a new drawing with the same name (new=true).
+        s.open_board(0, "Arch".into(), true);
+        assert_eq!(s.board.as_ref().map(|b| b.name.as_str()), Some("Arch"));
+        assert_eq!(s.board.as_ref().map(|b| &b.save), Some(&Save::Saved));
+        assert!(s.board.as_ref().unwrap().elements.is_empty());
+
+        // 3. Stale load for Arch arrives.
+        let arch_json = serde_json::json!({
+            "type": "excalidraw", "version": 2,
+            "elements": [{
+                "id": "stale-1", "type": "rectangle",
+                "x": 0.0, "y": 0.0, "width": 100.0, "height": 100.0,
+                "points": [], "strokeColor": "#000", "backgroundColor": "transparent",
+                "strokeWidth": 2.0, "seed": 1
+            }]
+        }).to_string();
+
+        s.apply_board_load(epoch_a, board_epoch_a, id_a, Ok(Some(arch_json)));
+
+        // The newly created drawing MUST remain clean.
+        let b = s.board.as_ref().unwrap();
+        assert!(b.elements.is_empty(), "New drawing must not be overwritten by stale load");
+        assert_eq!(b.save, Save::Saved);
+    }
+
+    #[test]
+    fn flushing_during_write_chains_cleanly_without_concurrent_writes() {
+        let mut s = setup_app();
+        let (full, branch) = s.notes_branch(0).unwrap();
+        let id = (full.clone(), branch.clone(), "Drawing1".into());
+
+        // Open drawing as new board.
+        s.open_board(0, "Drawing1".into(), true);
+        let b = s.board.as_mut().unwrap();
+        b.elements.push(Element {
+            id: "elem-1".into(), kind: Kind::Rectangle,
+            x: 10.0, y: 10.0, w: 20.0, h: 20.0, points: vec![],
+            stroke: "#000".into(), fill: None, width: 2.0,
+            text: String::new(), font: 20.0, seed: 1,
+        });
+
+        // Simulate save_board starting an in-flight write
+        assert!(b.save.edit());
+        assert_eq!(b.save, Save::Saving { dirty: false });
+        s.saving_notes.insert(id.clone());
+
+        // User makes another edit while write 1 is running
+        let b = s.board.as_mut().unwrap();
+        b.elements.push(Element {
+            id: "elem-2".into(), kind: Kind::Ellipse,
+            x: 50.0, y: 50.0, w: 30.0, h: 30.0, points: vec![],
+            stroke: "#f00".into(), fill: None, width: 2.0,
+            text: String::new(), font: 20.0, seed: 2,
+        });
+        s.save_board();
+        assert_eq!(s.board.as_ref().unwrap().save, Save::Saving { dirty: true });
+        // Still only 1 in-flight write, no parallel write started
+        assert_eq!(s.saving_notes.len(), 1);
+        assert!(s.pending_note_saves.is_empty());
+
+        // User closes drawing while write 1 is in-flight
+        s.close_board(0);
+        assert!(s.board.is_none(), "board should be closed");
+        // flush_board should have queued the pending snapshot instead of starting a concurrent write!
+        assert_eq!(s.saving_notes.len(), 1, "never start concurrent writes");
+        assert!(s.pending_note_saves.contains_key(&id), "latest snapshot must be queued in pending_note_saves");
+        let queued_json = s.pending_note_saves.get(&id).unwrap();
+        assert!(queued_json.contains("elem-2"), "queued snapshot contains the latest edits");
+
+        // Write 1 finishes: apply_board_write runs
+        s.apply_board_write(s.load_gen, id.clone(), Ok(()));
+        // Queued write is consumed
+        assert!(!s.pending_note_saves.contains_key(&id));
+    }
+
+    #[test]
+    fn reopen_board_with_pending_save_loads_pending_state() {
+        let mut s = setup_app();
+        let (full, branch) = s.notes_branch(0).unwrap();
+        let id = (full.clone(), branch.clone(), "Drawing2".into());
+
+        let pending_json = serde_json::json!({
+            "type": "excalidraw", "version": 2,
+            "elements": [{
+                "id": "pending-rect", "type": "rectangle",
+                "x": 100.0, "y": 100.0, "width": 80.0, "height": 40.0,
+                "points": [], "strokeColor": "#1e1e1e", "backgroundColor": "transparent",
+                "strokeWidth": 2.0, "seed": 10
+            }]
+        }).to_string();
+
+        s.saving_notes.insert(id.clone());
+        s.pending_note_saves.insert(id.clone(), pending_json);
+
+        // Opening the board while a save is pending should load the pending in-memory JSON
+        s.open_board(0, "Drawing2".into(), false);
+        let b = s.board.as_ref().unwrap();
+        assert_eq!(b.elements.len(), 1);
+        assert_eq!(b.elements[0].id, "pending-rect");
+        assert_eq!(b.save, Save::Saving { dirty: false });
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn flushing_during_write_chains_cleanly_and_persists_newest_content() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _tmp = TempDataDir::new("fix56-chain-save");
+
+        let mut s = setup_app();
+        let (full, branch) = s.notes_branch(0).unwrap();
+        let id = (full.clone(), branch.clone(), "E2E".into());
+
+        // 1. Open drawing as new
+        s.open_board(0, "E2E".into(), true);
+        let b = s.board.as_mut().unwrap();
+        b.elements.push(Element {
+            id: "shape-1".into(), kind: Kind::Rectangle,
+            x: 10.0, y: 10.0, w: 20.0, h: 20.0, points: vec![],
+            stroke: "#000".into(), fill: None, width: 2.0,
+            text: String::new(), font: 20.0, seed: 1,
+        });
+
+        // 2. First write starts in-flight (snapshot 1)
+        let json_1 = b.to_json();
+        assert!(b.save.edit());
+        s.saving_notes.insert(id.clone());
+
+        // 3. User makes newer edits while write 1 is in-flight
+        let b = s.board.as_mut().unwrap();
+        b.elements.push(Element {
+            id: "shape-2".into(), kind: Kind::Line,
+            x: 30.0, y: 30.0, w: 40.0, h: 40.0, points: vec![[0.0, 0.0], [40.0, 40.0]],
+            stroke: "#f00".into(), fill: None, width: 2.0,
+            text: String::new(), font: 20.0, seed: 2,
+        });
+        s.save_board();
+        assert_eq!(s.board.as_ref().unwrap().save, Save::Saving { dirty: true });
+
+        // 4. User closes drawing while write 1 is in-flight
+        s.close_board(0);
+        assert!(s.board.is_none(), "board is closed");
+        assert_eq!(s.saving_notes.len(), 1, "never start concurrent writes");
+        assert!(s.pending_note_saves.contains_key(&id), "queued snapshot must be in pending_note_saves");
+        let queued_json = s.pending_note_saves.get(&id).unwrap().clone();
+
+        // Older write 1 lands on disk first
+        pollster::block_on(crate::notes::save(&id.0, &id.1, &id.2, json_1)).unwrap();
+
+        // 5. Write 1 finishes: apply_board_write runs
+        s.apply_board_write(s.load_gen, id.clone(), Ok(()));
+        assert!(!s.pending_note_saves.contains_key(&id), "queued write popped");
+
+        // Write 2 lands on disk with the newest content
+        pollster::block_on(crate::notes::save(&id.0, &id.1, &id.2, queued_json)).unwrap();
+        s.apply_board_write(s.load_gen, id.clone(), Ok(()));
+        assert!(s.saving_notes.is_empty());
+
+        // 6. Verify drawing file on disk has the newest edits (both shape-1 and shape-2)
+        let content = pollster::block_on(crate::notes::load(&full, &branch, "E2E")).unwrap().expect("drawing must exist");
+        assert!(content.contains("shape-1"), "persisted content contains shape-1");
+        assert!(content.contains("shape-2"), "persisted content contains shape-2 (newest edits)");
+    }
+}
+
 
 

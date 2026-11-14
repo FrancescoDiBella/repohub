@@ -126,7 +126,7 @@ pub fn handle(data: &Path, mut req: Request) {
             let updated = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_secs();
             Some((percent_decode(name), updated, meta.len()))
         }).collect();
-        items.sort_by(|a, b| b.1.cmp(&a.1));
+        items.sort_by_key(|x| std::cmp::Reverse(x.1));
         let body = format!("[{}]", items.iter().map(|(n, u, s)| format!("{{\"name\":{},\"updated\":{u},\"size\":{s}}}", json_str(n))).collect::<Vec<_>>().join(","));
         return reply(req, 200, "application/json", body.into_bytes());
     }
@@ -154,8 +154,13 @@ pub fn handle(data: &Path, mut req: Request) {
             if !body.starts_with(b"{") {
                 return text(req, 400, "Expected an Excalidraw JSON document");
             }
-            let tmp = file.with_extension("excalidraw.tmp");
+            static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+            let id = TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let tmp = file.with_extension(format!("tmp.{}.{}", std::process::id(), id));
             let saved = std::fs::create_dir_all(&folder).and_then(|_| std::fs::write(&tmp, &body)).and_then(|_| std::fs::rename(&tmp, &file));
+            if saved.is_err() {
+                let _ = std::fs::remove_file(&tmp);
+            }
             match saved {
                 Ok(()) => text(req, 204, ""),
                 Err(e) => text(req, 500, &format!("Couldn't save the drawing: {e}")),

@@ -255,6 +255,9 @@ impl Board {
 
     /// Returns true when the drawing changed (and should be saved).
     pub fn undo(&mut self) -> bool {
+        if self.save == crate::state::Save::Loading {
+            return false;
+        }
         let Some(prev) = self.undo.pop() else { return false };
         self.redo.push(std::mem::replace(&mut self.elements, prev));
         self.selected = None;
@@ -262,6 +265,9 @@ impl Board {
     }
 
     pub fn redo(&mut self) -> bool {
+        if self.save == crate::state::Save::Loading {
+            return false;
+        }
         let Some(next) = self.redo.pop() else { return false };
         self.undo.push(std::mem::replace(&mut self.elements, next));
         self.selected = None;
@@ -269,6 +275,9 @@ impl Board {
     }
 
     pub fn delete_selected(&mut self) -> bool {
+        if self.save == crate::state::Save::Loading {
+            return false;
+        }
         let Some(i) = self.selected.filter(|i| *i < self.elements.len()) else { return false };
         self.snapshot();
         self.elements.remove(i);
@@ -300,6 +309,9 @@ impl Board {
 
     /// Starts typing a text at `at` (a point in the board's world).
     pub fn start_typing(&mut self, at: [f32; 2]) {
+        if self.save == crate::state::Save::Loading {
+            return;
+        }
         self.selected = None;
         self.mode = Mode::Typing { at };
         self.text_edit = TextEdit::new("");
@@ -308,6 +320,9 @@ impl Board {
 
     /// Picks a tool. Whatever was in progress (typing, a drag) is dropped.
     pub fn set_tool(&mut self, tool: Tool) {
+        if self.save == crate::state::Save::Loading {
+            return;
+        }
         self.tool = tool;
         self.mode = Mode::Idle;
         if tool != Tool::Select {
@@ -322,6 +337,9 @@ impl Board {
     /// Applies a pointer gesture on the canvas (`d` in the canvas' local points). Returns true
     /// when the drawing changed and should be saved.
     pub fn on_drag(&mut self, d: Gesture) -> bool {
+        if self.save == crate::state::Save::Loading {
+            return false;
+        }
         let (sx, sy) = (WORLD[0] / d.w.max(1.0), WORLD[1] / d.h.max(1.0));
         let p = [d.x * sx, d.y * sy];
         let start = [d.start_x * sx, d.start_y * sy];
@@ -378,7 +396,17 @@ impl Board {
                 if self.mode == Mode::Creating {
                     if let Some(e) = self.elements.last_mut() {
                         match e.kind {
-                            Kind::Arrow | Kind::Line => e.points[1] = [p[0] - e.x, p[1] - e.y],
+                            Kind::Arrow | Kind::Line => {
+                                let pt = [p[0] - e.x, p[1] - e.y];
+                                if e.points.len() >= 2 {
+                                    e.points[1] = pt;
+                                } else {
+                                    if e.points.is_empty() {
+                                        e.points.push([0.0, 0.0]);
+                                    }
+                                    e.points.push(pt);
+                                }
+                            }
                             Kind::Freedraw => {
                                 let q = [p[0] - e.x, p[1] - e.y];
                                 let last = *e.points.last().unwrap_or(&[0.0, 0.0]);
@@ -424,7 +452,8 @@ impl Board {
                     let Some(e) = self.elements.last_mut() else { return false };
                     let [x0, y0, x1, y1] = e.bbox();
                     let tiny = match e.kind {
-                        Kind::Freedraw => e.points.len() < 2,
+                        Kind::Freedraw | Kind::Arrow | Kind::Line if e.points.len() < 2 => true,
+                        Kind::Freedraw => false,
                         _ => x1 - x0 < 4.0 && y1 - y0 < 4.0,
                     };
                     if tiny || d.cancelled {
@@ -446,6 +475,9 @@ impl Board {
 
     /// Adds the text being typed. Returns true when something was added.
     pub fn commit_text(&mut self) -> bool {
+        if self.save == crate::state::Save::Loading {
+            return false;
+        }
         let Some(at) = self.typing_at() else { return false };
         self.mode = Mode::Idle;
         let t = self.text_edit.text.trim().to_owned();
@@ -560,6 +592,8 @@ impl Board {
         self.undo.clear();
         self.redo.clear();
         self.selected = None;
+        self.mode = Mode::Idle;
+        self.text_edit = TextEdit::new("");
         Ok(())
     }
 }
@@ -783,5 +817,134 @@ mod tests {
         let v: Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["type"], "excalidraw");
         assert_eq!(v["elements"][2]["endArrowhead"], "arrow");
+    }
+
+    #[test]
+    fn gestures_and_edits_ignored_during_loading() {
+        let mut b = Board::new("o/r", "main", "test");
+        b.save = crate::state::Save::Loading;
+        b.tool = Tool::Rectangle;
+        // Gestures during loading must be ignored and return false
+        assert!(!b.on_drag(drag(Phase::Down, 100.0, 100.0, 100.0, 100.0)));
+        assert!(!b.on_drag(drag(Phase::Move, 200.0, 200.0, 100.0, 100.0)));
+        assert!(!b.on_drag(drag(Phase::Up, 200.0, 200.0, 100.0, 100.0)));
+        assert!(b.elements.is_empty(), "canvas gestures during loading must not add elements");
+
+        // Tool change and typing during loading are ignored
+        b.set_tool(Tool::Text);
+        assert_eq!(b.tool, Tool::Rectangle, "set_tool during loading must be ignored");
+        b.start_typing([100.0, 100.0]);
+        assert_eq!(b.typing_at(), None, "start_typing during loading must be ignored");
+        assert!(!b.commit_text());
+
+        // Undo, redo, and delete during loading do nothing
+        assert!(!b.undo());
+        assert!(!b.redo());
+        assert!(!b.delete_selected());
+    }
+
+    #[test]
+    fn load_json_resets_mode_and_clears_transient_state() {
+        let mut b = Board::new("o/r", "main", "test");
+        b.tool = Tool::Rectangle;
+        // Start dragging out a rectangle
+        b.on_drag(drag(Phase::Down, 50.0, 50.0, 50.0, 50.0));
+        assert_eq!(b.mode, Mode::Creating);
+        assert_eq!(b.elements.len(), 1);
+
+        // While creating, load_json arrives
+        let sample = serde_json::json!({
+            "type": "excalidraw",
+            "version": 2,
+            "elements": [{
+                "id": "line-1",
+                "type": "line",
+                "x": 10.0,
+                "y": 10.0,
+                "width": 100.0,
+                "height": 50.0,
+                "points": [[0.0, 0.0], [100.0, 50.0]],
+                "strokeColor": "#1e1e1e",
+                "backgroundColor": "transparent",
+                "strokeWidth": 2.0,
+                "seed": 42
+            }]
+        }).to_string();
+
+        assert!(b.load_json(&sample).is_ok());
+        assert_eq!(b.mode, Mode::Idle, "load_json must reset mode to Idle");
+        assert_eq!(b.selected, None, "load_json must clear selection");
+        assert!(b.text_edit.text.is_empty(), "load_json must clear text_edit");
+
+        // Subsequent drag move/up must not mutate the loaded element as if Creating
+        let old_x = b.elements[0].x;
+        assert!(!b.on_drag(drag(Phase::Move, 300.0, 300.0, 50.0, 50.0)));
+        assert_eq!(b.elements[0].x, old_x, "Move after load_json should not drag loaded element");
+    }
+
+    #[test]
+    fn arrow_and_line_short_points_never_panic() {
+        let mut b = Board::new("o/r", "main", "test");
+        // Line with empty points
+        b.elements.push(Element {
+            id: "l0".into(),
+            kind: Kind::Line,
+            x: 0.0,
+            y: 0.0,
+            w: 10.0,
+            h: 10.0,
+            points: vec![],
+            stroke: STROKES[0].into(),
+            fill: None,
+            width: 2.0,
+            text: String::new(),
+            font: 20.0,
+            seed: 1,
+        });
+        // Arrow with 1 point
+        b.elements.push(Element {
+            id: "a1".into(),
+            kind: Kind::Arrow,
+            x: 0.0,
+            y: 0.0,
+            w: 10.0,
+            h: 10.0,
+            points: vec![[0.0, 0.0]],
+            stroke: STROKES[0].into(),
+            fill: None,
+            width: 2.0,
+            text: String::new(),
+            font: 20.0,
+            seed: 2,
+        });
+
+        // bbox on short points does not panic
+        let _ = b.elements[0].bbox();
+        let _ = b.elements[1].bbox();
+
+        // draw_element on short points does not panic
+        let s = Shape::new();
+        let _ = draw_element(s.clone(), &b.elements[0], false);
+        let _ = draw_element(s, &b.elements[1], false);
+
+        // Simulating Creating move on element with 0 or 1 point does not panic
+        b.mode = Mode::Creating;
+        assert!(!b.on_drag(drag(Phase::Move, 50.0, 50.0, 0.0, 0.0)));
+        assert_eq!(b.elements[1].points.len(), 2, "Phase::Move ensures at least 2 points for arrow");
+
+        // Release on short points handles tiny element safely
+        b.mode = Mode::Creating;
+        let _ = b.on_drag(drag(Phase::Up, 50.0, 50.0, 0.0, 0.0));
+
+        // Loading JSON with 0 or 1 point arrow/line does not panic
+        let raw = serde_json::json!({
+            "type": "excalidraw",
+            "version": 2,
+            "elements": [
+                { "id": "e1", "type": "arrow", "x": 0.0, "y": 0.0, "points": [], "strokeColor": "#000" },
+                { "id": "e2", "type": "line", "x": 0.0, "y": 0.0, "points": [[0.0, 0.0]], "strokeColor": "#000" }
+            ]
+        }).to_string();
+        assert!(b.load_json(&raw).is_ok());
     }
 }
