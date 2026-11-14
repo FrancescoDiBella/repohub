@@ -4126,19 +4126,21 @@ mod fix50_security_tests {
 
         // Spawn a real terminal using default settings (opt-in is false/None)
         let mut term = crate::terminal::Term::spawn(&temp_dir, 24, 80, None, || {}).expect("shell starts");
-        // Print the environment variables inside the terminal shell
-        term.write(b"echo TOK=[$GITHUB_TOKEN] USR=[$GITHUB_USER] DONE\r");
+        // Print the environment variables inside the terminal shell. Use a split string for the sentinel
+        // so the PTY's input echo does not contain "FINISHED" before the shell executes the command.
+        term.write(b"printf 'TOK=[%s] USR=[%s] %s\\n' \"$GITHUB_TOKEN\" \"$GITHUB_USER\" \"FIN\"\"ISHED\"\r");
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut output = String::new();
         while std::time::Instant::now() < deadline {
             output = term.text();
-            if output.contains("DONE") {
+            if output.contains("FINISHED") {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
 
+        assert!(output.contains("FINISHED"), "terminal output should reach sentinel (got: {output})");
         assert!(output.contains("TOK=[]"), "GITHUB_TOKEN must be empty in terminal shell output (got: {output})");
         assert!(output.contains("USR=[]"), "GITHUB_USER must be empty in terminal shell output (got: {output})");
         assert!(!output.contains("leak_canary_token_xyz999"));
