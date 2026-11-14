@@ -80,12 +80,12 @@ The sections are **Added**, **Changed** and **Fixed**.
   drawing while it saves deletes it once the save ends.
 - Only one merge confirmation shows for a pull request whose diff is open, and it goes away
   with its diff.
-- Sensitive settings (`GITHUB_API_URL`, `REPOHUB_UPDATE_API`, `REPOHUB_CLAUDE`, `REPOHUB_DATA_DIR`,
-  `REPOHUB_TERMINAL_COMMANDS`, `REPOHUB_REPOS_DIR`) can no longer be injected by untrusted project
-  `.env` files discovered via upward directory search, and release builds only load project `.env`
-  files when explicitly pointed to by `REPOHUB_ENV`. The GitHub API endpoint is strictly tied to
-  the token's origin so personal tokens saved in settings cannot be redirected to third-party hosts
-  by project files, and the Settings connection panel clearly attributes the origin of active keys.
+- A `.env` found in the folder the desktop app is started in can no longer change the sensitive
+  settings (`GITHUB_API_URL`, `REPOHUB_UPDATE_API`, `REPOHUB_CLAUDE`, `REPOHUB_DATA_DIR`,
+  `REPOHUB_REPOS_DIR`, `REPOHUB_TERMINAL_COMMANDS`, `REPOHUB_TERMINAL_PASS_TOKEN`); Settings lists
+  the ones it ignored. A token saved in Settings is only sent to the API host set in the
+  environment or in the app's settings file, else to GitHub. Settings shows where the user, the
+  token and the API host come from.
 - Pull request file diffs no longer clobber or reset uncommitted local diffs on the Changes tab:
   viewing a pull request diff uses dedicated diff state, leaving local changes and merge previews
   intact, and merging from the diff panel requires explicit confirmation before submitting.

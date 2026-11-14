@@ -742,21 +742,21 @@ impl App {
         cfg.token = token;
         let user_file = config::user_env_file().display().to_string();
         cfg.env_file = Some(user_file.clone());
-        cfg.sources.user = cfg.user.as_ref().map(|_| user_file.clone());
-        cfg.sources.token = cfg.token.as_ref().map(|_| user_file.clone());
+        cfg.sources.user = cfg.user.as_ref().map(|_| config::Source::UserFile(user_file.clone()));
+        cfg.sources.token = cfg.token.as_ref().map(|_| config::Source::UserFile(user_file.clone()));
         // If the token is now saved in the user settings file, ensure the API host
         // is tied to that file or the default; an external project .env or REPOHUB_ENV
         // must not redirect the newly saved token.
-        if cfg.token.is_some() && cfg.sources.api.as_deref() != Some("the environment") {
+        if cfg.token.is_some() && cfg.sources.api != Some(config::Source::Environment) {
             let user_env_api = std::fs::read_to_string(config::user_env_file()).ok().and_then(|s| {
                     config::parse_env(&s).into_iter().find(|(k, v)| k == "GITHUB_API_URL" && !v.trim().is_empty()).map(|(_, v)| v.trim_end_matches('/').to_owned())
                 });
             if let Some(user_api) = user_env_api {
                 cfg.api = user_api;
-                cfg.sources.api = Some(user_file);
+                cfg.sources.api = Some(config::Source::UserFile(user_file));
             } else {
                 cfg.api = "https://api.github.com".into();
-                cfg.sources.api = Some("default (https://api.github.com)".into());
+                cfg.sources.api = Some(config::Source::Default);
             }
         }
         self.cfg = Arc::new(cfg);
@@ -3084,7 +3084,7 @@ mod load_gen_tests {
         let mut cfg = (*s.cfg).clone();
         cfg.account_locked = false;
         cfg.api = "https://untrusted-api.example".into();
-        cfg.sources.api = Some("project .env".into());
+        cfg.sources.api = Some(crate::config::Source::ProjectFile(".env".into()));
         s.cfg = std::sync::Arc::new(cfg);
 
         s.acct_user = rune::TextEdit::new("carol");
@@ -3092,7 +3092,7 @@ mod load_gen_tests {
         s.save_account(false);
 
         assert_eq!(s.cfg.api, "https://api.github.com", "saving account must reset untrusted API host to default or user env even if GITHUB_API_URL was in process env");
-        assert_eq!(s.cfg.sources.api.as_deref(), Some("default (https://api.github.com)"));
+        assert_eq!(s.cfg.sources.api, Some(crate::config::Source::Default));
     }
 }
 

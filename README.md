@@ -157,6 +157,7 @@ installed automatically.
 - Windows: you also need the Visual Studio C++ Build Tools.
 
 ```sh
+cp .env.example .env                  # optional: set GITHUB_USER and/or GITHUB_TOKEN, or connect in Settings
 cargo run --release                   # the first build takes a few minutes
 packaging/macos/bundle.sh 0.1.0       # macOS: builds dist/RepoHub.app and the .dmg
 ```
@@ -418,12 +419,15 @@ GitHub Enterprise.
 
 - Variables already set in the environment win over the file. Watch out if your shell already
   exports a `GITHUB_TOKEN` (desktop app).
-- Desktop app: `REPOHUB_ENV=/path/to/other.env` loads an explicit settings file. For security,
-  installed release builds do not automatically load `.env` files from arbitrary working directories;
-  in development builds, upward directory search loads project `.env` files while restricting
-  sensitive overrides (`GITHUB_API_URL`, `REPOHUB_UPDATE_API`, `REPOHUB_CLAUDE`, `REPOHUB_DATA_DIR`).
-  Tokens saved in the app settings are never sent to custom API hosts unless configured directly
-  in the process environment or app settings.
+- Desktop app: it reads `.env` from the folder it's started in, or from one of its parents.
+  Such a file may not be yours (a cloned project can ship one), so these settings are ignored
+  in it: `GITHUB_API_URL`, `REPOHUB_UPDATE_API`, `REPOHUB_CLAUDE`, `REPOHUB_DATA_DIR`,
+  `REPOHUB_REPOS_DIR`, `REPOHUB_TERMINAL_COMMANDS` and `REPOHUB_TERMINAL_PASS_TOKEN`. Settings
+  lists the ones it ignored. To use them (GitHub Enterprise, for example), set them in the
+  environment or in the app's settings file, or name the file yourself:
+  `REPOHUB_ENV=/path/to/file.env`.
+- Desktop app: a token saved in Settings is only sent to the API host set in the environment or
+  in the app's settings file, else to GitHub. No other `.env` can change that.
 - Docker: `REPOHUB_ALLOWED_HOSTS` adds host names besides `localhost`.
 
 ## What it shows
