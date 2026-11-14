@@ -242,10 +242,11 @@ pub fn parse_line(line: &str) -> Vec<Event> {
     }
 }
 
-// ------------------------------------------------------------------ the process (desktop)
-
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::{Proc, start};
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(unused_imports)]
+pub use native::find;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
@@ -279,7 +280,7 @@ mod native {
 
     /// Where `claude` is: `REPOHUB_CLAUDE`, else the usual install places. `None`: let the login
     /// shell find it on its PATH (apps opened from the Dock don't get the shell's PATH).
-    fn find() -> Option<PathBuf> {
+    pub fn find() -> Option<PathBuf> {
         if let Ok(p) = std::env::var("REPOHUB_CLAUDE")
             && !p.trim().is_empty()
         {
