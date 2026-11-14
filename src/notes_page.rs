@@ -149,7 +149,9 @@ fn editor(_s: &App, k: &Kit, i: usize, b: &Board) -> El {
     for t in Tool::ALL {
         tools = tools.child(ib(tool_icon(t), t.label(), b.tool == t, format!("tool-{}", t.label()))
             .on_press(move |s: &mut App| {
-                if let Some(b) = s.board.as_mut() {
+                if let Some(b) = s.board.as_mut()
+                    && b.save != Save::Loading
+                {
                     b.set_tool(t);
                 }
             }));
@@ -161,7 +163,9 @@ fn editor(_s: &App, k: &Kit, i: usize, b: &Board) -> El {
             .border(if on { 2.5 } else { 1.0 }, if on { k.c.text_strong } else { k.c.border_weak })
             .role("radio").checked(on).label(format!("Colour {}", ci + 1)).focusable(true)
             .on_press(move |s: &mut App| {
-                if let Some(b) = s.board.as_mut() {
+                if let Some(b) = s.board.as_mut()
+                    && b.save != Save::Loading
+                {
                     b.color = ci;
                     // Recolour the selection too, as Excalidraw does.
                     if let Some(e) = b.selected.and_then(|i| b.elements.get_mut(i)) {
@@ -176,14 +180,14 @@ fn editor(_s: &App, k: &Kit, i: usize, b: &Board) -> El {
         colors = colors.child(sw);
     }
     let toggles = row().gap(2.0).center_y()
-        .child(ib(&icons::FILL, "Fill new shapes", b.filled, "fill".into()).on_press(|s: &mut App| if let Some(b) = s.board.as_mut() { b.filled = !b.filled; }))
-        .child(ib(&icons::BOLD, "Bold strokes and text", b.bold, "bold".into()).on_press(|s: &mut App| if let Some(b) = s.board.as_mut() { b.bold = !b.bold; }));
+        .child(ib(&icons::FILL, "Fill new shapes", b.filled, "fill".into()).on_press(|s: &mut App| if let Some(b) = s.board.as_mut() && b.save != Save::Loading { b.filled = !b.filled; }))
+        .child(ib(&icons::BOLD, "Bold strokes and text", b.bold, "bold".into()).on_press(|s: &mut App| if let Some(b) = s.board.as_mut() && b.save != Save::Loading { b.bold = !b.bold; }));
     let edits = row().gap(2.0).center_y()
-        .child(IconButton::new(&icons::UNDO).variant(IconButtonVariant::GhostMuted).label("Undo").help("Undo (Ctrl/⌘ Z)").disabled(!b.can_undo())
+        .child(IconButton::new(&icons::UNDO).variant(IconButtonVariant::GhostMuted).label("Undo").help("Undo (Ctrl/⌘ Z)").disabled(!b.can_undo() || b.save == Save::Loading)
             .on_press(|s: &mut App| if s.board.as_mut().is_some_and(|b| b.undo()) { s.save_board(); }).build(k).key("undo"))
-        .child(IconButton::new(&icons::REDO).variant(IconButtonVariant::GhostMuted).label("Redo").help("Redo (Ctrl/⌘ Shift Z)").disabled(!b.can_redo())
+        .child(IconButton::new(&icons::REDO).variant(IconButtonVariant::GhostMuted).label("Redo").help("Redo (Ctrl/⌘ Shift Z)").disabled(!b.can_redo() || b.save == Save::Loading)
             .on_press(|s: &mut App| if s.board.as_mut().is_some_and(|b| b.redo()) { s.save_board(); }).build(k).key("redo"))
-        .child(IconButton::new(&icons::TRASH).variant(IconButtonVariant::GhostMuted).label("Delete selection").help("Delete the selection (Delete)").disabled(b.selected.is_none())
+        .child(IconButton::new(&icons::TRASH).variant(IconButtonVariant::GhostMuted).label("Delete selection").help("Delete the selection (Delete)").disabled(b.selected.is_none() || b.save == Save::Loading)
             .on_press(|s: &mut App| if s.board.as_mut().is_some_and(|b| b.delete_selected()) { s.save_board(); }).build(k).key("delete-element"));
     let sep = || el().w(1.0).h(22.0).fill(k.c.border_weak);
     let toolbar = row().w_full().px(10.0).py(6.0).gap(10.0).center_y().flex_wrap().radius(k.radius.lg)
@@ -204,12 +208,15 @@ fn editor(_s: &App, k: &Kit, i: usize, b: &Board) -> El {
         .child(el().grow(1.0))
         .child(text(status).font(k.ty.text_small).color(tint));
     let scale = rune::memo::layout_size("board").map(|[w, _]| w / board::WORLD[0]).unwrap_or(0.7).max(0.2);
-    let canvas = board::canvas_view(
+    let mut canvas = board::canvas_view(
         b,
         dark,
         k.c.text_accent,
         scale,
         |s: &mut App, d, _| {
+            if s.board.as_ref().is_some_and(|b| b.save == Save::Loading) {
+                return;
+            }
             let changed = s.board.as_mut().is_some_and(|b| b.on_drag(board::Gesture::from(&*d)));
             if changed {
                 s.save_board();
@@ -217,11 +224,21 @@ fn editor(_s: &App, k: &Kit, i: usize, b: &Board) -> El {
         },
         |s: &mut App| &mut s.board.as_mut().expect("board open").text_edit,
         |s: &mut App, _| {
+            if s.board.as_ref().is_some_and(|b| b.save == Save::Loading) {
+                return;
+            }
             if s.board.as_mut().is_some_and(|b| b.commit_text()) {
                 s.save_board();
             }
         },
     );
+    if b.save == Save::Loading {
+        let overlay = col().pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
+            .items_center().justify_center()
+            .fill(if dark { rune::color::hex("#121212").unwrap_or(rune::Color::BLACK).alpha(0.75) } else { rune::Color::WHITE.alpha(0.75) })
+            .child(text("Loading…").font(k.ty.body_medium).color(k.c.text_strong));
+        canvas = canvas.child(overlay);
+    }
     let hint = match b.tool {
         Tool::Select => "Click a shape to select it, drag to move it. Delete removes it.",
         Tool::Text => "Click where the text goes, type, then press Enter.",

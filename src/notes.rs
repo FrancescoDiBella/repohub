@@ -61,12 +61,13 @@ fn decode(s: &str) -> String {
     let mut out = Vec::new();
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() {
-            if let Some(v) = std::str::from_utf8(&b[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok()) {
-                out.push(v);
-                i += 3;
-                continue;
-            }
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && let Some(v) = std::str::from_utf8(&b[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok())
+        {
+            out.push(v);
+            i += 3;
+            continue;
         }
         out.push(b[i]);
         i += 1;
@@ -124,7 +125,7 @@ mod local {
             let t = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64;
             Some((Note { name: super::decode(stem), updated_at: t, size: meta.len() }, t))
         }).collect();
-        items.sort_by(|a, b| b.1.cmp(&a.1));
+        items.sort_by_key(|x| std::cmp::Reverse(x.1));
         Ok(items.into_iter().map(|x| x.0).collect())
     }
 }
@@ -196,16 +197,24 @@ pub async fn load(repo: &str, branch: &str, name: &str) -> Result<Option<String>
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 /// Saves a drawing (an Excalidraw JSON document).
 pub async fn save(repo: &str, branch: &str, name: &str, json: String) -> Result<(), String> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let path = local::file(repo, branch, name);
-        let tmp = path.with_extension("excalidraw.tmp");
-        std::fs::create_dir_all(local::folder(repo, branch))
+        let id = TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = path.with_extension(format!("tmp.{}.{}", std::process::id(), id));
+        let folder = local::folder(repo, branch);
+        std::fs::create_dir_all(&folder)
             .and_then(|_| std::fs::write(&tmp, json))
             .and_then(|_| std::fs::rename(&tmp, &path))
-            .map_err(|e| format!("Couldn't save the drawing: {e}"))
+            .map_err(|e| {
+                let _ = std::fs::remove_file(&tmp);
+                format!("Couldn't save the drawing: {e}")
+            })
     }
     #[cfg(target_arch = "wasm32")]
     {
@@ -259,6 +268,30 @@ mod tests {
         assert_eq!(run(load("octo/repo", "feature/x", "Map (v2)")).unwrap().as_deref(), Some("{\"type\":\"excalidraw\"}"));
         run(delete("octo/repo", "feature/x", "Map (v2)")).unwrap();
         assert!(run(load("octo/repo", "feature/x", "Map (v2)")).unwrap().is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn concurrent_saves_use_unique_tmp_files_and_succeed() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("repohub-notes-concurrent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // SAFETY: ENV_LOCK serializes tests mutating environment variables.
+        unsafe { std::env::set_var("REPOHUB_DATA_DIR", &dir) };
+
+        let mut handles = Vec::new();
+        for i in 0..10 {
+            let json = format!("{{\"type\":\"excalidraw\",\"ver\":{i}}}");
+            handles.push(std::thread::spawn(move || {
+                run(save("org/repo", "main", "Concurrent", json))
+            }));
+        }
+        for h in handles {
+            assert!(h.join().unwrap().is_ok());
+        }
+        let content = run(load("org/repo", "main", "Concurrent")).unwrap();
+        assert!(content.is_some());
+        assert!(content.unwrap().contains("\"type\":\"excalidraw\""));
         let _ = std::fs::remove_dir_all(dir);
     }
 }
