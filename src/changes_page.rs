@@ -173,7 +173,7 @@ fn pull_diff_head(s: &App, k: &Kit) -> El {
         .child(text(format!("+{add}")).font(k.ty.small_medium).color(k.c.success.icon))
         .child(text(format!("−{del}")).font(k.ty.small_medium).color(k.c.danger.icon))
         .child(SegmentedControl::new(&["Unified", "Split"], Some(usize::from(s.pull_diff.mode() == DiffMode::Split))).label("Diff layout").fit()
-            .on_pick(|s: &mut App, i, _| s.pull_diff.set_mode(if i == 1 { DiffMode::Split } else { DiffMode::Unified })).build(k).key("diff-mode"))
+            .on_pick(|s: &mut App, i, _| s.pull_diff.set_mode(if i == 1 { DiffMode::Split } else { DiffMode::Unified })).build(k).key("pull-diff-mode"))
 }
 
 fn pull_diff_body(s: &App, k: &Kit, empty: &str) -> El {
@@ -182,13 +182,21 @@ fn pull_diff_body(s: &App, k: &Kit, empty: &str) -> El {
         Some(Load::Failed(e)) => col().w_full().padding(16.0).child(text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap()),
         Some(Load::Ready(())) if s.pull_diff.files().is_empty() => col().w_full().padding(24.0).items_center().child(text(empty.to_owned()).font(k.ty.ui).color(k.c.text_muted)),
         Some(Load::Ready(())) => col().w_full().h(DIFF_H).clip_rounded(0.0)
-            .child(DiffView::new(|s: &App| &s.pull_diff, |s: &mut App| &mut s.pull_diff).key("diff").build(s, k)),
+            .child(DiffView::new(|s: &App| &s.pull_diff, |s: &mut App| &mut s.pull_diff).key("pull-diff-view").build(s, k)),
     }
 }
 
 /// A pull request's files, when one is open (`App::pull_diff_of`), with the merge buttons.
 pub fn pull_panel(s: &App, k: &Kit) -> Option<El> {
+    pull_panel_for(s, k, None)
+}
+
+/// A pull request's files scoped to `repo_filter` (or any repo if None).
+pub fn pull_panel_for(s: &App, k: &Kit, repo_filter: Option<&str>) -> Option<El> {
     let (full, number) = s.pull_diff_of.as_ref()?.clone();
+    if let Some(target) = repo_filter && !full.eq_ignore_ascii_case(target) {
+        return None;
+    }
     let pull = s.data.pulls.iter().find(|p| p.number == number && pull_repo(&p.url).is_some_and(|f| f.eq_ignore_ascii_case(&full)));
     let title = pull.map(|p| format!("#{number} {}", p.title)).unwrap_or_else(|| format!("#{number}"));
     let open = pull.is_some_and(|p| p.state == crate::model::PullState::Open);
@@ -247,11 +255,12 @@ pub fn files_button(k: &Kit, p: &crate::model::Pull, active: bool) -> Option<El>
         .variant(if active { ButtonVariant::Contrast } else { ButtonVariant::Ghost })
         .control_size(ControlSize::Small)
         .help("See what this pull request changes")
-        .on_press(move |s: &mut App| {
+        .on_press_tx(move |s: &mut App, tx| {
             if active {
                 s.close_pull_diff();
             } else {
                 s.open_pull_diff(full.clone(), number);
+                tx.scroll_into_view("pull-diff");
             }
         }).build(k).key(format!("files-{}-{number}", p.repo)))
 }

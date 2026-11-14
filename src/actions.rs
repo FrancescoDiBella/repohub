@@ -226,15 +226,12 @@ pub fn issue_line(s: &App, k: &Kit, x: &Issue) -> El {
 pub fn pull_line(s: &App, k: &Kit, p: &Pull, compact: bool) -> El {
     let key = busy_key(&p.repo, p.number);
     let active = s.pull_diff_of.as_ref().is_some_and(|(full, num)| *num == p.number && crate::changes_page::pull_repo(&p.url).is_some_and(|f| f.eq_ignore_ascii_case(full)));
-    let mut line = lists::pull_row(k, p, s.now, compact).grow(1.0).shrink();
-    if active {
-        line = line.fill(k.c.bg_accent.alpha(0.12));
-    }
+    let line = lists::pull_row(k, p, s.now, compact).grow(1.0).shrink();
     let files = crate::changes_page::files_button(k, p, active);
     if p.state != PullState::Open {
         let mut r = row().w_full().center_y().child(line).children(files.map(|f| f.mr(12.0)));
         if active {
-            r = r.fill(k.c.bg_accent.alpha(0.08));
+            r = r.fill(k.c.bg_accent.alpha(0.12));
         }
         return r;
     }
@@ -260,7 +257,7 @@ pub fn pull_line(s: &App, k: &Kit, p: &Pull, compact: bool) -> El {
     }
     let mut r = row().w_full().center_y().child(line).child(tools);
     if active {
-        r = r.fill(k.c.bg_accent.alpha(0.08));
+        r = r.fill(k.c.bg_accent.alpha(0.12));
     }
     r
 }

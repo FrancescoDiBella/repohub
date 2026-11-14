@@ -3387,6 +3387,93 @@ mod fix60_tests {
         assert_eq!(rt.state.pull_diff_of, None);
         assert!(rt.find("pull-diff").is_none(), "pull diff closed by toggling files button");
     }
+
+    #[test]
+    fn repo_tab_pulls_scopes_diff_to_matching_repository() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = crate::init();
+        s.now = 1_700_000_000;
+        s.data = crate::model::Data::sample_at(s.now);
+        let repo0 = s.data.repos[0].full_name.clone();
+        let repo1 = s.data.repos[1].full_name.clone();
+
+        // 1. Open diff on Page::Pulls, then navigate to another repo's Pulls tab
+        s.page = Page::Pulls;
+        s.open_pull_diff(repo0.clone(), 14);
+        assert_eq!(s.pull_diff_of, Some((repo0.clone(), 14)));
+
+        // Visit repo 1's Pulls tab: navigation clears pull diff
+        s.open(1);
+        s.set_tab(1, crate::RepoTab::Pulls);
+        assert_eq!(s.pull_diff_of, None, "navigating to repo clears open PR diff");
+        assert!(s.pull_diff.files().is_empty());
+
+        let mut rt = rune::Runtime::new(s, crate::view, (1180.0, 2400.0), rune::Env::new(true, 1.0));
+        rt.frame(0.0);
+        assert!(rt.find("pull-diff").is_none(), "pull-diff not shown when cleared");
+
+        // 2. Even if pull_diff_of is set to a different repo, RepoTab::Pulls refuses to render it
+        rt.update(|s, _| {
+            s.pull_diff_of = Some((repo0, 14));
+            s.pull_diff_load = Some(crate::state::Load::Ready(()));
+        });
+        rt.frame(0.0);
+        assert_eq!(rt.state.page, Page::Repo(repo1));
+        assert!(rt.find("pull-diff").is_none(), "foreign repo diff must never render on another repo's Pulls tab");
+    }
+
+    #[test]
+    fn pressing_files_on_last_row_scrolls_pull_diff_into_view() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = crate::init();
+        s.now = 1_700_000_000;
+        // Generate enough PRs so the list extends well beyond a 720px viewport
+        let mut prs = Vec::new();
+        for i in 1..=20 {
+            prs.push(crate::model::Pull {
+                number: i,
+                title: format!("Pull request #{i} with long description to take space"),
+                repo: "francescodibella.github.io".into(),
+                author: "alice".into(),
+                state: crate::model::PullState::Open,
+                checks: Some(crate::model::Checks::Passing),
+                updated_at: s.now - (i as i64 * 3600),
+                comments: 2,
+                url: format!("https://github.com/francescodibella/francescodibella.github.io/pull/{i}"),
+            });
+        }
+        s.data.pulls = prs;
+        s.page = Page::Pulls;
+
+        // Realistic viewport height (1180 x 720)
+        let mut rt = rune::Runtime::new(s, crate::view, (1180.0, 720.0), rune::Env::new(true, 1.0));
+        rt.frame(0.0);
+
+        // Find the last row's Files button (files-francescodibella.github.io-20)
+        let last_files_key = "files-francescodibella.github.io-20";
+
+        // Scroll the viewport so the last row is brought into view
+        rt.update(|_, tx| tx.scroll_into_view(last_files_key));
+        rt.frame(0.1);
+
+        let (fx, fy) = rt.find(last_files_key).expect("last PR files button found");
+        assert!(fy < 720.0 && fy > 0.0, "files button must now be in viewport: ({fx}, {fy})");
+
+        // Click the Files button
+        rt.pointer_move(fx, fy);
+        rt.pointer_down(fx, fy);
+        rt.pointer_up(fx, fy);
+
+        // Allow scroll and layout to settle
+        rt.frame(0.1);
+        rt.frame(0.1);
+
+        assert!(rt.state.pull_diff_of.is_some(), "pull diff is opened");
+        let diff_el = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("pull-diff")).expect("pull-diff element found");
+        let top = diff_el.rect[1];
+        let height = diff_el.rect[3];
+        assert!(top < 720.0 && top + height > 0.0, "pull-diff must be visible in viewport [0, 720], rect={:?}", diff_el.rect);
+    }
 }
 
 #[cfg(test)]
