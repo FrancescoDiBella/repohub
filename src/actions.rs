@@ -225,10 +225,18 @@ pub fn issue_line(s: &App, k: &Kit, x: &Issue) -> El {
 /// A pull request row with Merge (asks first) on open, non-draft pull requests.
 pub fn pull_line(s: &App, k: &Kit, p: &Pull, compact: bool) -> El {
     let key = busy_key(&p.repo, p.number);
-    let line = lists::pull_row(k, p, s.now, compact).grow(1.0).shrink();
-    let files = crate::changes_page::files_button(k, p);
+    let active = s.pull_diff_of.as_ref().is_some_and(|(full, num)| *num == p.number && crate::changes_page::pull_repo(&p.url).is_some_and(|f| f.eq_ignore_ascii_case(full)));
+    let mut line = lists::pull_row(k, p, s.now, compact).grow(1.0).shrink();
+    if active {
+        line = line.fill(k.c.bg_accent.alpha(0.12));
+    }
+    let files = crate::changes_page::files_button(k, p, active);
     if p.state != PullState::Open {
-        return row().w_full().center_y().child(line).children(files.map(|f| f.mr(12.0)));
+        let mut r = row().w_full().center_y().child(line).children(files.map(|f| f.mr(12.0)));
+        if active {
+            r = r.fill(k.c.bg_accent.alpha(0.08));
+        }
+        return r;
     }
     let busy = s.busy.contains(&key);
     let asking = s.confirm_merge.as_deref() == Some(key.as_str());
@@ -250,7 +258,11 @@ pub fn pull_line(s: &App, k: &Kit, p: &Pull, compact: bool) -> El {
             .disabled(busy || blocked(s).is_some())
             .on_press(move |s: &mut App| s.confirm_merge = Some(k2.clone())).build(k).key(format!("merge-{key}")));
     }
-    row().w_full().center_y().child(line).child(tools)
+    let mut r = row().w_full().center_y().child(line).child(tools);
+    if active {
+        r = r.fill(k.c.bg_accent.alpha(0.08));
+    }
+    r
 }
 
 #[cfg(test)]
