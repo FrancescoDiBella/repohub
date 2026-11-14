@@ -10,8 +10,6 @@ use crate::local::Changes;
 pub enum DiffOf {
     /// The local clone of a repository (its full name).
     Local(String),
-    /// A pull request: the repository's full name and its number.
-    Pull(String, u32),
     /// What merging a local branch would bring: the repository's full name and the branch.
     Merge(String, String),
 }

@@ -68,6 +68,9 @@ The sections are **Added**, **Changed** and **Fixed**.
 - A new look, with a more readable layout.
 
 ### Fixed
+- Pull request file diffs no longer clobber or reset uncommitted local diffs on the Changes tab:
+  viewing a pull request diff uses dedicated diff state, leaving local changes and merge previews
+  intact, and merging from the diff panel requires explicit confirmation before submitting.
 - Drawings (Notes) no longer overwrite each other or lose edits: late load callbacks are ignored
   if the drawing on screen does not match, closing a drawing chains pending saves without racing
   concurrent writes, writes use unique temporary files on disk, and canvas gestures are ignored

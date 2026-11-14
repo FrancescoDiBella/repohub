@@ -165,39 +165,79 @@ fn picked_is(of: &Option<DiffOf>, branch: &str) -> bool {
     matches!(of, Some(DiffOf::Merge(_, b)) if b == branch)
 }
 
-/// A pull request's files, when one is open (`DiffOf::Pull`), with the merge buttons.
+fn pull_diff_head(s: &App, k: &Kit) -> El {
+    let (add, del) = diffs::totals(s.pull_diff.files());
+    let n = s.pull_diff.files().len();
+    row().gap(10.0).center_y()
+        .child(text(format!("{n} file{}", if n == 1 { "" } else { "s" })).font(k.ty.small).color(k.c.text_muted))
+        .child(text(format!("+{add}")).font(k.ty.small_medium).color(k.c.success.icon))
+        .child(text(format!("−{del}")).font(k.ty.small_medium).color(k.c.danger.icon))
+        .child(SegmentedControl::new(&["Unified", "Split"], Some(usize::from(s.pull_diff.mode() == DiffMode::Split))).label("Diff layout").fit()
+            .on_pick(|s: &mut App, i, _| s.pull_diff.set_mode(if i == 1 { DiffMode::Split } else { DiffMode::Unified })).build(k).key("pull-diff-mode"))
+}
+
+fn pull_diff_body(s: &App, k: &Kit, empty: &str) -> El {
+    match &s.pull_diff_load {
+        None | Some(Load::Loading) => col().w_full().padding(24.0).items_center().child(text("Reading the changes…").font(k.ty.ui).color(k.c.text_muted)),
+        Some(Load::Failed(e)) => col().w_full().padding(16.0).child(text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap()),
+        Some(Load::Ready(())) if s.pull_diff.files().is_empty() => col().w_full().padding(24.0).items_center().child(text(empty.to_owned()).font(k.ty.ui).color(k.c.text_muted)),
+        Some(Load::Ready(())) => col().w_full().h(DIFF_H).clip_rounded(0.0)
+            .child(DiffView::new(|s: &App| &s.pull_diff, |s: &mut App| &mut s.pull_diff).key("pull-diff-view").build(s, k)),
+    }
+}
+
+/// A pull request's files, when one is open (`App::pull_diff_of`), with the merge buttons.
 pub fn pull_panel(s: &App, k: &Kit) -> Option<El> {
-    let Some(DiffOf::Pull(full, number)) = &s.diff_of else { return None };
-    let (full, number) = (full.clone(), *number);
+    pull_panel_for(s, k, None)
+}
+
+/// A pull request's files scoped to `repo_filter` (or any repo if None).
+pub fn pull_panel_for(s: &App, k: &Kit, repo_filter: Option<&str>) -> Option<El> {
+    let (full, number) = s.pull_diff_of.as_ref()?.clone();
+    if let Some(target) = repo_filter && !full.eq_ignore_ascii_case(target) {
+        return None;
+    }
     let pull = s.data.pulls.iter().find(|p| p.number == number && pull_repo(&p.url).is_some_and(|f| f.eq_ignore_ascii_case(&full)));
     let title = pull.map(|p| format!("#{number} {}", p.title)).unwrap_or_else(|| format!("#{number}"));
     let open = pull.is_some_and(|p| p.state == crate::model::PullState::Open);
     let url = pull.map(|p| p.url.clone()).unwrap_or_else(|| format!("https://github.com/{full}/pull/{number}"));
-    let busy = s.busy.contains(&crate::actions::busy_key(&full, number));
-    let mut tools = row().gap(8.0).center_y().flex_wrap().child(diff_head(s, k));
+    let key = crate::actions::busy_key(&full, number);
+    let busy = s.busy.contains(&key);
+    let asking = s.confirm_merge.as_deref() == Some(key.as_str());
+    let mut tools = row().gap(8.0).center_y().flex_wrap().child(pull_diff_head(s, k));
     if open {
         const METHODS: [&str; 3] = ["merge", "squash", "rebase"];
         let method = METHODS[s.merge_method.min(2)];
         let repo = full.clone();
-        tools = tools
-            .child(SegmentedControl::new(&["Merge", "Squash", "Rebase"], Some(s.merge_method.min(2))).label("Merge method").fit()
-                .on_pick(|s: &mut App, i, _| s.merge_method = i).build(k).key("merge-method"))
-            .child(Button::new(if busy { "Merging…" } else { "Merge" }).icon(&icons::MERGE).variant(ButtonVariant::Submit).control_size(ControlSize::Small)
-                .disabled(busy || crate::actions::blocked(s).is_some())
-                .help(match method { "squash" => "One commit with all the changes", "rebase" => "The commits replayed on the base, no merge commit", _ => "A merge commit" })
-                .on_press(move |s: &mut App| s.write(&repo, github::Write::Merge { number, method })).build(k).key("pull-merge"));
+        if asking && !busy {
+            tools = tools
+                .child(text("Confirm merge?").font(k.ty.small_medium).color(k.c.text_base))
+                .child(Button::new("Merge").variant(ButtonVariant::Submit).control_size(ControlSize::Small)
+                    .on_press(move |s: &mut App| s.write(&repo, github::Write::Merge { number, method })).build(k).key("pull-merge-confirm"))
+                .child(Button::new("Cancel").variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
+                    .on_press(|s: &mut App| s.confirm_merge = None).build(k).key("pull-merge-cancel"));
+        } else {
+            let k2 = key.clone();
+            tools = tools
+                .child(SegmentedControl::new(&["Merge", "Squash", "Rebase"], Some(s.merge_method.min(2))).label("Merge method").fit()
+                    .on_pick(|s: &mut App, i, _| s.merge_method = i).build(k).key("merge-method"))
+                .child(Button::new(if busy { "Merging…" } else { "Merge" }).icon(&icons::MERGE).variant(ButtonVariant::Submit).control_size(ControlSize::Small)
+                    .disabled(busy || crate::actions::blocked(s).is_some())
+                    .help(match method { "squash" => "One commit with all the changes", "rebase" => "The commits replayed on the base, no merge commit", _ => "A merge commit" })
+                    .on_press(move |s: &mut App| s.confirm_merge = Some(k2.clone())).build(k).key("pull-merge"));
+        }
     }
     tools = tools
         .child(Button::new("GitHub").icon(&icons::EXTERNAL).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
             .on_press_tx(move |_: &mut App, tx| { let _ = tx.open_url(&url); }).build(k).key("pull-github"))
         .child(rune_kit::IconButton::new(&icons::CROSS).variant(rune_kit::IconButtonVariant::GhostMuted).label("Close the diff")
-            .on_press(|s: &mut App| s.close_diff()).build(k).key("pull-close"));
+            .on_press(|s: &mut App| s.close_pull_diff()).build(k).key("pull-close"));
     Some(panel(k).key("pull-diff").clip_rounded(k.radius.lg)
         .child(row().w_full().px(16.0).py(10.0).gap(12.0).center_y().flex_wrap()
             .child(text(title).font(k.ty.ui_medium).color(k.c.text_base).grow(1.0).shrink().min_w(200.0).max_lines(2))
             .child(tools))
         .child(rule(k))
-        .child(diff_body(s, k, "This pull request changes no files.")))
+        .child(pull_diff_body(s, k, "This pull request changes no files.")))
 }
 
 /// `owner/name` from a pull request's page address.
@@ -208,12 +248,21 @@ pub fn pull_repo(url: &str) -> Option<String> {
 }
 
 /// The Files button on a pull request row.
-pub fn files_button(k: &Kit, p: &crate::model::Pull) -> Option<El> {
+pub fn files_button(k: &Kit, p: &crate::model::Pull, active: bool) -> Option<El> {
     let full = pull_repo(&p.url)?;
     let number = p.number;
-    Some(Button::new("Files").icon(&icons::FILE).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
+    Some(Button::new("Files").icon(&icons::FILE)
+        .variant(if active { ButtonVariant::Contrast } else { ButtonVariant::Ghost })
+        .control_size(ControlSize::Small)
         .help("See what this pull request changes")
-        .on_press(move |s: &mut App| s.open_pull_diff(full.clone(), number)).build(k).key(format!("files-{}-{number}", p.repo)))
+        .on_press_tx(move |s: &mut App, tx| {
+            if active {
+                s.close_pull_diff();
+            } else {
+                s.open_pull_diff(full.clone(), number);
+                tx.scroll_into_view("pull-diff");
+            }
+        }).build(k).key(format!("files-{}-{number}", p.repo)))
 }
 
 #[cfg(test)]

@@ -151,6 +151,10 @@ pub struct App {
     diff: rune_kit::diff::DiffState,
     diff_of: Option<diffs::DiffOf>,
     diff_load: Option<Load<()>>,
+    /// The pull request diff on screen and what it is of: (repo full_name, pull number).
+    pull_diff: rune_kit::diff::DiffState,
+    pull_diff_of: Option<(String, u32)>,
+    pull_diff_load: Option<Load<()>>,
     /// The local clone's branch, upstream and changes, for the Changes tab.
     changes: Option<local::Changes>,
     /// The Changes tab's commit message.
@@ -307,6 +311,7 @@ impl App {
         }
         if self.page != p {
             state::trace("page", &self.page, &p);
+            self.close_pull_diff();
             self.leave_tab();
         }
         self.page = p;
@@ -383,6 +388,7 @@ impl App {
         self.term_error = None;
         self.picker = None;
         self.confirm_merge = None;
+        self.close_pull_diff();
     }
 
     /// Switches the repository page of repository `i` to `tab`.
@@ -688,6 +694,7 @@ impl App {
         self.diff.set_files(Vec::new());
         self.diff_of = None;
         self.diff_load = None;
+        self.close_pull_diff();
         self.changes = None;
         self.commit_msg.clear();
         self.git_error = None;
@@ -1087,42 +1094,42 @@ impl App {
         });
     }
 
-    fn apply_pull_diff(&mut self, epoch: u64, key: diffs::DiffOf, r: Result<Vec<github::PullFile>, String>) {
-        if epoch != self.load_gen || self.diff_of != Some(key) {
+    fn apply_pull_diff(&mut self, epoch: u64, key: (String, u32), r: Result<Vec<github::PullFile>, String>) {
+        if epoch != self.load_gen || self.pull_diff_of != Some(key) {
             return;
         }
         match r {
             Ok(files) => {
-                self.diff.set_files(diffs::pull_files(&files));
-                self.diff_load = Some(Load::Ready(()));
+                self.pull_diff.set_files(diffs::pull_files(&files));
+                self.pull_diff_load = Some(Load::Ready(()));
             }
-            Err(e) => self.diff_load = Some(Load::Failed(e)),
+            Err(e) => self.pull_diff_load = Some(Load::Failed(e)),
         }
     }
 
     /// Shows pull request `number` of `full`'s files as a diff.
     fn open_pull_diff(&mut self, full: String, number: u32) {
-        let Some(h) = self.handle.clone() else { return };
-        self.diff_of = Some(diffs::DiffOf::Pull(full.clone(), number));
-        self.diff_load = Some(Load::Loading);
-        self.diff.set_files(Vec::new());
+        let key = (full.clone(), number);
+        self.pull_diff_of = Some(key.clone());
+        self.pull_diff_load = Some(Load::Loading);
+        self.pull_diff.set_files(Vec::new());
         if self.data.sample {
-            self.diff.set_files(diffs::pull_files(&diffs::sample_pull_files()));
-            self.diff_load = Some(Load::Ready(()));
+            self.pull_diff.set_files(diffs::pull_files(&diffs::sample_pull_files()));
+            self.pull_diff_load = Some(Load::Ready(()));
             return;
         }
+        let Some(h) = self.handle.clone() else { return };
         let cfg = self.cfg.clone();
-        let key = diffs::DiffOf::Pull(full.clone(), number);
         let epoch = self.load_gen;
         net::spawn(h, move || async move { github::load_pull_files(&cfg, &full, number).await }, move |s: &mut App, r| {
             s.apply_pull_diff(epoch, key, r);
         });
     }
 
-    fn close_diff(&mut self) {
-        self.diff_of = None;
-        self.diff_load = None;
-        self.diff.set_files(Vec::new());
+    fn close_pull_diff(&mut self) {
+        self.pull_diff_of = None;
+        self.pull_diff_load = None;
+        self.pull_diff.set_files(Vec::new());
     }
 
     /// Opens `path` in repository `i`'s local clone: a folder lists it, a file shows it.
@@ -1946,6 +1953,9 @@ fn init() -> App {
         diff: rune_kit::diff::DiffState::new(Vec::new()),
         diff_of: None,
         diff_load: None,
+        pull_diff: rune_kit::diff::DiffState::new(Vec::new()),
+        pull_diff_of: None,
+        pull_diff_load: None,
         changes: None,
         commit_msg: TextEdit::new(""),
         git_job: None,
@@ -2625,7 +2635,7 @@ mod cache_tests {
 #[cfg(test)]
 mod load_gen_tests {
     use crate::model::{Data, Detail, Profile, PullState, Repo};
-    use crate::state::{Compose, Layout, Load, OwnerFilter, Place, Refresh, RepoFilter, RepoSort, RepoTab, Status, Submit};
+    use crate::state::{Compose, Layout, Load, OwnerFilter, Place, RepoFilter, RepoSort, RepoTab, Status, Submit};
 
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) struct TempDataDir {
@@ -2684,9 +2694,10 @@ mod load_gen_tests {
         s.details.insert((full.clone(), "main".into()), Load::Ready(Detail::default()));
         s.branches.insert(full.clone(), Load::Ready(vec!["main".into()]));
         s.branch_of.insert(full.clone(), "dev".into());
-        s.notes.entry((full.clone(), "main".into())).or_default().state = Refresh::Fresh;
-        s.diff_of = Some(crate::diffs::DiffOf::Pull(full.clone(), 42));
+        s.diff_of = Some(crate::diffs::DiffOf::Local(full.clone()));
         s.diff_load = Some(Load::Ready(()));
+        s.pull_diff_of = Some((full.clone(), 42));
+        s.pull_diff_load = Some(Load::Ready(()));
         s.filter = RepoFilter::Private;
         s.pr_filter = PullState::Merged;
         s.owner = OwnerFilter::Org(owner.into());
@@ -2757,6 +2768,8 @@ mod load_gen_tests {
         assert!(s.form.is_none());
         assert!(s.diff_of.is_none());
         assert!(s.diff_load.is_none());
+        assert!(s.pull_diff_of.is_none());
+        assert!(s.pull_diff_load.is_none());
         assert!(s.busy.is_empty());
 
         let saved_place = crate::prefs::get("place").as_ref().and_then(Place::from_json).expect("place saved");
@@ -2768,8 +2781,8 @@ mod load_gen_tests {
         s.apply(old_gen, Ok(account_data("alice", "secret", true)));
         s.apply_detail(old_gen, ("alice/secret".into(), "main".into()), Detail::default());
         s.apply_branches(old_gen, "alice/secret".into(), Ok(vec!["main".into()]));
-        s.diff_of = Some(crate::diffs::DiffOf::Pull("alice/secret".into(), 9));
-        s.apply_pull_diff(old_gen, crate::diffs::DiffOf::Pull("alice/secret".into(), 9), Ok(crate::diffs::sample_pull_files()));
+        s.pull_diff_of = Some(("alice/secret".into(), 9));
+        s.apply_pull_diff(old_gen, ("alice/secret".into(), 9), Ok(crate::diffs::sample_pull_files()));
         s.apply_notes(old_gen, ("alice/secret".into(), "main".into()), Ok(vec![crate::notes::Note { name: "arch".into(), updated_at: 1, size: 10 }]));
 
         assert_eq!(s.status, Status::Sample);
@@ -3218,6 +3231,248 @@ mod fix60_tests {
 
         assert_eq!(s.page, Page::Overview, "removed plugin page falls back to Overview");
         assert_eq!(s.plugin_tab, None, "removed plugin tab resets to None");
+    }
+
+    #[test]
+    fn pull_diff_isolated_from_changes_tab_diff_state() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = crate::init();
+        s.now = 1_700_000_000;
+        s.data = crate::model::Data::sample_at(s.now);
+        let repo_full = s.data.repos[0].full_name.clone();
+
+        // Set up Changes tab diff with local changes
+        s.diff_of = Some(crate::diffs::DiffOf::Local(repo_full.clone()));
+        s.diff_load = Some(crate::state::Load::Ready(()));
+        let local_file = rune_kit::diff::FileDiff::between(Some("foo.rs".into()), Some("foo.rs".into()), "old\n", "new\n");
+        s.diff.set_files(vec![local_file]);
+        assert_eq!(s.diff.files().len(), 1);
+
+        // Open a pull request diff
+        s.open_pull_diff(repo_full.clone(), 14);
+        assert_eq!(s.pull_diff_of, Some((repo_full.clone(), 14)));
+        assert_eq!(s.pull_diff_load, Some(crate::state::Load::Ready(())));
+        assert!(!s.pull_diff.files().is_empty(), "sample PR diff loaded");
+
+        // The Changes tab diff must remain completely untouched
+        assert_eq!(s.diff_of, Some(crate::diffs::DiffOf::Local(repo_full.clone())));
+        assert_eq!(s.diff.files().len(), 1, "local changes diff not clobbered by PR diff");
+
+        // Closing pull diff leaves local diff intact
+        s.close_pull_diff();
+        assert_eq!(s.pull_diff_of, None);
+        assert_eq!(s.pull_diff_load, None);
+        assert!(s.pull_diff.files().is_empty());
+        assert_eq!(s.diff_of, Some(crate::diffs::DiffOf::Local(repo_full)));
+        assert_eq!(s.diff.files().len(), 1);
+    }
+
+    #[test]
+    fn navigation_and_leave_tab_clears_pull_diff() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = crate::init();
+        s.now = 1_700_000_000;
+        s.data = crate::model::Data::sample_at(s.now);
+        let repo_full = s.data.repos[0].full_name.clone();
+
+        s.open(0);
+        s.open_pull_diff(repo_full.clone(), 14);
+        assert!(s.pull_diff_of.is_some());
+
+        // Navigating to Overview cleans up pull diff
+        s.go(Page::Overview);
+        assert!(s.pull_diff_of.is_none());
+        assert!(s.pull_diff_load.is_none());
+        assert!(s.pull_diff.files().is_empty());
+
+        // Opening again and switching tab
+        s.open(0);
+        s.set_tab(0, crate::RepoTab::Pulls);
+        s.open_pull_diff(repo_full.clone(), 14);
+        assert!(s.pull_diff_of.is_some());
+
+        s.set_tab(0, crate::RepoTab::Code);
+        assert!(s.pull_diff_of.is_none(), "switching tabs calls leave_tab and clears pull diff");
+    }
+
+    #[test]
+    fn pull_panel_merge_requires_confirmation() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = crate::init();
+        let mut cfg = (*s.cfg).clone();
+        cfg.user = Some("alice".into());
+        cfg.token = Some("tok_alice".into());
+        s.cfg = std::sync::Arc::new(cfg);
+        s.now = 1_700_000_000;
+        s.data = crate::model::Data::sample_at(s.now);
+        s.data.sample = false;
+        // sample PR 14 is open on francescodibella.github.io
+        let pr = s.data.pulls.iter().find(|p| p.number == 14).expect("sample PR 14 exists");
+        let repo = crate::changes_page::pull_repo(&pr.url).expect("repo parsed");
+        let key = crate::actions::busy_key(&repo, pr.number);
+
+        s.page = Page::Pulls;
+        s.open_pull_diff(repo.clone(), pr.number);
+
+        let mut rt = rune::Runtime::new(s, crate::view, (1180.0, 2400.0), rune::Env::new(true, 1.0));
+        rt.frame(0.0);
+
+        // Initially pull-merge button is present, confirm/cancel are not
+        assert!(rt.find("pull-merge").is_some());
+        assert!(rt.find("pull-merge-confirm").is_none());
+        assert!(rt.find("pull-merge-cancel").is_none());
+
+        // Click Merge button
+        let (x, y) = rt.find("pull-merge").expect("pull-merge button found");
+        rt.pointer_move(x, y);
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(0.1);
+
+        // Confirmation must now be displayed
+        assert_eq!(rt.state.confirm_merge.as_deref(), Some(key.as_str()));
+        assert!(rt.find("pull-merge-confirm").is_some(), "confirmation merge button shown");
+        assert!(rt.find("pull-merge-cancel").is_some(), "cancel button shown");
+        assert!(rt.find("pull-merge").is_none(), "initial merge button replaced by confirm");
+
+        // Click Cancel
+        let (cx, cy) = rt.find("pull-merge-cancel").expect("cancel button found");
+        rt.pointer_move(cx, cy);
+        rt.pointer_down(cx, cy);
+        rt.pointer_up(cx, cy);
+        rt.frame(0.1);
+
+        assert_eq!(rt.state.confirm_merge, None);
+        assert!(rt.find("pull-merge").is_some(), "initial merge button restored");
+        assert!(rt.find("pull-merge-confirm").is_none());
+    }
+
+    #[test]
+    fn files_button_toggles_diff_and_highlights_active_row() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = crate::init();
+        s.now = 1_700_000_000;
+        s.data = crate::model::Data::sample_at(s.now);
+        let pr = s.data.pulls.iter().find(|p| p.number == 14).expect("sample PR 14 exists");
+        let repo = crate::changes_page::pull_repo(&pr.url).expect("repo parsed");
+        let pr_repo = pr.repo.clone();
+        let pr_number = pr.number;
+
+        s.page = Page::Pulls;
+        let mut rt = rune::Runtime::new(s, crate::view, (1180.0, 2400.0), rune::Env::new(true, 1.0));
+        rt.frame(0.0);
+
+        // Initially pull diff is closed
+        assert_eq!(rt.state.pull_diff_of, None);
+        assert!(rt.find("pull-diff").is_none());
+
+        // Click Files button on PR 14
+        let files_key = format!("files-{pr_repo}-{pr_number}");
+        let (fx, fy) = rt.find(&files_key).expect("files button found on PR 14");
+        rt.pointer_move(fx, fy);
+        rt.pointer_down(fx, fy);
+        rt.pointer_up(fx, fy);
+        rt.frame(0.1);
+
+        assert_eq!(rt.state.pull_diff_of, Some((repo.clone(), pr_number)));
+        assert!(rt.find("pull-diff").is_some(), "pull diff panel is open");
+
+        // Clicking Files again toggles it closed
+        let (fx2, fy2) = rt.find(&files_key).expect("files button found on active PR 14");
+        rt.pointer_move(fx2, fy2);
+        rt.pointer_down(fx2, fy2);
+        rt.pointer_up(fx2, fy2);
+        rt.frame(0.1);
+
+        assert_eq!(rt.state.pull_diff_of, None);
+        assert!(rt.find("pull-diff").is_none(), "pull diff closed by toggling files button");
+    }
+
+    #[test]
+    fn repo_tab_pulls_scopes_diff_to_matching_repository() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = crate::init();
+        s.now = 1_700_000_000;
+        s.data = crate::model::Data::sample_at(s.now);
+        let repo0 = s.data.repos[0].full_name.clone();
+        let repo1 = s.data.repos[1].full_name.clone();
+
+        // 1. Open diff on Page::Pulls, then navigate to another repo's Pulls tab
+        s.page = Page::Pulls;
+        s.open_pull_diff(repo0.clone(), 14);
+        assert_eq!(s.pull_diff_of, Some((repo0.clone(), 14)));
+
+        // Visit repo 1's Pulls tab: navigation clears pull diff
+        s.open(1);
+        s.set_tab(1, crate::RepoTab::Pulls);
+        assert_eq!(s.pull_diff_of, None, "navigating to repo clears open PR diff");
+        assert!(s.pull_diff.files().is_empty());
+
+        let mut rt = rune::Runtime::new(s, crate::view, (1180.0, 2400.0), rune::Env::new(true, 1.0));
+        rt.frame(0.0);
+        assert!(rt.find("pull-diff").is_none(), "pull-diff not shown when cleared");
+
+        // 2. Even if pull_diff_of is set to a different repo, RepoTab::Pulls refuses to render it
+        rt.update(|s, _| {
+            s.pull_diff_of = Some((repo0, 14));
+            s.pull_diff_load = Some(crate::state::Load::Ready(()));
+        });
+        rt.frame(0.0);
+        assert_eq!(rt.state.page, Page::Repo(repo1));
+        assert!(rt.find("pull-diff").is_none(), "foreign repo diff must never render on another repo's Pulls tab");
+    }
+
+    #[test]
+    fn pressing_files_on_last_row_scrolls_pull_diff_into_view() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = crate::init();
+        s.now = 1_700_000_000;
+        // Generate enough PRs so the list extends well beyond a 720px viewport
+        let mut prs = Vec::new();
+        for i in 1..=20 {
+            prs.push(crate::model::Pull {
+                number: i,
+                title: format!("Pull request #{i} with long description to take space"),
+                repo: "francescodibella.github.io".into(),
+                author: "alice".into(),
+                state: crate::model::PullState::Open,
+                checks: Some(crate::model::Checks::Passing),
+                updated_at: s.now - (i as i64 * 3600),
+                comments: 2,
+                url: format!("https://github.com/francescodibella/francescodibella.github.io/pull/{i}"),
+            });
+        }
+        s.data.pulls = prs;
+        s.page = Page::Pulls;
+
+        // Realistic viewport height (1180 x 720)
+        let mut rt = rune::Runtime::new(s, crate::view, (1180.0, 720.0), rune::Env::new(true, 1.0));
+        rt.frame(0.0);
+
+        // Find the last row's Files button (files-francescodibella.github.io-20)
+        let last_files_key = "files-francescodibella.github.io-20";
+
+        // Scroll the viewport so the last row is brought into view
+        rt.update(|_, tx| tx.scroll_into_view(last_files_key));
+        rt.frame(0.1);
+
+        let (fx, fy) = rt.find(last_files_key).expect("last PR files button found");
+        assert!(fy < 720.0 && fy > 0.0, "files button must now be in viewport: ({fx}, {fy})");
+
+        // Click the Files button
+        rt.pointer_move(fx, fy);
+        rt.pointer_down(fx, fy);
+        rt.pointer_up(fx, fy);
+
+        // Allow scroll and layout to settle
+        rt.frame(0.1);
+        rt.frame(0.1);
+
+        assert!(rt.state.pull_diff_of.is_some(), "pull diff is opened");
+        let diff_el = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("pull-diff")).expect("pull-diff element found");
+        let top = diff_el.rect[1];
+        let height = diff_el.rect[3];
+        assert!(top < 720.0 && top + height > 0.0, "pull-diff must be visible in viewport [0, 720], rect={:?}", diff_el.rect);
     }
 }
 

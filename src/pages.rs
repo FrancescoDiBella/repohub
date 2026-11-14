@@ -264,7 +264,7 @@ pub fn repo_detail(s: &App, k: &Kit, i: usize, plugin: Option<El>) -> El {
         RepoTab::Issues => list_of(k, "Open issues", Some(actions::open_form_button(k, i, Compose::Issue)),
             s.data.issues.iter().filter(|x| in_repo(&x.repo)).map(|x| actions::issue_line(s, k, x)).collect()),
         RepoTab::Pulls => col().w_full().gap(16.0)
-            .children(crate::changes_page::pull_panel(s, k))
+            .children(crate::changes_page::pull_panel_for(s, k, Some(&r.full_name)))
             .child(list_of(k, "Pull requests", Some(actions::open_form_button(k, i, Compose::Pull)),
                 s.data.pulls.iter().filter(|x| in_repo(&x.repo)).map(|x| actions::pull_line(s, k, x, s.compact)).collect())),
         RepoTab::Actions => list_of(k, "Workflow runs", None, s.data.runs.iter().filter(|x| in_repo(&x.repo)).map(|x| run_row(k, x, s.now, s.compact)).collect()),
