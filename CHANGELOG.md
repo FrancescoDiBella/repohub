@@ -68,6 +68,13 @@ The sections are **Added**, **Changed** and **Fixed**.
 - A new look, with a more readable layout.
 
 ### Fixed
+- `GITHUB_TOKEN` and `GITHUB_USER` are parsed directly into app configuration and never written
+  to the process environment. Every child process spawned by RepoHub (terminal shells, Claude Code,
+  local git operations, plugin git clones, and updater helper processes) explicitly removes
+  `GITHUB_TOKEN` and `GITHUB_USER` by default, preventing credentials from leaking to untrusted
+  scripts or tools. An explicit opt-in (`REPOHUB_TERMINAL_PASS_TOKEN=true`) is available for users
+  who want the token passed to the terminal, and signing out clears credentials immediately for all
+  future children.
 - Drawings no longer lose edits when you close one and reopen it, or create one with the same
   name, while it's still saving. Saves still finish after an account switch, and deleting a
   drawing while it saves deletes it once the save ends.

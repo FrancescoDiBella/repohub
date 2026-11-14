@@ -132,22 +132,25 @@ mod native {
     }
 
     /// The user's shell: `$SHELL`, else zsh/bash (PowerShell on Windows).
-    fn shell() -> CommandBuilder {
-        if cfg!(windows) {
-            return CommandBuilder::new("powershell.exe");
-        }
-        let sh = std::env::var("SHELL").ok().filter(|s| Path::new(s).exists())
-            .or_else(|| ["/bin/zsh", "/bin/bash", "/bin/sh"].iter().find(|p| Path::new(p).exists()).map(|s| s.to_string()))
-            .unwrap_or_else(|| "/bin/sh".into());
-        let mut c = CommandBuilder::new(sh);
-        c.arg("-l"); // a login shell, so PATH has Homebrew, nvm, cargo… like a normal terminal
+    pub(crate) fn shell() -> CommandBuilder {
+        let mut c = if cfg!(windows) {
+            CommandBuilder::new("powershell.exe")
+        } else {
+            let sh = std::env::var("SHELL").ok().filter(|s| Path::new(s).exists())
+                .or_else(|| ["/bin/zsh", "/bin/bash", "/bin/sh"].iter().find(|p| Path::new(p).exists()).map(|s| s.to_string()))
+                .unwrap_or_else(|| "/bin/sh".into());
+            let mut c = CommandBuilder::new(sh);
+            c.arg("-l"); // a login shell, so PATH has Homebrew, nvm, cargo… like a normal terminal
+            c
+        };
+        crate::config::scrub_pty_env(&mut c);
         c
     }
 
     impl Term {
-        /// Starts the shell in `cwd`. `on_output` runs on the reader thread after new output,
-        /// coalesced: it isn't called again until `ack` is.
-        pub fn spawn(cwd: &Path, rows: u16, cols: u16, on_output: impl Fn() + Send + 'static) -> Result<Term, String> {
+        /// Starts the shell in `cwd`, optionally providing `GITHUB_TOKEN` if opted in. `on_output`
+        /// runs on the reader thread after new output, coalesced: it isn't called again until `ack` is.
+        pub fn spawn(cwd: &Path, rows: u16, cols: u16, token: Option<&str>, on_output: impl Fn() + Send + 'static) -> Result<Term, String> {
             let pty = native_pty_system();
             let size = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
             let pair = pty.openpty(size).map_err(|e| format!("Couldn't open a terminal: {e}"))?;
@@ -156,6 +159,9 @@ mod native {
             cmd.env("TERM", "xterm-256color");
             cmd.env("COLORTERM", "truecolor");
             cmd.env("REPOHUB", "1");
+            if let Some(tok) = token {
+                cmd.env("GITHUB_TOKEN", tok);
+            }
             let child = pair.slave.spawn_command(cmd).map_err(|e| format!("Couldn't start the shell: {e}"))?;
             drop(pair.slave);
             let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
@@ -288,6 +294,8 @@ mod native {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::Term;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) use native::shell;
 
 /// The web build can't start processes on your computer.
 #[cfg(target_arch = "wasm32")]
@@ -299,7 +307,7 @@ pub struct Term {
 
 #[cfg(target_arch = "wasm32")]
 impl Term {
-    pub fn spawn(_: &std::path::Path, _: u16, _: u16, _: impl Fn() + Send + 'static) -> Result<Term, String> {
+    pub fn spawn(_: &std::path::Path, _: u16, _: u16, _: Option<&str>, _: impl Fn() + Send + 'static) -> Result<Term, String> {
         Err("The terminal needs the desktop app.".into())
     }
     pub fn write(&mut self, _: &[u8]) {}
@@ -342,7 +350,7 @@ mod tests {
     #[test]
     fn runs_a_command_in_the_folder() {
         let dir = std::env::temp_dir();
-        let mut t = Term::spawn(&dir, 24, 80, || {}).expect("shell starts");
+        let mut t = Term::spawn(&dir, 24, 80, None, || {}).expect("shell starts");
         t.write(b"echo repohub-$((40+2)); pwd\r");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut text = String::new();

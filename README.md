@@ -389,6 +389,8 @@ with colours, scrollback (mouse wheel) and paste.
   **Claude Code** or **Codex**, that starts it in the clone. ⌘K → *Start … in …* does the same.
 - **Command buttons:** one click types `git status`, `git pull` or `git log`. Set your own list
   with `REPOHUB_TERMINAL_COMMANDS` (`;`-separated).
+- **Security:** `GITHUB_TOKEN` and `GITHUB_USER` are stripped from the terminal environment by
+  default to protect against untrusted scripts and tools. You can opt in with `REPOHUB_TERMINAL_PASS_TOKEN=true`.
 - **Keys:** click the terminal to type. Ctrl+C, arrows, Tab, Ctrl+R… go to the shell;
   Ctrl/⌘+V pastes.
 

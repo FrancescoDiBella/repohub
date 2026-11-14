@@ -18,15 +18,30 @@ pub const MAX_TEXT: u64 = 1024 * 1024;
 /// Lines of a text file shown at most.
 pub const MAX_LINES: usize = 5_000;
 
-/// Runs `git args…` in `dir`; its output, or what went wrong.
-pub fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
+/// Prepares a `git` command in `dir` with standard options and stripped credentials.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn git_command(dir: &Path, args: &[&str]) -> std::process::Command {
     let mut cmd = std::process::Command::new("git");
+    crate::config::scrub_child_env(&mut cmd);
     cmd.arg("-C").arg(dir).args(args).env("GIT_TERMINAL_PROMPT", "0").env("GIT_OPTIONAL_LOCKS", "0");
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000); // no console window flashing up
     }
+    cmd
+}
+
+/// Runs `git args…` in `dir`; its output, or what went wrong.
+pub fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    let mut cmd = git_command(dir, args);
+    #[cfg(target_arch = "wasm32")]
+    let mut cmd = {
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("-C").arg(dir).args(args).env("GIT_TERMINAL_PROMPT", "0").env("GIT_OPTIONAL_LOCKS", "0");
+        cmd
+    };
     let out = cmd.output().map_err(|e| format!("Couldn't run git: {e}. Is git installed?"))?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
