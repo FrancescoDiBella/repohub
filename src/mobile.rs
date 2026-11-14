@@ -15,9 +15,10 @@ const LABEL: TextStyle = TextStyle::new(10.5, 550.0);
 fn tab(s: &App, k: &Kit, label: &str, icon: &'static Icon, page: Page) -> El {
     let on = s.page == page || (page == Page::Repos && matches!(s.page, Page::Repo(_)));
     let ink = if on { k.c.text_accent } else { k.c.text_muted };
+    let target = page.clone();
     col().grow(1.0).min_w(0.0).h(52.0).gap(3.0).center().radius(k.radius.md).press(k.c.pressed)
         .role("button").label(label.to_owned()).key(format!("tab-{label}"))
-        .on_press(move |s: &mut App| s.go(page))
+        .on_press(move |s: &mut App| s.go(target.clone()))
         .child(ui::ico(icon, 20.0, ink))
         .child(text(label.to_owned()).font(LABEL).color(ink).max_lines(1))
 }

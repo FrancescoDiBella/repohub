@@ -41,9 +41,10 @@ pub fn overview(s: &App, k: &Kit) -> El {
     let open_prs = d.pulls.iter().filter(|p| matches!(p.state, PullState::Open | PullState::Draft)).count();
     let issues = d.issues.len();
     let metric = |icon, value: String, caption, tint, page: Page| {
+        let target = page.clone();
         ui::metric(k, icon, &value, caption, tint).hover(k.c.hover).press(k.c.pressed)
             .role("button").label(format!("{value} {caption}")).key(format!("metric-{caption}"))
-            .on_press(move |s: &mut App| s.go(page))
+            .on_press(move |s: &mut App| s.go(target.clone()))
     };
     let metrics = row().w_full().gap(12.0).flex_wrap()
         .child(metric(&icons::REPO, d.repos.len().to_string(), "Repositories", k.c.info.icon, Page::Repos))
@@ -78,7 +79,7 @@ pub fn overview(s: &App, k: &Kit) -> El {
 
 fn see_all(k: &Kit, label: &str, page: Page) -> El {
     Button::new(label).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
-        .on_press(move |s: &mut App| s.go(page)).build(k)
+        .on_press(move |s: &mut App| s.go(page.clone())).build(k)
 }
 
 fn compact_repo(k: &Kit, i: usize, r: &Repo, me: &str, now: i64) -> El {
@@ -88,7 +89,7 @@ fn compact_repo(k: &Kit, i: usize, r: &Repo, me: &str, now: i64) -> El {
         .child(col().grow(1.0).shrink().gap(2.0)
             .child(text(r.name.clone()).font(k.ty.ui_medium).color(k.c.text_base))
             .child(row().gap(12.0)
-                .child(if r.owner.eq_ignore_ascii_case(&me) { el() } else { text(r.owner.clone()).font(k.ty.text_small).color(k.c.text_muted) })
+                .child(if r.owner.eq_ignore_ascii_case(me) { el() } else { text(r.owner.clone()).font(k.ty.text_small).color(k.c.text_muted) })
                 .child(ui::language(k, &r.language, r.hue)).child(ui::stat(k, &icons::STAR, r.stars.to_string()))))
         .child(text(r.updated_ago(now)).font(k.ty.text_small).color(k.c.text_faint))
 }
@@ -242,8 +243,8 @@ pub fn repo_detail(s: &App, k: &Kit, i: usize, plugin: Option<El>) -> El {
     let extra = s.plugins.repo_tabs();
     let mut labels: Vec<String> = shown.iter().map(|t| RepoTab::LABELS[t.index()].to_owned()).collect();
     labels.extend(extra.iter().map(|(_, l)| l.clone()));
-    let at = match s.plugin_tab {
-        Some(p) => extra.iter().position(|(q, _)| *q == p).map(|n| shown.len() + n),
+    let at = match &s.plugin_tab {
+        Some(p) => extra.iter().position(|(id, _)| id == p).map(|n| shown.len() + n),
         None => shown.iter().position(|t| *t == s.tab),
     };
     let tabs = SegmentedControl::new(&labels, at).label("Section").fit()
@@ -251,7 +252,7 @@ pub fn repo_detail(s: &App, k: &Kit, i: usize, plugin: Option<El>) -> El {
             let shown = s.tabs();
             match shown.get(t) {
                 Some(tab) => s.set_tab(i, *tab),
-                None => s.open_plugin_tab(i, s.plugins.repo_tabs().get(t - shown.len()).map(|(p, _)| *p)),
+                None => s.open_plugin_tab(i, s.plugins.repo_tabs().get(t - shown.len()).map(|(id, _)| id.clone())),
             }
         }).build(k).key("tabs");
     // Seven sections don't fit a phone's width: there the strip scrolls sideways.

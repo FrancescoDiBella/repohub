@@ -45,8 +45,8 @@ pub enum Command {
     Owner(crate::state::OwnerFilter),
     /// Use a theme (look) and its appearance.
     Look(String),
-    /// Open a plugin's section (its position in `App::plugins`) on a repository's page.
-    PluginTab(usize, usize),
+    /// Open a plugin's section (its id) on a repository's page.
+    PluginTab(usize, String),
     /// Start a harness (its position in `Assistants::harnesses`) in a repository's terminal.
     Harness(usize, usize),
 }
@@ -74,8 +74,8 @@ pub const MOD: &str = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl" };
 pub fn entries(s: &App) -> Vec<Entry> {
     let mut out = Vec::new();
     // The repository on screen first: what you most likely want next.
-    if let Page::Repo(i) = s.page
-        && let Some(r) = s.data.repos.get(i)
+    if let Page::Repo(full) = &s.page
+        && let Some((i, r)) = s.data.repos.iter().enumerate().find(|(_, r)| r.full_name == *full)
     {
         let n = &r.name;
         out.push(entry(format!("New issue in {n}"), "Action", &icons::ISSUE, Command::Compose(i, Compose::Issue)));
@@ -193,7 +193,7 @@ pub fn score(query: &str, text: &str) -> Option<i32> {
                     return None;
                 }
             }
-            (40 - gaps.min(39)) as i32
+            40 - gaps.min(39)
         };
     }
     // The whole name typed out wins over a longer name that starts the same.
@@ -226,7 +226,7 @@ pub fn results(s: &App) -> Vec<Entry> {
 /// Runs a command (the palette is already closed).
 pub fn run(s: &mut App, cmd: Command, tx: &mut Tx) {
     let show = |s: &mut App, i: usize| {
-        if s.page != Page::Repo(i) {
+        if s.repo_index().is_none_or(|curr| curr != i) {
             s.open(i);
         }
     };
@@ -359,7 +359,7 @@ mod tests {
         assert!(all.iter().any(|e| e.cmd == Command::Go(Page::Pulls)));
         assert!(all.iter().any(|e| e.cmd == Command::OpenRepo(0)));
         assert!(!all.iter().any(|e| matches!(e.cmd, Command::Compose(..))), "no repository on screen, no New issue");
-        s.page = Page::Repo(1);
+        s.page = Page::Repo(s.data.repos[1].full_name.clone());
         let name = s.data.repos[1].name.clone();
         let found = search(entries(&s), "new issue");
         assert_eq!(found[0].cmd, Command::Compose(1, Compose::Issue), "{:?}", found.iter().map(|e| &e.title).collect::<Vec<_>>());
