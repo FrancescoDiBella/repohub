@@ -732,7 +732,10 @@ impl App {
         let mut cfg = (*self.cfg).clone();
         cfg.user = user;
         cfg.token = token;
-        cfg.env_file = Some(config::user_env_file().display().to_string());
+        let user_file = config::user_env_file().display().to_string();
+        cfg.env_file = Some(user_file.clone());
+        cfg.sources.user = cfg.user.as_ref().map(|_| user_file.clone());
+        cfg.sources.token = cfg.token.as_ref().map(|_| user_file.clone());
         self.cfg = Arc::new(cfg);
         self.acct_error = None;
         self.acct_token.clear();

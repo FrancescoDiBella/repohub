@@ -416,8 +416,12 @@ GitHub Enterprise.
 
 - Variables already set in the environment win over the file. Watch out if your shell already
   exports a `GITHUB_TOKEN` (desktop app).
-- Desktop app: `REPOHUB_ENV=/path/to/other.env` loads another file. Otherwise `.env` is looked up
-  in the current folder and its parents.
+- Desktop app: `REPOHUB_ENV=/path/to/other.env` loads an explicit settings file. For security,
+  installed release builds do not automatically load `.env` files from arbitrary working directories;
+  in development builds, upward directory search loads project `.env` files while restricting
+  sensitive overrides (`GITHUB_API_URL`, `REPOHUB_UPDATE_API`, `REPOHUB_CLAUDE`, `REPOHUB_DATA_DIR`).
+  Tokens saved in the app settings are never sent to custom API hosts unless configured directly
+  in the process environment or app settings.
 - Docker: `REPOHUB_ALLOWED_HOSTS` adds host names besides `localhost`.
 
 ## What it shows
