@@ -102,8 +102,8 @@ pub fn menu(s: &App) -> Vec<Entry> {
         }
     }
     // A new issue goes to the repository on screen, else the first pinned one.
-    let target = match s.page {
-        Page::Repo(i) => d.repos.get(i),
+    let target = match &s.page {
+        Page::Repo(full) => d.repos.iter().find(|r| r.full_name.eq_ignore_ascii_case(full)),
         _ => crate::pinned(s).first().and_then(|i| d.repos.get(*i)),
     };
     m.push(Entry::sep());
@@ -267,7 +267,7 @@ mod tests {
         assert!(!new_issue.enabled && new_issue.label.contains("connect"));
         assert!(!m.iter().find(|e| e.id == "refresh").expect("refresh").enabled);
         // On a repository's page, a new issue goes there.
-        s.page = Page::Repo(1);
+        s.page = Page::Repo(s.data.repos[1].full_name.clone());
         let target = format!("new-issue:{}", s.data.repos[1].full_name);
         assert!(menu(&s).iter().any(|e| e.id == target));
     }

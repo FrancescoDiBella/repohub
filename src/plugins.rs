@@ -300,19 +300,19 @@ impl Plugins {
         }
     }
 
-    /// What plugin `i`'s function `name` (`repo` or `page`) draws.
-    pub fn surface(&self, i: usize, cx: &rune::Cx<App>, name: &str) -> Option<rune::El> {
-        Some(self.list.get(i)?.script.as_ref()?.surface(cx, name))
+    /// What plugin `id`'s function `name` (`repo` or `page`) draws.
+    pub fn surface(&self, id: &str, cx: &rune::Cx<App>, name: &str) -> Option<rune::El> {
+        Some(self.list.iter().find(|p| p.id == id)?.script.as_ref()?.surface(cx, name))
     }
 
-    /// The plugins with a section on repository pages: (position, label).
-    pub fn repo_tabs(&self) -> Vec<(usize, String)> {
-        self.list.iter().enumerate().filter(|(_, p)| p.script.is_some()).filter_map(|(i, p)| Some((i, p.manifest.repo_tab.clone()?))).collect()
+    /// The plugins with a section on repository pages: (id, label).
+    pub fn repo_tabs(&self) -> Vec<(String, String)> {
+        self.list.iter().filter(|p| p.script.is_some()).filter_map(|p| Some((p.id.clone(), p.manifest.repo_tab.clone()?))).collect()
     }
 
-    /// The plugins with a page in the sidebar: (position, label).
-    pub fn pages(&self) -> Vec<(usize, String)> {
-        self.list.iter().enumerate().filter(|(_, p)| p.script.is_some()).filter_map(|(i, p)| Some((i, p.manifest.page.clone()?))).collect()
+    /// The plugins with a page in the sidebar: (id, label).
+    pub fn pages(&self) -> Vec<(String, String)> {
+        self.list.iter().filter(|p| p.script.is_some()).filter_map(|p| Some((p.id.clone(), p.manifest.page.clone()?))).collect()
     }
 }
 
@@ -430,8 +430,8 @@ pub fn context(s: &App, dark: bool) -> Data {
         ("starred", Data::Bool(r.starred)), ("updated", text(&r.updated_ago(s.now))), ("pushed", Data::Integer(r.pushed)),
         ("topics", Data::List(r.topics.iter().map(|t| text(t)).collect())),
     ]);
-    let (page, repo) = match s.page {
-        Page::Repo(i) => ("repo", s.data.repos.get(i)),
+    let (page, repo) = match &s.page {
+        Page::Repo(full) => ("repo", s.data.repos.iter().find(|r| r.full_name.eq_ignore_ascii_case(full))),
         Page::Plugin(_) => ("plugin", None),
         Page::Overview => ("overview", None),
         Page::Repos => ("repos", None),

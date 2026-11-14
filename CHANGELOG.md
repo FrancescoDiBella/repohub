@@ -68,6 +68,9 @@ The sections are **Added**, **Changed** and **Fixed**.
 - A new look, with a more readable layout.
 
 ### Fixed
+- Refreshing data or removing a repository no longer switches the repository page to a different
+  repository: repository and plugin pages and plugin sections now track their target by identity
+  instead of by numeric index, safely falling back if the item is removed.
 - Signing out or switching accounts in Settings no longer lets late responses overwrite the sample
   data or the new account, and resets the page, saved place, open forms and previous account
   caches.

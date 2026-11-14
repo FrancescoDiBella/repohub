@@ -66,17 +66,17 @@ fn same_repo(a: &str, b: &str) -> bool {
     a.eq_ignore_ascii_case(b) || b.rsplit('/').next().is_some_and(|n| a.eq_ignore_ascii_case(n))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Page {
     Overview,
     Repos,
-    Repo(usize),
+    Repo(String),
     Pulls,
     Issues,
     Actions,
     Settings,
-    /// A plugin's page (its position in `App::plugins`).
-    Plugin(usize),
+    /// A plugin's page (its id).
+    Plugin(String),
 }
 
 pub use state::Status;
@@ -110,7 +110,7 @@ pub struct App {
     /// Installed plugins (desktop app).
     plugins: plugins::Plugins,
     /// The plugin whose section is open on the repository page (instead of `tab`).
-    plugin_tab: Option<usize>,
+    plugin_tab: Option<String>,
     /// Settings → Plugins: the folder or Git address to install from, and what went wrong.
     plugin_src: TextEdit,
     plugin_error: Option<String>,
@@ -279,6 +279,19 @@ impl UpdateJob {
 }
 
 impl App {
+    /// The index into `data.repos` of the repository currently open, if any.
+    pub fn repo_index(&self) -> Option<usize> {
+        match &self.page {
+            Page::Repo(full) => self.repo_index_of(full),
+            _ => None,
+        }
+    }
+
+    /// Finds a repository's index by its full name (case-insensitive).
+    pub fn repo_index_of(&self, full: &str) -> Option<usize> {
+        self.data.repos.iter().position(|r| r.full_name.eq_ignore_ascii_case(full))
+    }
+
     /// Opens a page. Leaving a repository's section closes what belonged to it.
     fn go(&mut self, p: Page) {
         // Moving before the saved place was restored: you chose where to be.
@@ -297,10 +310,10 @@ impl App {
 
     /// The place on screen, for the next start.
     fn place(&self) -> state::Place {
-        let (page, repo) = match self.page {
+        let (page, repo) = match &self.page {
             Page::Overview => ("overview", None),
             Page::Repos => ("repos", None),
-            Page::Repo(i) => ("repo", self.data.repos.get(i).map(|r| r.full_name.clone())),
+            Page::Repo(full) => ("repo", Some(full.clone())),
             Page::Pulls => ("pulls", None),
             Page::Issues => ("issues", None),
             Page::Actions => ("actions", None),
@@ -368,8 +381,8 @@ impl App {
     /// Switches the repository page of repository `i` to `tab`.
     /// The sections a repository's page shows, in order: Claude only while it's on.
     fn tabs(&self) -> Vec<RepoTab> {
-        let local = match self.page {
-            Page::Repo(i) => self.data.repos.get(i).is_some_and(|r| self.local.contains_key(&r.full_name)),
+        let local = match &self.page {
+            Page::Repo(full) => self.local.contains_key(full),
             _ => false,
         };
         RepoTab::ALL.into_iter().filter(|t| (*t != RepoTab::Claude || self.assist.claude) && (*t != RepoTab::Changes || local)).collect()
@@ -602,7 +615,7 @@ impl App {
             tray::Action::Go(p) => self.go(p),
             tray::Action::OpenRepo(full) => if let Some(i) = repo(self, &full) { self.open(i) },
             tray::Action::NewIssue(full) => if let Some(i) = repo(self, &full) {
-                if self.page != Page::Repo(i) {
+                if !matches!(&self.page, Page::Repo(f) if f.eq_ignore_ascii_case(&full)) {
                     self.open(i);
                 }
                 self.open_form(i, Compose::Issue);
@@ -820,11 +833,13 @@ impl App {
     }
 
     fn open(&mut self, i: usize) {
-        if self.page != Page::Repo(i) {
+        let Some(r) = self.data.repos.get(i) else { return };
+        let full = r.full_name.clone();
+        if !matches!(&self.page, Page::Repo(f) if f.eq_ignore_ascii_case(&full)) {
             self.local_dir.clear();
             self.local_file = None;
         }
-        self.go(Page::Repo(i));
+        self.go(Page::Repo(full));
         self.set_tab(i, RepoTab::Code);
         self.load_detail(i);
     }
@@ -863,8 +878,22 @@ impl App {
                 self.loaded_clock = Some(self.clock);
                 self.now = net::now();
                 self.set_status(Status::Ready);
-                if let Page::Repo(i) = self.page {
-                    if i < self.data.repos.len() { self.load_detail(i) } else { self.page = Page::Repos }
+                if let Page::Repo(full) = &self.page.clone() {
+                    if let Some(i) = self.repo_index_of(full) {
+                        self.load_detail(i);
+                    } else {
+                        self.go(Page::Repos);
+                    }
+                }
+                if let Some(id) = &self.plugin_tab.clone()
+                    && !self.plugins.list.iter().any(|p| p.id == *id && p.manifest.repo_tab.is_some())
+                {
+                    self.plugin_tab = None;
+                }
+                if let Page::Plugin(id) = &self.page.clone()
+                    && !self.plugins.list.iter().any(|p| p.id == *id && p.manifest.page.is_some())
+                {
+                    self.go(Page::Overview);
                 }
                 self.restore_place();
             }
@@ -967,7 +996,9 @@ impl App {
         if self.git_job.is_some() {
             return;
         }
-        let Some(root) = self.data.repos.get(i).and_then(|r| clones_shim::find(&r.full_name)) else { return };
+        let Some(r) = self.data.repos.get(i) else { return };
+        let full = r.full_name.clone();
+        let Some(root) = clones_shim::find(&full) else { return };
         let Some(h) = self.handle.clone() else { return };
         self.git_job = Some(job);
         self.git_error = None;
@@ -986,8 +1017,10 @@ impl App {
                 }
                 Err(e) => s.git_error = Some(e),
             }
-            s.load_changes(i);
-            s.load_local(i, true);
+            if let Some(curr) = s.repo_index_of(&full) {
+                s.load_changes(curr);
+                s.load_local(curr, true);
+            }
         });
     }
 
@@ -1196,7 +1229,7 @@ impl App {
     }
 
     /// Sends the open form.
-    fn submit_form(&mut self, i: usize) {
+    fn submit_form(&mut self) {
         if actions::blocked(self).is_some() {
             return;
         }
@@ -1206,6 +1239,7 @@ impl App {
             return;
         }
         let repo = f.repo.clone();
+        let repo_cb = repo.clone();
         // What the screen shows for the new item until the lists reload.
         self.form_title = Some(f.title.text.trim().to_owned());
         self.pull_meta = Some((f.title.text.trim().to_owned(), f.draft));
@@ -1220,7 +1254,7 @@ impl App {
                 Ok(done) => {
                     s.form = None;
                     s.picker = None;
-                    s.apply_done(i, done);
+                    s.apply_done(&repo_cb, done);
                 }
                 Err(e) => {
                     if let Some(f) = s.form.as_mut() {
@@ -1245,8 +1279,10 @@ impl App {
             return;
         }
         self.confirm_merge = None;
-        let i = self.data.repos.iter().position(|r| r.full_name.eq_ignore_ascii_case(repo) || r.name.eq_ignore_ascii_case(repo)).unwrap_or(usize::MAX);
-        let full = if i != usize::MAX { self.data.repos[i].full_name.clone() } else { repo.to_owned() };
+        let full = self.data.repos.iter()
+            .find(|r| r.full_name.eq_ignore_ascii_case(repo) || (!repo.contains('/') && r.name.eq_ignore_ascii_case(repo)))
+            .map(|r| r.full_name.clone()).unwrap_or_else(|| repo.to_owned());
+        let full_cb = full.clone();
         let Some(h) = self.handle.clone() else { return };
         let cfg = self.cfg.clone();
         let epoch = self.load_gen;
@@ -1256,55 +1292,61 @@ impl App {
             }
             s.busy.remove(&key);
             match r {
-                Ok(done) => s.apply_done(i, done),
+                Ok(done) => s.apply_done(&full_cb, done),
                 Err(e) => s.notify_problem(e),
             }
         });
     }
 
     /// Shows what a write changed at once, without waiting for GitHub's lists to catch up.
-    fn apply_done(&mut self, i: usize, done: github::Done) {
-        self.apply_done_inner(i, done);
+    fn apply_done(&mut self, repo: &str, done: github::Done) {
+        self.apply_done_inner(repo, done);
         self.sync_tray();
     }
 
-    fn apply_done_inner(&mut self, i: usize, done: github::Done) {
-        let repo = self.data.repos.get(i).map(|r| r.full_name.clone()).unwrap_or_default();
+    fn apply_done_inner(&mut self, repo: &str, done: github::Done) {
+        let full_name = self.data.repos.iter()
+            .find(|r| r.full_name.eq_ignore_ascii_case(repo) || (!repo.contains('/') && r.name.eq_ignore_ascii_case(repo)))
+            .map(|r| r.full_name.clone()).unwrap_or_else(|| repo.to_owned());
         match done {
             github::Done::Issue(c) => {
                 let title = self.form_title.take().unwrap_or_default();
-                self.data.issues.insert(0, model::Issue { number: c.number, title, repo: repo.clone(), label: None, created_at: self.now, comments: 0, url: c.url });
-                if let Some(r) = self.data.repos.get_mut(i) {
+                self.data.issues.insert(0, model::Issue { number: c.number, title, repo: full_name.clone(), label: None, created_at: self.now, comments: 0, url: c.url });
+                if let Some(r) = self.data.repos.iter_mut().find(|r| r.full_name.eq_ignore_ascii_case(&full_name)) {
                     r.issues += 1;
                 }
-                self.notify(format!("Opened issue #{} in {repo}", c.number));
+                self.notify(format!("Opened issue #{} in {full_name}", c.number));
             }
             github::Done::Branch(name) => {
-                if let Some(Load::Ready(list)) = self.branches.get_mut(&repo) {
+                if let Some(Load::Ready(list)) = self.branches.get_mut(&full_name) {
                     list.push(name.clone());
                 }
                 self.notify(format!("Created branch {name}"));
-                self.set_branch(i, name);
+                if let Some(curr) = self.repo_index_of(&full_name) {
+                    self.set_branch(curr, name);
+                } else if !full_name.is_empty() {
+                    self.branch_of.insert(full_name, name);
+                }
             }
             github::Done::Pull(c) => {
                 let (title, draft) = self.pull_meta.take().unwrap_or_default();
                 let author = self.data.profile.login.clone();
                 self.data.pulls.insert(0, model::Pull {
-                    number: c.number, title, repo: repo.clone(), author,
+                    number: c.number, title, repo: full_name.clone(), author,
                     state: if draft { PullState::Draft } else { PullState::Open },
                     checks: None, updated_at: self.now, comments: 0, url: c.url,
                 });
                 self.notify(format!("Opened pull request #{}", c.number));
             }
             github::Done::Closed(n) => {
-                self.data.issues.retain(|x| !(x.number == n && same_repo(&x.repo, &repo)));
-                if let Some(r) = self.data.repos.get_mut(i) {
+                self.data.issues.retain(|x| !(x.number == n && same_repo(&x.repo, &full_name)));
+                if let Some(r) = self.data.repos.iter_mut().find(|r| r.full_name.eq_ignore_ascii_case(&full_name)) {
                     r.issues = r.issues.saturating_sub(1);
                 }
                 self.notify(format!("Closed issue #{n}"));
             }
             github::Done::Merged(n) => {
-                for p in self.data.pulls.iter_mut().filter(|p| p.number == n && same_repo(&p.repo, &repo)) {
+                for p in self.data.pulls.iter_mut().filter(|p| p.number == n && same_repo(&p.repo, &full_name)) {
                     p.state = PullState::Merged;
                 }
                 self.notify(format!("Merged pull request #{n}"));
@@ -1398,6 +1440,7 @@ impl App {
         let Some((full, branch)) = self.notes_branch(i) else { return };
         self.confirm_delete = None;
         let Some(h) = self.handle.clone() else { return };
+        let repo_full = full.clone();
         let epoch = self.load_gen;
         net::spawn(h, move || async move { notes::delete(&full, &branch, &name).await }, move |s: &mut App, r| {
             if s.load_gen != epoch {
@@ -1407,7 +1450,9 @@ impl App {
                 Ok(()) => s.notify("Drawing deleted"),
                 Err(e) => s.notify_problem(e),
             }
-            s.load_notes(i);
+            if let Some(curr) = s.repo_index_of(&repo_full) {
+                s.load_notes(curr);
+            }
         });
     }
 
@@ -1482,9 +1527,14 @@ impl App {
 
     /// Closes the editor and refreshes the list it came from.
     fn close_board(&mut self, i: usize) {
+        let full = self.data.repos.get(i).map(|r| r.full_name.clone());
         self.flush_board();
         self.board = None;
-        self.load_notes(i);
+        if let Some(full) = full
+            && let Some(curr) = self.repo_index_of(&full)
+        {
+            self.load_notes(curr);
+        }
     }
 
     /// Sends `prompt` to Claude Code in repository `i`'s local clone, continuing its conversation.
@@ -1582,10 +1632,12 @@ impl App {
     }
 
     /// Opens plugin `p`'s section on repository `i`'s page.
-    fn open_plugin_tab(&mut self, i: usize, p: Option<usize>) {
+    fn open_plugin_tab(&mut self, i: usize, p: Option<String>) {
         let Some(p) = p else { return };
-        if self.page != Page::Repo(i) {
-            self.go(Page::Repo(i));
+        let Some(r) = self.data.repos.get(i) else { return };
+        let full = r.full_name.clone();
+        if !matches!(&self.page, Page::Repo(f) if f.eq_ignore_ascii_case(&full)) {
+            self.go(Page::Repo(full));
         }
         self.leave_tab();
         self.plugin_tab = Some(p);
@@ -1617,8 +1669,10 @@ impl App {
             return;
         }
         self.plugin_confirm = None;
-        self.plugin_tab = None;
-        if matches!(self.page, Page::Plugin(_)) {
+        if self.plugin_tab.as_deref() == Some(id) {
+            self.plugin_tab = None;
+        }
+        if matches!(&self.page, Page::Plugin(pid) if pid == id) {
             self.go(Page::Settings);
         }
         match plugins::remove(id) {
@@ -1672,7 +1726,9 @@ impl App {
     /// first command of a new one in the known clone.
     fn run_harness(&mut self, i: usize, n: usize) {
         let Some(h) = self.assist.harnesses.get(n).cloned() else { return };
-        self.go(Page::Repo(i));
+        let Some(r) = self.data.repos.get(i) else { return };
+        let full = r.full_name.clone();
+        self.go(Page::Repo(full));
         self.set_tab(i, RepoTab::Terminal);
         let line = format!("{}\r", h.command);
         let running = self.data.repos.get(i).and_then(|r| self.terms.get(&r.full_name)).is_some_and(|t| t.is_running());
@@ -1753,11 +1809,11 @@ impl App {
 
     /// Pastes into the terminal of the repository on screen, when its Terminal tab is open.
     fn paste(&mut self, text: &str) -> bool {
-        let Page::Repo(i) = self.page else { return false };
+        let Page::Repo(full) = &self.page else { return false };
         if self.tab != RepoTab::Terminal {
             return false;
         }
-        match self.data.repos.get(i).and_then(|r| self.terms.get_mut(&r.full_name)) {
+        match self.terms.get_mut(full) {
             Some(t) => {
                 t.paste(text);
                 true
@@ -1891,7 +1947,7 @@ fn init() -> App {
     // `-- page repos|repo|pulls|issues|actions|settings` opens a page (for headless stills).
     s.page = match arg("page").as_deref() {
         Some("repos") => Page::Repos,
-        Some("repo") if !s.data.repos.is_empty() => Page::Repo(0),
+        Some("repo") if !s.data.repos.is_empty() => Page::Repo(s.data.repos[0].full_name.clone()),
         Some("pulls") => Page::Pulls,
         Some("issues") => Page::Issues,
         Some("actions") => Page::Actions,
@@ -1965,12 +2021,13 @@ fn kit(dark: bool) -> Kit {
 
 fn nav(s: &App, k: &Kit, label: &str, icon: &'static rune::Icon, page: Page, badge: Option<String>) -> El {
     let selected = s.page == page || (page == Page::Repos && matches!(s.page, Page::Repo(_)));
+    let target = page.clone();
     // The Repositories row shows every owner again.
     let mut r = SidebarRow::new(label).icon(icon).height(32.0).selected(selected).on_select(move |s: &mut App, _| {
-        if page == Page::Repos {
+        if target == Page::Repos {
             s.owner = OwnerFilter::All;
         }
-        s.go(page)
+        s.go(target.clone())
     });
     if let Some(b) = badge {
         r = r.badge(b);
@@ -2049,8 +2106,9 @@ fn sidebar(s: &App, k: &Kit) -> El {
         .child(text(s.cfg.title.clone()).font(k.ty.body_medium).color(k.c.text_strong));
     let pinned: Vec<El> = pinned(s).into_iter().map(|i| {
         let r = &s.data.repos[i];
+        let full = r.full_name.clone();
         SidebarRow::new(r.name.clone()).avatar(ui::avatar(k, &r.name, r.hue, 16.0)).height(30.0)
-            .selected(s.page == Page::Repo(i)).on_select(move |s: &mut App, _| s.open(i)).build(k).key(format!("pin-{}", r.full_name))
+            .selected(matches!(&s.page, Page::Repo(f) if f.eq_ignore_ascii_case(&full))).on_select(move |s: &mut App, _| s.open(i)).build(k).key(format!("pin-{}", r.full_name))
     }).collect();
     let org_rows: Vec<El> = orgs(s).into_iter().map(|(o, n)| {
         let on = s.page == Page::Repos && s.owner == OwnerFilter::Org(o.clone());
@@ -2072,9 +2130,10 @@ fn sidebar(s: &App, k: &Kit) -> El {
         sb = sb.section(SidebarSection::new("Organizations").count(org_rows.len()).collapsed(s.orgs_closed)
             .on_toggle(|s: &mut App, _| s.orgs_closed = !s.orgs_closed).rows(org_rows));
     }
-    let plugin_rows: Vec<El> = s.plugins.pages().into_iter().map(|(i, label)| {
-        SidebarRow::new(label.clone()).icon(&icons::SPARK).height(30.0).selected(s.page == Page::Plugin(i))
-            .on_select(move |s: &mut App, _| s.go(Page::Plugin(i))).build(k).key(format!("plugin-page-{i}"))
+    let plugin_rows: Vec<El> = s.plugins.pages().into_iter().map(|(id, label)| {
+        let pid = id.clone();
+        SidebarRow::new(label.clone()).icon(&icons::SPARK).height(30.0).selected(matches!(&s.page, Page::Plugin(p) if p == &pid))
+            .on_select(move |s: &mut App, _| s.go(Page::Plugin(pid.clone()))).build(k).key(format!("plugin-page-{id}"))
     }).collect();
     if !plugin_rows.is_empty() {
         sb = sb.section(SidebarSection::new("Plugins").count(plugin_rows.len()).rows(plugin_rows));
@@ -2083,15 +2142,15 @@ fn sidebar(s: &App, k: &Kit) -> El {
 }
 
 fn title(s: &App) -> String {
-    match s.page {
+    match &s.page {
         Page::Overview => "Overview".into(),
         Page::Repos => "Repositories".into(),
-        Page::Repo(i) => s.data.repos.get(i).map(|r| r.full_name.replace('/', " / ")).unwrap_or_default(),
+        Page::Repo(full) => full.replace('/', " / "),
         Page::Pulls => "Pull requests".into(),
         Page::Issues => "Issues".into(),
         Page::Actions => "Actions".into(),
         Page::Settings => "Settings".into(),
-        Page::Plugin(i) => s.plugins.list.get(i).and_then(|p| p.manifest.page.clone()).unwrap_or_default(),
+        Page::Plugin(id) => s.plugins.list.iter().find(|p| p.id == *id).and_then(|p| p.manifest.page.clone()).unwrap_or_default(),
     }
 }
 
@@ -2165,15 +2224,18 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
     let k = themes::kit(look);
     s.shown_dark.set(dark);
     s.plugins.set_colors(&k);
-    let content = match s.page {
+    let content = match &s.page {
         Page::Overview => pages::overview(s, &k),
         Page::Repos => pages::repos(s, &k),
-        Page::Repo(i) if i < s.data.repos.len() => {
-            let extra = s.plugin_tab.and_then(|p| s.plugins.surface(p, cx, "repo"));
-            pages::repo_detail(s, &k, i, extra)
+        Page::Repo(full) => {
+            if let Some(i) = s.repo_index_of(full) {
+                let extra = s.plugin_tab.as_deref().and_then(|p| s.plugins.surface(p, cx, "repo"));
+                pages::repo_detail(s, &k, i, extra)
+            } else {
+                pages::repos(s, &k)
+            }
         }
-        Page::Plugin(i) => s.plugins.surface(i, cx, "page").unwrap_or_else(|| pages::overview(s, &k)),
-        Page::Repo(_) => pages::repos(s, &k),
+        Page::Plugin(id) => s.plugins.surface(id, cx, "page").unwrap_or_else(|| pages::overview(s, &k)),
         Page::Pulls => lists::pulls(s, &k),
         Page::Issues => lists::issues(s, &k),
         Page::Actions => lists::actions(s, &k),
@@ -2242,8 +2304,8 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
     let root = if s.compact {
         let settings = IconButton::new(&icons::GEAR).variant(IconButtonVariant::GhostMuted).label("Settings")
             .expanded(s.page == Page::Settings).on_press(|s: &mut App| s.go(Page::Settings)).build(&k).key("open-settings");
-        let name = match s.page {
-            Page::Repo(i) => s.data.repos.get(i).map(|r| r.name.clone()).unwrap_or_default(),
+        let name = match &s.page {
+            Page::Repo(full) => s.repo_index_of(full).and_then(|i| s.data.repos.get(i)).map(|r| r.name.clone()).unwrap_or_else(|| full.clone()),
             _ => title(s),
         };
         mobile::shell(s, &k, cx.safe_area(), name, trailing.child(theme).child(settings), main.grow(1.0))
@@ -2790,6 +2852,8 @@ mod load_gen_tests {
 
 #[cfg(test)]
 mod fix60_tests {
+    use crate::Page;
+
     fn sample_release() -> crate::update::Release {
         crate::update::Release {
             sha: "abc1234def".into(),
@@ -2916,14 +2980,171 @@ mod fix60_tests {
         s.now = 1_700_000_000;
         s.data = crate::model::Data::sample_at(s.now);
         s.form_title = Some("New bug".into());
-        s.apply_done_inner(0, crate::github::Done::Issue(crate::github::Created { number: 999, url: "https://example.invalid/999".into() }));
+        s.apply_done_inner(&s.data.repos[0].full_name.clone(), crate::github::Done::Issue(crate::github::Created { number: 999, url: "https://example.invalid/999".into() }));
         assert_eq!(s.data.issues[0].created_at, 1_700_000_000);
         assert_eq!(s.data.issues[0].age_ago(1_700_000_300), "5 minutes ago");
 
         s.pull_meta = Some(("New PR".into(), false));
-        s.apply_done_inner(0, crate::github::Done::Pull(crate::github::Created { number: 1000, url: "https://example.invalid/1000".into() }));
+        s.apply_done_inner(&s.data.repos[0].full_name.clone(), crate::github::Done::Pull(crate::github::Created { number: 1000, url: "https://example.invalid/1000".into() }));
         assert_eq!(s.data.pulls[0].updated_at, 1_700_000_000);
         assert_eq!(s.data.pulls[0].age_ago(1_700_007_200), "2 hours ago");
+    }
+
+    #[test]
+    fn page_repo_tracks_by_identity_across_repo_reordering_and_removal() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = crate::init();
+        s.data = crate::model::Data::sample_at(1_700_000_000);
+        assert!(s.data.repos.len() >= 2);
+        let repo_1 = s.data.repos[1].full_name.clone();
+
+        // Open repository 1, set branch, tab, local_dir, local_file
+        s.open(1);
+        s.set_tab(1, crate::RepoTab::Terminal);
+        s.branch_of.insert(repo_1.clone(), "feature-x".into());
+        s.local_dir = "src/components".into();
+        s.local_file = Some(("mod.rs".into(), crate::state::Load::Ready(crate::local::Content::Missing)));
+
+        assert_eq!(s.page, Page::Repo(repo_1.clone()));
+        assert_eq!(s.tab, crate::RepoTab::Terminal);
+        assert_eq!(s.repo_index(), Some(1));
+        assert_eq!(s.place().repo.as_deref(), Some(repo_1.as_str()));
+
+        // Simulate refresh reordering data.repos (e.g. repo_1 sorted before repo_0)
+        let mut reordered = s.data.clone();
+        reordered.repos.swap(0, 1);
+        s.apply(s.load_gen, Ok(reordered));
+
+        // The page should still track repo_1, but its index is now 0.
+        // Its tab, branch_of, local_dir, and local_file must survive the reorder.
+        assert_eq!(s.page, Page::Repo(repo_1.clone()));
+        assert_eq!(s.tab, crate::RepoTab::Terminal);
+        assert_eq!(s.branch_of.get(&repo_1).map(|b| b.as_str()), Some("feature-x"));
+        assert_eq!(s.local_dir, "src/components");
+        assert_eq!(s.local_file.as_ref().map(|(f, _)| f.as_str()), Some("mod.rs"));
+        assert_eq!(s.repo_index(), Some(0));
+        assert_eq!(s.place().repo.as_deref(), Some(repo_1.as_str()));
+
+        // Simulate having a board open for repo_1
+        s.open_board(0, "architecture".into(), true);
+        assert!(s.board.is_some(), "board editor is open");
+
+        // Simulate refresh where repo_1 was deleted/unloaded from GitHub
+        let mut without_repo_1 = s.data.clone();
+        without_repo_1.repos.retain(|r| r.full_name != repo_1);
+        s.apply(s.load_gen, Ok(without_repo_1));
+
+        // Missing repository falls back safely to Page::Repos and closes board via leave_tab
+        assert_eq!(s.page, Page::Repos);
+        assert_eq!(s.repo_index(), None);
+        assert!(s.board.is_none(), "board must be cleared on fallback to Repos");
+    }
+
+    #[test]
+    fn apply_done_updates_intended_repository_after_reordering() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = crate::init();
+        s.now = 1_700_000_000;
+        s.data = crate::model::Data::sample_at(s.now);
+        assert!(s.data.repos.len() >= 2);
+        let repo_0 = s.data.repos[0].full_name.clone();
+        let repo_1 = s.data.repos[1].full_name.clone();
+        let issues_1_before = s.data.repos[1].issues;
+
+        // Initialize branches cache for repo_1
+        s.branches.insert(repo_1.clone(), crate::state::Load::Ready(vec!["main".into()]));
+
+        // Reorder repos before asynchronous done response arrives
+        s.data.repos.swap(0, 1);
+        assert_eq!(s.data.repos[0].full_name, repo_1);
+        assert_eq!(s.data.repos[1].full_name, repo_0);
+
+        // A Done::Branch for repo_1 arrives
+        s.apply_done(&repo_1, crate::github::Done::Branch("feature/reorder".into()));
+        if let Some(crate::state::Load::Ready(branches)) = s.branches.get(&repo_1) {
+            assert!(branches.contains(&"feature/reorder".to_string()), "branches list updated for repo_1");
+        } else {
+            panic!("branches cache missing for repo_1");
+        }
+        assert_eq!(s.branch_of.get(&repo_1).map(|b| b.as_str()), Some("feature/reorder"));
+
+        // A Done::Issue for repo_1 arrives
+        s.form_title = Some("New reordered issue".into());
+        s.apply_done(&repo_1, crate::github::Done::Issue(crate::github::Created { number: 888, url: "https://example.invalid/888".into() }));
+        assert_eq!(s.data.issues[0].number, 888);
+        assert_eq!(s.data.issues[0].repo, repo_1);
+        let repo_1_entry = s.data.repos.iter().find(|r| r.full_name == repo_1).unwrap();
+        assert_eq!(repo_1_entry.issues, issues_1_before + 1);
+
+        // A Done::Closed for repo_1 arrives
+        s.apply_done(&repo_1, crate::github::Done::Closed(888));
+        assert!(s.data.issues.iter().all(|x| x.number != 888));
+        let repo_1_entry = s.data.repos.iter().find(|r| r.full_name == repo_1).unwrap();
+        assert_eq!(repo_1_entry.issues, issues_1_before);
+    }
+
+    #[test]
+    fn apply_done_on_unloaded_external_repo_does_not_mutate_loaded_same_name_repo() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = crate::init();
+        s.now = 1_700_000_000;
+        s.data = crate::model::Data::sample_at(s.now);
+        // Ensure alice/app is in data.repos
+        s.data.repos[0].owner = "alice".into();
+        s.data.repos[0].name = "app".into();
+        s.data.repos[0].full_name = "alice/app".into();
+        s.data.repos[0].issues = 5;
+
+        // Add a pull request and an issue belonging to external repo other-org/app
+        s.data.pulls.insert(0, crate::model::Pull {
+            number: 42,
+            title: "External PR".into(),
+            repo: "other-org/app".into(),
+            author: "bob".into(),
+            state: crate::model::PullState::Open,
+            checks: None,
+            updated_at: s.now,
+            comments: 0,
+            url: "https://github.com/other-org/app/pull/42".into(),
+        });
+        s.data.issues.insert(0, crate::model::Issue {
+            number: 77,
+            title: "External Issue".into(),
+            repo: "other-org/app".into(),
+            label: None,
+            created_at: s.now,
+            comments: 0,
+            url: "https://github.com/other-org/app/issues/77".into(),
+        });
+
+        // Merge PR 42 on other-org/app
+        s.apply_done_inner("other-org/app", crate::github::Done::Merged(42));
+        assert_eq!(s.data.pulls[0].number, 42);
+        assert_eq!(s.data.pulls[0].state, crate::model::PullState::Merged, "external PR updated to merged");
+
+        // Close issue 77 on other-org/app
+        s.apply_done_inner("other-org/app", crate::github::Done::Closed(77));
+        assert!(s.data.issues.iter().all(|x| !(x.number == 77 && x.repo == "other-org/app")), "external issue removed");
+
+        // alice/app issues count MUST remain unchanged
+        assert_eq!(s.data.repos[0].issues, 5, "alice/app issues count must not be decremented by external repo close");
+    }
+
+    #[test]
+    fn plugin_page_and_plugin_tab_reset_safely_when_unloaded() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = crate::init();
+        s.data = crate::model::Data::sample();
+
+        // Simulate a plugin tab and plugin page set
+        s.page = Page::Plugin("test-plugin".into());
+        s.plugin_tab = Some("test-plugin".into());
+
+        // Refresh runs with no plugins matching "test-plugin"
+        s.apply(s.load_gen, Ok(s.data.clone()));
+
+        assert_eq!(s.page, Page::Overview, "removed plugin page falls back to Overview");
+        assert_eq!(s.plugin_tab, None, "removed plugin tab resets to None");
     }
 }
 

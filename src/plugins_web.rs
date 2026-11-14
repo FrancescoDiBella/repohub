@@ -37,13 +37,13 @@ impl Plugins {
     pub fn scan() -> Plugins {
         Plugins::default()
     }
-    pub fn surface(&self, _: usize, _: &rune::Cx<App>, _: &str) -> Option<rune::El> {
+    pub fn surface(&self, _: &str, _: &rune::Cx<App>, _: &str) -> Option<rune::El> {
         None
     }
-    pub fn repo_tabs(&self) -> Vec<(usize, String)> {
+    pub fn repo_tabs(&self) -> Vec<(String, String)> {
         Vec::new()
     }
-    pub fn pages(&self) -> Vec<(usize, String)> {
+    pub fn pages(&self) -> Vec<(String, String)> {
         Vec::new()
     }
     pub fn set_colors(&self, _: &rune_kit::Kit) {}
