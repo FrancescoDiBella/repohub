@@ -239,6 +239,11 @@ pub fn pull_line(s: &App, k: &Kit, p: &Pull, compact: bool) -> El {
     let asking = s.confirm_merge.as_deref() == Some(key.as_str());
     let (repo, number) = (p.repo.clone(), p.number);
     let mut tools = row().gap(6.0).center_y().mr(12.0).children(files);
+    // With its diff open, the pull request merges from the diff panel (one confirmation on
+    // screen, with the method picked there).
+    if active {
+        return row().w_full().center_y().child(line).child(tools).fill(k.c.bg_accent.alpha(0.12));
+    }
     if asking && !busy {
         let r2 = repo.clone();
         tools = tools
@@ -255,11 +260,7 @@ pub fn pull_line(s: &App, k: &Kit, p: &Pull, compact: bool) -> El {
             .disabled(busy || blocked(s).is_some())
             .on_press(move |s: &mut App| s.confirm_merge = Some(k2.clone())).build(k).key(format!("merge-{key}")));
     }
-    let mut r = row().w_full().center_y().child(line).child(tools);
-    if active {
-        r = r.fill(k.c.bg_accent.alpha(0.12));
-    }
-    r
+    row().w_full().center_y().child(line).child(tools)
 }
 
 #[cfg(test)]

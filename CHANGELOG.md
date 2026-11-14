@@ -68,6 +68,11 @@ The sections are **Added**, **Changed** and **Fixed**.
 - A new look, with a more readable layout.
 
 ### Fixed
+- Drawings no longer lose edits when you close one and reopen it, or create one with the same
+  name, while it's still saving. Saves still finish after an account switch, and deleting a
+  drawing while it saves deletes it once the save ends.
+- Only one merge confirmation shows for a pull request whose diff is open, and it goes away
+  with its diff.
 - Sensitive settings (`GITHUB_API_URL`, `REPOHUB_UPDATE_API`, `REPOHUB_CLAUDE`, `REPOHUB_DATA_DIR`,
   `REPOHUB_TERMINAL_COMMANDS`, `REPOHUB_REPOS_DIR`) can no longer be injected by untrusted project
   `.env` files discovered via upward directory search, and release builds only load project `.env`

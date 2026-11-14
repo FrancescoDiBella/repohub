@@ -199,9 +199,12 @@ pub struct App {
     /// from an earlier board or earlier load cannot overwrite the open board.
     board_load_gen: u64,
     /// Drawings currently having a `notes::save` operation in-flight: `(repo, branch, name)`.
-    saving_notes: std::collections::HashSet<(String, String, String)>,
+    saving_notes: HashMap<(String, String, String), NoteOp>,
+    /// The note operations started, in order (tests check the write chain with it).
+    #[cfg(test)]
+    note_log: Vec<String>,
     /// Pending drawing save payloads waiting for an in-flight write to complete.
-    pending_note_saves: HashMap<(String, String, String), String>,
+    pending_note_saves: HashMap<(String, String, String), NoteOp>,
     /// The drawing open in the Notes tab, if any.
     board: Option<board::Board>,
     // Claude tab (desktop): one conversation per repository, run in its local clone.
@@ -621,7 +624,7 @@ impl App {
     /// A pick from the widget's menu (or a click on its icon: `open`).
     fn tray_action(&mut self, id: &str) {
         let Some(action) = tray::parse(id) else { return };
-        let repo = |s: &App, full: &str| s.data.repos.iter().position(|r| r.full_name == full);
+        let repo = |s: &App, full: &str| s.data.repos.iter().position(|r| r.full_name.eq_ignore_ascii_case(full));
         let show = !matches!(action, tray::Action::Refresh | tray::Action::Quit);
         match action {
             tray::Action::Open => {}
@@ -665,8 +668,8 @@ impl App {
     fn reset_account_state(&mut self) {
         self.load_gen = self.load_gen.wrapping_add(1);
         self.board_load_gen = self.board_load_gen.wrapping_add(1);
-        self.saving_notes.clear();
-        self.pending_note_saves.clear();
+        // Drawings are files on this computer (or the server's notes folder), not account data:
+        // writes in flight and queued ones still finish, so no edit is lost on an account switch.
         self.leave_tab();
         self.data = Data::default();
         self.tab = RepoTab::Code;
@@ -915,6 +918,14 @@ impl App {
                 self.set_status(Status::Ready);
                 if let Page::Repo(full) = &self.page.clone() {
                     if let Some(i) = self.repo_index_of(full) {
+                        // Keep the name as GitHub spells it now: local clones, terminals and the
+                        // title are keyed by it exactly.
+                        let current = self.data.repos[i].full_name.clone();
+                        if current != *full {
+                            self.page = Page::Repo(current);
+                            self.save_place();
+                            self.sync_tray();
+                        }
                         self.load_detail(i);
                     } else {
                         self.go(Page::Repos);
@@ -1128,6 +1139,8 @@ impl App {
     /// Shows pull request `number` of `full`'s files as a diff.
     fn open_pull_diff(&mut self, full: String, number: u32) {
         let key = (full.clone(), number);
+        // A merge confirmation belongs to the diff it was asked from.
+        self.confirm_merge = None;
         self.pull_diff_of = Some(key.clone());
         self.pull_diff_load = Some(Load::Loading);
         self.pull_diff.set_files(Vec::new());
@@ -1136,7 +1149,10 @@ impl App {
             self.pull_diff_load = Some(Load::Ready(()));
             return;
         }
-        let Some(h) = self.handle.clone() else { return };
+        let Some(h) = self.handle.clone() else {
+            self.pull_diff_load = Some(Load::Failed("The app isn't ready to load this diff yet: try again in a moment.".into()));
+            return;
+        };
         let cfg = self.cfg.clone();
         let epoch = self.load_gen;
         net::spawn(h, move || async move { github::load_pull_files(&cfg, &full, number).await }, move |s: &mut App, r| {
@@ -1145,6 +1161,9 @@ impl App {
     }
 
     fn close_pull_diff(&mut self) {
+        if self.pull_diff_of.is_some() {
+            self.confirm_merge = None;
+        }
         self.pull_diff_of = None;
         self.pull_diff_load = None;
         self.pull_diff.set_files(Vec::new());
@@ -1474,20 +1493,29 @@ impl App {
     fn delete_note(&mut self, i: usize, name: String) {
         let Some((full, branch)) = self.notes_branch(i) else { return };
         self.confirm_delete = None;
+        let id = (full, branch, name);
+        // Deleting wins over any write still waiting; an operation already running finishes
+        // first, then the delete runs, so the drawing can't come back.
+        if self.saving_notes.contains_key(&id) {
+            self.pending_note_saves.insert(id, NoteOp::Delete);
+            self.notify("Deleting the drawing once its last save finishes");
+            return;
+        }
+        self.pending_note_saves.remove(&id);
+        self.run_note_delete(id);
+    }
+
+    /// Deletes drawing `id`. Like a write, it counts as the drawing's running operation until it
+    /// finishes, so nothing else for the same drawing runs alongside it.
+    fn run_note_delete(&mut self, id: (String, String, String)) {
+        #[cfg(test)]
+        self.note_log.push(format!("delete {}", id.2));
         let Some(h) = self.handle.clone() else { return };
-        let repo_full = full.clone();
+        self.saving_notes.insert(id.clone(), NoteOp::Delete);
+        let (full, branch, name) = id.clone();
         let epoch = self.load_gen;
         net::spawn(h, move || async move { notes::delete(&full, &branch, &name).await }, move |s: &mut App, r| {
-            if s.load_gen != epoch {
-                return;
-            }
-            match r {
-                Ok(()) => s.notify("Drawing deleted"),
-                Err(e) => s.notify_problem(e),
-            }
-            if let Some(curr) = s.repo_index_of(&repo_full) {
-                s.load_notes(curr);
-            }
+            s.apply_note_op(epoch, id, r);
         });
     }
 
@@ -1518,21 +1546,42 @@ impl App {
         let board_epoch = self.board_load_gen;
         let id = (full.clone(), branch.clone(), name.clone());
         let mut b = board::Board::new(&full, &branch, &name);
-        if new {
-            self.pending_note_saves.remove(&id);
-            self.board = Some(b);
-            return;
-        }
-        if let Some(json) = self.pending_note_saves.remove(&id) {
+        // The newest content of this drawing may not be on disk yet: a snapshot waiting behind a
+        // running write, or the one being written. Open from it, never from the older file.
+        let queued = match self.pending_note_saves.remove(&id) {
+            Some(NoteOp::Save(json)) => Some(json),
+            Some(NoteOp::Delete) => {
+                self.notify("Opened again, so the drawing won't be deleted");
+                None
+            }
+            None => None,
+        };
+        let running = self.saving_notes.get(&id).cloned();
+        let newest = queued.clone().or_else(|| match &running {
+            Some(NoteOp::Save(json)) => Some(json.clone()),
+            _ => None,
+        });
+        if let Some(json) = newest {
             let _ = b.load_json(&json);
-            if self.saving_notes.contains(&id) {
-                b.save = Save::Saving { dirty: true };
+            if running.is_some() {
+                // An operation is running: a queued snapshot is written after it (dirty);
+                // otherwise what's on screen is what's being written.
+                b.save = Save::Saving { dirty: queued.is_some() };
                 self.board = Some(b);
             } else {
                 b.save = Save::Saving { dirty: false };
                 self.board = Some(b);
                 self.write_board();
             }
+            return;
+        }
+        if running == Some(NoteOp::Delete) {
+            // Being deleted: it opens empty, and what's drawn now is written once the delete ends.
+            self.board = Some(b);
+            return;
+        }
+        if new {
+            self.board = Some(b);
             return;
         }
         b.save = Save::Loading;
@@ -1549,7 +1598,7 @@ impl App {
     fn save_board(&mut self) {
         let Some(b) = self.board.as_mut() else { return };
         let id = (b.repo.clone(), b.branch.clone(), b.name.clone());
-        let in_flight = self.saving_notes.contains(&id);
+        let in_flight = self.saving_notes.contains_key(&id);
         let start = b.save.edit();
         if in_flight {
             if start || matches!(b.save, Save::Saving { .. }) {
@@ -1568,35 +1617,67 @@ impl App {
     }
 
     fn write_note(&mut self, id: (String, String, String), json: String) {
+        #[cfg(test)]
+        self.note_log.push(format!("save {}: {}", id.2, json.len()));
         let Some(h) = self.handle.clone() else { return };
-        self.saving_notes.insert(id.clone());
+        self.saving_notes.insert(id.clone(), NoteOp::Save(json.clone()));
         let (repo, branch, name) = (id.0.clone(), id.1.clone(), id.2.clone());
         let epoch = self.load_gen;
         net::spawn(h, move || async move { notes::save(&repo, &branch, &name, json).await }, move |s: &mut App, r| {
-            s.apply_board_write(epoch, id, r);
+            s.apply_note_op(epoch, id, r);
         });
     }
 
-    fn apply_board_write(&mut self, epoch: u64, id: (String, String, String), r: Result<(), String>) {
-        self.saving_notes.remove(&id);
+    /// A drawing's running operation (a write or a delete) finished.
+    fn apply_note_op(&mut self, epoch: u64, id: (String, String, String), r: Result<(), String>) {
+        let done = self.saving_notes.remove(&id);
+        // What waits behind it runs whatever happened meanwhile (even an account switch): it's
+        // the user's newest content, or their delete.
+        match self.pending_note_saves.remove(&id) {
+            Some(NoteOp::Save(next_json)) => {
+                if let Some(b) = self.board.as_mut().filter(|b| board_is(b, &id)) {
+                    b.save = Save::Saving { dirty: false };
+                }
+                self.write_note(id, next_json);
+                return;
+            }
+            Some(NoteOp::Delete) => {
+                self.run_note_delete(id);
+                return;
+            }
+            None => {}
+        }
+        let open = self.board.as_ref().is_some_and(|b| board_is(b, &id));
+        if done == Some(NoteOp::Delete) {
+            // Drawn on while it was being deleted: write that now.
+            if open && self.board.as_ref().is_some_and(|b| matches!(b.save, Save::Saving { dirty: true })) {
+                if let Some(b) = self.board.as_mut() {
+                    b.save = Save::Saving { dirty: false };
+                }
+                self.write_board();
+            }
+            if self.load_gen == epoch {
+                match &r {
+                    Ok(()) => self.notify("Drawing deleted"),
+                    Err(e) => self.notify_problem(e.clone()),
+                }
+                if let Some(curr) = self.repo_index_of(&id.0) {
+                    self.load_notes(curr);
+                }
+            }
+            return;
+        }
         if self.load_gen != epoch {
             return;
         }
-        // If another snapshot is waiting behind this write (from flush_board or rapid edits), write it now.
-        if let Some(next_json) = self.pending_note_saves.remove(&id) {
-            if let Some(b) = self.board.as_mut().filter(|b| (b.repo.as_str(), b.branch.as_str(), b.name.as_str()) == (id.0.as_str(), id.1.as_str(), id.2.as_str())) {
-                b.save = Save::Saving { dirty: false };
+        // The open drawing shows the result itself (Saved, or Failed with its message); a toast
+        // is for a drawing that's no longer on screen.
+        if open {
+            if let Some(b) = self.board.as_mut()
+                && b.save.written(r)
+            {
+                self.write_board();
             }
-            self.write_note(id, next_json);
-            return;
-        }
-        // If the board is still open on screen, update its Save state machine.
-        let same = self.board.as_ref().is_some_and(|b| (b.repo.as_str(), b.branch.as_str(), b.name.as_str()) == (id.0.as_str(), id.1.as_str(), id.2.as_str()));
-        if same
-            && let Some(b) = self.board.as_mut()
-            && b.save.written(r.clone())
-        {
-            self.write_board();
             return;
         }
         if let Err(e) = r {
@@ -1613,8 +1694,8 @@ impl App {
         }
         let id = (b.repo.clone(), b.branch.clone(), b.name.clone());
         let json = b.to_json();
-        if self.saving_notes.contains(&id) {
-            self.pending_note_saves.insert(id, json);
+        if self.saving_notes.contains_key(&id) {
+            self.pending_note_saves.insert(id, NoteOp::Save(json));
         } else {
             self.write_note(id, json);
         }
@@ -1996,7 +2077,9 @@ fn init() -> App {
         note_name: TextEdit::new(""),
         confirm_delete: None,
         board_load_gen: 0,
-        saving_notes: std::collections::HashSet::new(),
+        saving_notes: HashMap::new(),
+        #[cfg(test)]
+        note_log: Vec::new(),
         pending_note_saves: HashMap::new(),
         board: None,
         chats: HashMap::new(),
@@ -2088,6 +2171,18 @@ fn init() -> App {
 }
 
 /// GitHub-like palette seeds: canvas, ink and the blue accent.
+/// What waits behind a drawing's running write: its newest content, or a delete.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum NoteOp {
+    Save(String),
+    Delete,
+}
+
+/// Whether `b` is the drawing `id` (repository, branch, name).
+fn board_is(b: &board::Board, id: &(String, String, String)) -> bool {
+    (b.repo.as_str(), b.branch.as_str(), b.name.as_str()) == (id.0.as_str(), id.1.as_str(), id.2.as_str())
+}
+
 /// The theme editor's text fields, for one of your looks (`id` empty: none open).
 #[derive(Default)]
 pub struct LookEditor {
@@ -2712,6 +2807,7 @@ mod load_gen_tests {
         s.details.insert((full.clone(), "main".into()), Load::Ready(Detail::default()));
         s.branches.insert(full.clone(), Load::Ready(vec!["main".into()]));
         s.branch_of.insert(full.clone(), "dev".into());
+        s.notes.entry((full.clone(), "main".into())).or_default().state = crate::state::Refresh::Fresh;
         s.diff_of = Some(crate::diffs::DiffOf::Local(full.clone()));
         s.diff_load = Some(Load::Ready(()));
         s.pull_diff_of = Some((full.clone(), 42));
@@ -3665,7 +3761,7 @@ mod fix56_tests {
         // Simulate save_board starting an in-flight write
         assert!(b.save.edit());
         assert_eq!(b.save, Save::Saving { dirty: false });
-        s.saving_notes.insert(id.clone());
+        s.saving_notes.insert(id.clone(), crate::NoteOp::Save(String::new()));
 
         // User makes another edit while write 1 is running
         let b = s.board.as_mut().unwrap();
@@ -3687,11 +3783,11 @@ mod fix56_tests {
         // flush_board should have queued the pending snapshot instead of starting a concurrent write!
         assert_eq!(s.saving_notes.len(), 1, "never start concurrent writes");
         assert!(s.pending_note_saves.contains_key(&id), "latest snapshot must be queued in pending_note_saves");
-        let queued_json = s.pending_note_saves.get(&id).unwrap();
+        let Some(crate::NoteOp::Save(queued_json)) = s.pending_note_saves.get(&id) else { panic!("a queued save") };
         assert!(queued_json.contains("elem-2"), "queued snapshot contains the latest edits");
 
         // Write 1 finishes: apply_board_write runs
-        s.apply_board_write(s.load_gen, id.clone(), Ok(()));
+        s.apply_note_op(s.load_gen, id.clone(), Ok(()));
         // Queued write is consumed
         assert!(!s.pending_note_saves.contains_key(&id));
     }
@@ -3712,8 +3808,8 @@ mod fix56_tests {
             }]
         }).to_string();
 
-        s.saving_notes.insert(id.clone());
-        s.pending_note_saves.insert(id.clone(), pending_json);
+        s.saving_notes.insert(id.clone(), crate::NoteOp::Save(String::new()));
+        s.pending_note_saves.insert(id.clone(), crate::NoteOp::Save(pending_json));
 
         // Opening the board while a save is pending should load the pending in-memory JSON
         s.open_board(0, "Drawing2".into(), false);
@@ -3742,7 +3838,7 @@ mod fix56_tests {
 
         // 2. Write 1 starts in-flight (snapshot with elem-1)
         assert!(b.save.edit());
-        s.saving_notes.insert(id.clone());
+        s.saving_notes.insert(id.clone(), crate::NoteOp::Save(String::new()));
 
         // 3. User edits elem-2 while write 1 is in flight
         let b = s.board.as_mut().unwrap();
@@ -3780,7 +3876,7 @@ mod fix56_tests {
         assert_eq!(s.board.as_ref().unwrap().save, Save::Saving { dirty: true });
 
         // 7. Write 1 finishes!
-        s.apply_board_write(s.load_gen, id.clone(), Ok(()));
+        s.apply_note_op(s.load_gen, id.clone(), Ok(()));
         // Board is open, so apply_board_write calls written(Ok(())) which returns true and triggers write_board()!
         // b.save becomes Saving { dirty: false }
         let b = s.board.as_ref().unwrap();
@@ -3792,7 +3888,7 @@ mod fix56_tests {
         assert!(json.contains("elem-3"));
 
         // Write 2 finishes
-        s.apply_board_write(s.load_gen, id.clone(), Ok(()));
+        s.apply_note_op(s.load_gen, id.clone(), Ok(()));
         assert_eq!(s.board.as_ref().unwrap().save, Save::Saved);
         assert!(s.saving_notes.is_empty());
     }
@@ -3803,13 +3899,15 @@ mod fix56_tests {
         let (full, branch) = s.notes_branch(0).unwrap();
         let id = (full.clone(), branch.clone(), "NewWhileSaving".into());
 
-        // Simulate an old in-flight write for this same drawing name
-        s.saving_notes.insert(id.clone());
+        // Simulate an old in-flight write (of an empty drawing) for this same drawing name
+        let empty = board::Board::new(&full, &branch, "NewWhileSaving").to_json();
+        s.saving_notes.insert(id.clone(), crate::NoteOp::Save(empty));
 
-        // User creates new drawing with same name (b.save == Save::Saved)
+        // User creates new drawing with same name: it opens on the write that is running (its
+        // content is the newest one), so the board is Saving, not a blank Saved board.
         s.open_board(0, "NewWhileSaving".into(), true);
         let b = s.board.as_ref().unwrap();
-        assert_eq!(b.save, Save::Saved);
+        assert_eq!(b.save, Save::Saving { dirty: false });
         assert!(b.elements.is_empty());
 
         // User adds an element and triggers save_board()
@@ -3826,7 +3924,7 @@ mod fix56_tests {
         assert_eq!(s.board.as_ref().unwrap().save, Save::Saving { dirty: true });
 
         // When the old in-flight write completes:
-        s.apply_board_write(s.load_gen, id.clone(), Ok(()));
+        s.apply_note_op(s.load_gen, id.clone(), Ok(()));
 
         // It detects dirty: true, calls write_board() with elem-new, and transitions to dirty: false
         let b = s.board.as_ref().unwrap();
@@ -3835,7 +3933,7 @@ mod fix56_tests {
         assert!(json.contains("elem-new"));
 
         // When write for elem-new completes:
-        s.apply_board_write(s.load_gen, id.clone(), Ok(()));
+        s.apply_note_op(s.load_gen, id.clone(), Ok(()));
         assert_eq!(s.board.as_ref().unwrap().save, Save::Saved);
         assert!(s.saving_notes.is_empty());
     }
@@ -3863,7 +3961,7 @@ mod fix56_tests {
         // 2. First write starts in-flight (snapshot 1)
         let json_1 = b.to_json();
         assert!(b.save.edit());
-        s.saving_notes.insert(id.clone());
+        s.saving_notes.insert(id.clone(), crate::NoteOp::Save(String::new()));
 
         // 3. User makes newer edits while write 1 is in-flight
         let b = s.board.as_mut().unwrap();
@@ -3881,18 +3979,18 @@ mod fix56_tests {
         assert!(s.board.is_none(), "board is closed");
         assert_eq!(s.saving_notes.len(), 1, "never start concurrent writes");
         assert!(s.pending_note_saves.contains_key(&id), "queued snapshot must be in pending_note_saves");
-        let queued_json = s.pending_note_saves.get(&id).unwrap().clone();
+        let Some(crate::NoteOp::Save(queued_json)) = s.pending_note_saves.get(&id).cloned() else { panic!("a queued save") };
 
         // Older write 1 lands on disk first
         pollster::block_on(crate::notes::save(&id.0, &id.1, &id.2, json_1)).unwrap();
 
         // 5. Write 1 finishes: apply_board_write runs
-        s.apply_board_write(s.load_gen, id.clone(), Ok(()));
+        s.apply_note_op(s.load_gen, id.clone(), Ok(()));
         assert!(!s.pending_note_saves.contains_key(&id), "queued write popped");
 
         // Write 2 lands on disk with the newest content
         pollster::block_on(crate::notes::save(&id.0, &id.1, &id.2, queued_json)).unwrap();
-        s.apply_board_write(s.load_gen, id.clone(), Ok(()));
+        s.apply_note_op(s.load_gen, id.clone(), Ok(()));
         assert!(s.saving_notes.is_empty());
 
         // 6. Verify drawing file on disk has the newest edits (both shape-1 and shape-2)
@@ -3904,3 +4002,168 @@ mod fix56_tests {
 
 
 
+
+#[cfg(test)]
+mod fix83_tests {
+    use super::*;
+    use crate::board::{Element, Kind};
+    use crate::state::Save;
+
+    fn app() -> App {
+        let mut s = crate::init();
+        s.data = crate::model::Data::sample();
+        s.data.repos[0].full_name = "owner/repo".into();
+        s.data.repos[0].branch = "main".into();
+        s
+    }
+
+    /// A drawing's JSON with one rectangle called `tag`.
+    fn drawing(tag: &str) -> String {
+        let mut b = board::Board::new("owner/repo", "main", "x");
+        b.elements.push(Element {
+            id: tag.into(), kind: Kind::Rectangle, x: 1.0, y: 1.0, w: 10.0, h: 10.0, points: vec![],
+            stroke: "#000".into(), fill: None, width: 2.0, text: String::new(), font: 20.0, seed: 1,
+        });
+        b.to_json()
+    }
+
+    fn id(s: &App, name: &str) -> (String, String, String) {
+        let (full, branch) = s.notes_branch(0).unwrap();
+        (full, branch, name.into())
+    }
+
+    #[test]
+    fn reopening_during_a_clean_write_shows_what_is_being_written() {
+        let mut s = app();
+        let id = id(&s, "Arch");
+        // A write of the newest content is running, nothing queued behind it (the board was
+        // closed while Saving { dirty: false }).
+        s.saving_notes.insert(id.clone(), NoteOp::Save(drawing("newest")));
+        s.open_board(0, "Arch".into(), false);
+        let b = s.board.as_ref().unwrap();
+        assert_eq!(b.save, Save::Saving { dirty: false }, "not Loading from the older file");
+        assert!(b.to_json().contains("newest"));
+        // The write finishes: the board is Saved, with the same content.
+        s.apply_note_op(s.load_gen, id, Ok(()));
+        let b = s.board.as_ref().unwrap();
+        assert_eq!(b.save, Save::Saved);
+        assert!(b.to_json().contains("newest"));
+    }
+
+    #[test]
+    fn new_with_the_same_name_keeps_the_queued_edits() {
+        let mut s = app();
+        let id = id(&s, "Plan");
+        s.saving_notes.insert(id.clone(), NoteOp::Save(drawing("first")));
+        s.pending_note_saves.insert(id.clone(), NoteOp::Save(drawing("second")));
+        // The list doesn't show "Plan" yet, so the user types it again and presses New.
+        s.open_board(0, "Plan".into(), true);
+        let b = s.board.as_ref().unwrap();
+        assert!(b.to_json().contains("second"), "opened on the newest snapshot, not a blank board");
+        assert_eq!(b.save, Save::Saving { dirty: true }, "the snapshot is written after the running write");
+        assert!(!s.pending_note_saves.contains_key(&id));
+        // The running write ends; the open board's newest content is written next (no handle in
+        // tests, so the write isn't sent, but the board moves on to writing it).
+        s.apply_note_op(s.load_gen, id, Ok(()));
+        assert_eq!(s.board.as_ref().unwrap().save, Save::Saving { dirty: false });
+        assert_eq!(s.note_log, [format!("save Plan: {}", s.board.as_ref().unwrap().to_json().len())]);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_account_switch_keeps_queued_drawing_writes() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = app();
+        let id = id(&s, "Arch");
+        s.saving_notes.insert(id.clone(), NoteOp::Save(drawing("first")));
+        s.pending_note_saves.insert(id.clone(), NoteOp::Save(drawing("second")));
+        let before = s.load_gen;
+        s.reset_account_state();
+        assert!(s.load_gen != before);
+        assert!(s.saving_notes.contains_key(&id) && s.pending_note_saves.contains_key(&id), "nothing is dropped");
+        // The old write's result arrives after the switch: the queued snapshot is still written.
+        s.apply_note_op(before, id.clone(), Ok(()));
+        assert!(!s.pending_note_saves.contains_key(&id));
+        assert_eq!(s.note_log, [format!("save Arch: {}", drawing("second").len())], "the queued snapshot was written");
+    }
+
+    #[test]
+    fn deleting_during_a_write_waits_for_it_and_wins() {
+        let mut s = app();
+        let id = id(&s, "Old");
+        s.saving_notes.insert(id.clone(), NoteOp::Save(drawing("first")));
+        s.pending_note_saves.insert(id.clone(), NoteOp::Save(drawing("second")));
+        s.delete_note(0, "Old".into());
+        assert_eq!(s.pending_note_saves.get(&id), Some(&NoteOp::Delete), "the queued save is replaced by the delete");
+        // The running write finishes: the delete runs next and nothing writes the drawing again.
+        s.apply_note_op(s.load_gen, id.clone(), Ok(()));
+        assert!(!s.pending_note_saves.contains_key(&id));
+        assert_eq!(s.note_log, ["delete Old"], "only the delete runs, no write of the old snapshot");
+    }
+
+    #[test]
+    fn drawing_while_it_is_being_deleted_is_written_after_the_delete() {
+        let mut s = app();
+        let id = id(&s, "Old");
+        s.saving_notes.insert(id.clone(), NoteOp::Delete);
+        s.open_board(0, "Old".into(), true);
+        assert!(s.board.as_ref().unwrap().elements.is_empty(), "opens empty");
+        let mut d = board::Board::new("owner/repo", "main", "x");
+        d.load_json(&drawing("new")).unwrap();
+        s.board.as_mut().unwrap().elements.push(d.elements.remove(0));
+        s.save_board();
+        assert!(s.note_log.is_empty(), "nothing is written alongside the running delete");
+        assert_eq!(s.board.as_ref().unwrap().save, Save::Saving { dirty: true });
+        s.apply_note_op(s.load_gen, id, Ok(()));
+        assert_eq!(s.note_log.len(), 1);
+        assert!(s.note_log[0].starts_with("save Old"), "the new drawing is written once the delete ends");
+        assert_eq!(s.board.as_ref().unwrap().save, Save::Saving { dirty: false });
+    }
+
+    #[test]
+    fn reopening_says_a_queued_delete_is_cancelled() {
+        let mut s = app();
+        let id = id(&s, "Old");
+        s.saving_notes.insert(id.clone(), NoteOp::Save(drawing("first")));
+        s.pending_note_saves.insert(id.clone(), NoteOp::Delete);
+        s.open_board(0, "Old".into(), false);
+        assert!(s.toast.as_ref().is_some_and(|t| t.text.contains("won't be deleted")));
+        s.apply_note_op(s.load_gen, id, Ok(()));
+        assert!(s.note_log.iter().all(|l| !l.starts_with("delete")));
+    }
+
+    #[test]
+    fn a_failed_write_on_the_open_drawing_shows_once() {
+        let mut s = app();
+        let id = id(&s, "Arch");
+        s.open_board(0, "Arch".into(), true);
+        s.board.as_mut().unwrap().save = Save::Saving { dirty: false };
+        s.saving_notes.insert(id.clone(), NoteOp::Save(drawing("x")));
+        s.apply_note_op(s.load_gen, id, Err("disk full".into()));
+        assert!(matches!(s.board.as_ref().unwrap().save, Save::Failed(_)));
+        assert!(s.toast.is_none(), "the board shows the failure; no toast on top");
+    }
+
+    #[test]
+    fn a_merge_confirmation_closes_with_its_diff() {
+        let mut s = app();
+        s.open_pull_diff("owner/repo".into(), 14);
+        s.confirm_merge = Some(crate::actions::busy_key("owner/repo", 14));
+        s.open_pull_diff("owner/repo".into(), 9);
+        assert_eq!(s.confirm_merge, None, "another diff: the old question goes");
+        s.confirm_merge = Some(crate::actions::busy_key("owner/repo", 9));
+        s.close_pull_diff();
+        assert_eq!(s.confirm_merge, None);
+    }
+
+    #[test]
+    fn the_page_keeps_the_name_as_github_spells_it_now() {
+        let mut s = app();
+        s.page = Page::Repo("OWNER/repo".into());
+        let mut next = s.data.clone();
+        next.repos[0].full_name = "owner/repo".into();
+        let epoch = s.load_gen;
+        s.apply(epoch, Ok(next));
+        assert_eq!(s.page, Page::Repo("owner/repo".into()));
+    }
+}
