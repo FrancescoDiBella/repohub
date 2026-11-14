@@ -186,8 +186,7 @@ pub fn verify(bytes: &[u8], name: &str, sums: &str) -> Result<(), String> {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::{check, cleanup, download, install, relaunch};
-#[cfg(not(target_arch = "wasm32"))]
-#[allow(unused_imports)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 pub use native::api;
 
 #[cfg(not(target_arch = "wasm32"))]

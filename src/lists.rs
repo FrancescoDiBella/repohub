@@ -165,6 +165,9 @@ pub fn settings(s: &App, k: &Kit) -> El {
             (Some(f), _, _) => format!("{f} · automatic refresh off (REPOHUB_REFRESH_MINUTES=0, or no account)"),
         }),
         ("Settings file", cfg.env_file.clone().unwrap_or_else(|| "none yet".into())),
+        ("Ignored in the project .env", if cfg.ignored_keys.is_empty() { String::new() } else {
+            format!("{}: a .env found in a folder can't change these. Set them in the environment or in the app's settings file, or name the file with REPOHUB_ENV.", cfg.ignored_keys.join(", "))
+        }),
         ("User (GITHUB_USER)", match (&cfg.user, &cfg.sources.user) {
             (Some(u), Some(src)) => format!("{u} (from {src})"),
             (Some(u), None) => u.clone(),
@@ -204,6 +207,9 @@ pub fn settings(s: &App, k: &Kit) -> El {
         ("Notes", if cfg.notes { notes_where() } else { "not available here (needs the desktop app or Docker)".into() }),
         ("Filters", format!("forks {}, archived {}, at most {} repositories", if cfg.include_forks { "yes" } else { "no" }, if cfg.include_archived { "yes" } else { "no" }, cfg.max_repos)),
     ] {
+        if label.starts_with("Ignored") && value.is_empty() {
+            continue;
+        }
         conn = conn.child(rule(k)).child(info(k, label, value));
     }
     let account = account_panel(s, k);

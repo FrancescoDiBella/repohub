@@ -2,13 +2,39 @@
 //!
 //! The token is only ever sent to the configured API host; it is never shown in the UI or logged.
 
+/// Where a connection setting comes from. Settings shows it; the label is only for display.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// A variable already set when the app started.
+    Environment,
+    /// The app's own settings file (`<data dir>/.env`).
+    UserFile(String),
+    /// The file `REPOHUB_ENV` points to.
+    ExplicitFile(String),
+    /// A `.env` found in the current folder or one of its parents.
+    ProjectFile(String),
+    Default,
+}
+
+impl std::fmt::Display for Source {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Source::Environment => f.write_str("the environment"),
+            Source::UserFile(p) => f.write_str(p),
+            Source::ExplicitFile(p) => write!(f, "explicit REPOHUB_ENV ({p})"),
+            Source::ProjectFile(p) => write!(f, "project .env ({p})"),
+            Source::Default => f.write_str("default (https://api.github.com)"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ConfigSources {
-    pub token: Option<String>,
-    pub user: Option<String>,
-    pub api: Option<String>,
-    pub orgs: Option<String>,
-    pub pinned: Option<String>,
+    pub token: Option<Source>,
+    pub user: Option<Source>,
+    pub api: Option<Source>,
+    pub orgs: Option<Source>,
+    pub pinned: Option<Source>,
 }
 
 #[derive(Clone)]
@@ -48,6 +74,8 @@ pub struct Config {
     pub account_locked: bool,
     /// Source attribution for connection settings.
     pub sources: ConfigSources,
+    /// Settings a project `.env` isn't allowed to change, found (and ignored) in the one loaded.
+    pub ignored_keys: Vec<String>,
 }
 
 impl std::fmt::Debug for Config {
@@ -106,7 +134,6 @@ pub fn is_blocked_from_upward_env(key: &str) -> bool {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EnvFileLocation {
     Explicit(std::path::PathBuf),
-    #[allow(dead_code)]
     Upward(std::path::PathBuf),
 }
 
@@ -121,10 +148,16 @@ impl EnvFileLocation {
     pub fn is_explicit(&self) -> bool {
         matches!(self, EnvFileLocation::Explicit(_))
     }
+
+    fn source(&self) -> Source {
+        let p = self.path().display().to_string();
+        if self.is_explicit() { Source::ExplicitFile(p) } else { Source::ProjectFile(p) }
+    }
 }
 
-/// Finds the project `.env` file: `REPOHUB_ENV` (explicit), else `.env` in the current folder or one of its
-/// parents in debug builds only. Installed/release builds only load a project `.env` when `REPOHUB_ENV` is set.
+/// Finds the project `.env` file: `REPOHUB_ENV` (explicit), else `.env` in the current folder or
+/// one of its parents. A file found by searching isn't trusted with the settings in
+/// [`is_blocked_from_upward_env`]: whoever wrote it may not be the user.
 #[cfg(not(target_arch = "wasm32"))]
 fn find_env_file() -> Option<EnvFileLocation> {
     if let Ok(p) = std::env::var("REPOHUB_ENV")
@@ -132,24 +165,17 @@ fn find_env_file() -> Option<EnvFileLocation> {
     {
         return Some(EnvFileLocation::Explicit(p.into()));
     }
-    #[cfg(all(not(debug_assertions), not(test)))]
-    {
-        None
-    }
-    #[cfg(any(debug_assertions, test))]
-    {
-        let mut dir = std::env::current_dir().ok()?;
-        for _ in 0..4 {
-            let candidate = dir.join(".env");
-            if candidate.is_file() {
-                return Some(EnvFileLocation::Upward(candidate));
-            }
-            if !dir.pop() {
-                break;
-            }
+    let mut dir = std::env::current_dir().ok()?;
+    for _ in 0..4 {
+        let candidate = dir.join(".env");
+        if candidate.is_file() {
+            return Some(EnvFileLocation::Upward(candidate));
         }
-        None
+        if !dir.pop() {
+            break;
+        }
     }
+    None
 }
 
 /// The settings file the app itself writes (the account saved in Settings): `.env` in the data
@@ -181,159 +207,134 @@ where
     true
 }
 
-/// Internal record of env files loaded and account origin.
+/// The connection settings one `.env` file sets (empty values don't count).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+struct FileVals {
+    token: Option<String>,
+    user: Option<String>,
+    api: Option<String>,
+    orgs: bool,
+    pinned: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn file_vals(src: &str, allowed: impl Fn(&str) -> bool) -> FileVals {
+    let mut f = FileVals::default();
+    for (k, v) in parse_env(src) {
+        let v = v.trim();
+        if v.is_empty() || !allowed(&k) {
+            continue;
+        }
+        // Like the process environment, the first line that sets a key wins.
+        match k.as_str() {
+            "GITHUB_TOKEN" if f.token.is_none() => f.token = Some(v.to_owned()),
+            "GITHUB_USER" if f.user.is_none() => f.user = Some(v.to_owned()),
+            "GITHUB_API_URL" if f.api.is_none() => f.api = Some(v.to_owned()),
+            "REPOHUB_ORGS" => f.orgs = true,
+            "REPOHUB_PINNED" => f.pinned = true,
+            _ => {}
+        }
+    }
+    f
+}
+
+/// What the `.env` files and the starting environment say about the connection.
 #[cfg(not(target_arch = "wasm32"))]
 struct LoadedEnvFiles {
     env_file: Option<String>,
     account_locked: bool,
-    token_from_user_env: bool,
-    project_loc: Option<EnvFileLocation>,
     token: Option<String>,
     user: Option<String>,
-    initial_token_in_process: bool,
-    initial_user_in_process: bool,
-    user_file_has_api: bool,
-    user_file_has_user: bool,
-    user_file_has_token: bool,
-    user_file_has_orgs: bool,
-    user_file_has_pinned: bool,
-    project_file_has_api: bool,
-    project_file_has_user: bool,
-    project_file_has_token: bool,
-    project_file_has_orgs: bool,
-    project_file_has_pinned: bool,
+    api: String,
+    sources: ConfigSources,
+    ignored_keys: Vec<String>,
 }
 
-/// Loads the project `.env` (explicit or debug upward), then the app's own settings file for whatever is still unset.
+/// Loads the project `.env`, then the app's own settings file for whatever is still unset.
 #[cfg(not(target_arch = "wasm32"))]
 fn load_env_files() -> LoadedEnvFiles {
-    // 1. Initial process environment checks.
+    // 1. What the process environment had before any file was read.
     let proc_val = |k: &str| std::env::var(k).ok().map(|v| v.trim().to_owned()).filter(|v| !v.is_empty());
-    let initial_token = proc_val("GITHUB_TOKEN");
-    let initial_user = proc_val("GITHUB_USER");
-    let initial_token_in_process = initial_token.is_some();
-    let initial_user_in_process = initial_user.is_some();
+    let env_token = proc_val("GITHUB_TOKEN");
+    let env_user = proc_val("GITHUB_USER");
+    let env_api = proc_val("GITHUB_API_URL");
+    let (env_orgs, env_pinned) = (proc_val("REPOHUB_ORGS").is_some(), proc_val("REPOHUB_PINNED").is_some());
 
-    // 2. Compute user_env_file before any upward project `.env` can touch REPOHUB_DATA_DIR.
+    // 2. The settings file's place, before a project `.env` could move REPOHUB_DATA_DIR.
     let user_path = user_env_file();
 
-    // 3. Find project .env (explicit or debug upward).
-    let project_loc = find_env_file();
-    let mut project_file_loaded = false;
-    let mut project_file_has_api = false;
-    let mut project_file_has_user = false;
-    let mut project_file_has_token = false;
-    let mut project_file_has_orgs = false;
-    let mut project_file_has_pinned = false;
-    let mut project_token: Option<String> = None;
-    let mut project_user: Option<String> = None;
-
-    if let Some(loc) = &project_loc {
-        let is_explicit = loc.is_explicit();
-        let path = loc.path();
-        if let Ok(src) = std::fs::read_to_string(path) {
-            project_file_loaded = true;
+    // 3. The project `.env`.
+    let mut project_loc = find_env_file();
+    let mut project = FileVals::default();
+    let mut ignored_keys = Vec::new();
+    match project_loc.as_ref().map(|loc| (loc, std::fs::read_to_string(loc.path()))) {
+        Some((loc, Ok(src))) => {
+            let explicit = loc.is_explicit();
+            let allowed = |k: &str| explicit || !is_blocked_from_upward_env(k);
             for (k, v) in parse_env(&src) {
-                let trimmed = v.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                match k.as_str() {
-                    "GITHUB_API_URL" => project_file_has_api = true,
-                    "GITHUB_USER" => {
-                        project_file_has_user = true;
-                        if project_user.is_none() {
-                            project_user = Some(trimmed.to_owned());
-                        }
-                    }
-                    "GITHUB_TOKEN" => {
-                        project_file_has_token = true;
-                        if project_token.is_none() {
-                            project_token = Some(trimmed.to_owned());
-                        }
-                    }
-                    "REPOHUB_ORGS" => project_file_has_orgs = true,
-                    "REPOHUB_PINNED" => project_file_has_pinned = true,
-                    _ => {}
+                if !allowed(&k) && !v.trim().is_empty() && !ignored_keys.contains(&k) {
+                    ignored_keys.push(k);
                 }
             }
-            load_into_env_filtered(path, |k| is_explicit || !is_blocked_from_upward_env(k));
+            project = file_vals(&src, allowed);
+            load_into_env_filtered(loc.path(), allowed);
         }
+        _ => project_loc = None,
     }
+    let project_src = project_loc.as_ref().map(EnvFileLocation::source);
 
-    let token_in_proc_or_proj = initial_token.is_some() || project_token.is_some();
-    let user_in_proc_or_proj = initial_user.is_some() || project_user.is_some();
-    let account_set_before_user_file = token_in_proc_or_proj || user_in_proc_or_proj;
-
-    // 4. Load user settings file (<data dir>/.env).
-    let mut user_file_loaded = false;
-    let mut user_file_has_api = false;
-    let mut user_file_has_user = false;
-    let mut user_file_has_token = false;
-    let mut user_file_has_orgs = false;
-    let mut user_file_has_pinned = false;
-    let mut user_token: Option<String> = None;
-    let mut user_user: Option<String> = None;
-
-    if let Ok(src) = std::fs::read_to_string(&user_path) {
-        user_file_loaded = true;
-        for (k, v) in parse_env(&src) {
-            let trimmed = v.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            match k.as_str() {
-                "GITHUB_API_URL" => user_file_has_api = true,
-                "GITHUB_USER" => {
-                    user_file_has_user = true;
-                    if user_user.is_none() {
-                        user_user = Some(trimmed.to_owned());
-                    }
-                }
-                "GITHUB_TOKEN" => {
-                    user_file_has_token = true;
-                    if user_token.is_none() {
-                        user_token = Some(trimmed.to_owned());
-                    }
-                }
-                "REPOHUB_ORGS" => user_file_has_orgs = true,
-                "REPOHUB_PINNED" => user_file_has_pinned = true,
-                _ => {}
-            }
+    // 4. The app's settings file (<data dir>/.env).
+    let user_src = Source::UserFile(user_path.display().to_string());
+    let (user_file_loaded, user_file) = match std::fs::read_to_string(&user_path) {
+        Ok(src) => {
+            load_into_env_filtered(&user_path, |_| true);
+            (true, file_vals(&src, |_| true))
         }
-        load_into_env_filtered(&user_path, |_| true);
-    }
+        Err(_) => (false, FileVals::default()),
+    };
 
-    let token = initial_token.or(project_token).or(user_token);
-    let user = initial_user.or(project_user).or(user_user);
+    let account_locked = env_token.is_some() || env_user.is_some() || project.token.is_some() || project.user.is_some();
 
-    let token_from_user_env = !token_in_proc_or_proj && token.is_some() && user_file_has_token;
+    // The first that has a value wins: environment, project file, settings file.
+    let pick = |env: Option<String>, proj: Option<String>, user: Option<String>| -> Option<(String, Source)> {
+        env.map(|v| (v, Source::Environment))
+            .or_else(|| proj.zip(project_src.clone()))
+            .or_else(|| user.map(|v| (v, user_src.clone())))
+    };
+    let token = pick(env_token, project.token, user_file.token);
+    let user = pick(env_user, project.user, user_file.user);
+    // A token saved in Settings is only ever sent to the host the user chose themselves: the
+    // environment, the settings file, or GitHub. No project file can redirect it, not even one
+    // named by REPOHUB_ENV.
+    let saved_token = matches!(token, Some((_, Source::UserFile(_))));
+    let api = pick(env_api, project.api.filter(|_| !saved_token), user_file.api)
+        .unwrap_or_else(|| ("https://api.github.com".into(), Source::Default));
+    let flag_src = |env: bool, proj: bool, user: bool| {
+        if env { Some(Source::Environment) }
+        else if proj { project_src.clone() }
+        else if user { Some(user_src.clone()) }
+        else { None }
+    };
+    let sources = ConfigSources {
+        orgs: flag_src(env_orgs, project.orgs, user_file.orgs),
+        pinned: flag_src(env_pinned, project.pinned, user_file.pinned),
+        token: token.as_ref().map(|t| t.1.clone()),
+        user: user.as_ref().map(|u| u.1.clone()),
+        api: Some(api.1),
+    };
 
-    let shown = project_loc.as_ref().filter(|_| project_file_loaded)
-        .map(|loc| loc.path().display().to_string())
-        .or_else(|| if user_file_loaded { Some(user_path.display().to_string()) } else { None });
-
-    let account_locked = account_set_before_user_file;
+    let env_file = project_loc.as_ref().map(|loc| loc.path().display().to_string())
+        .or_else(|| user_file_loaded.then(|| user_path.display().to_string()));
 
     LoadedEnvFiles {
-        env_file: shown,
+        env_file,
         account_locked,
-        token_from_user_env,
-        project_loc: if project_file_loaded { project_loc } else { None },
-        token,
-        user,
-        initial_token_in_process,
-        initial_user_in_process,
-        user_file_has_api,
-        user_file_has_user,
-        user_file_has_token,
-        user_file_has_orgs,
-        user_file_has_pinned,
-        project_file_has_api,
-        project_file_has_user,
-        project_file_has_token,
-        project_file_has_orgs,
-        project_file_has_pinned,
+        token: token.map(|t| t.0),
+        user: user.map(|u| u.0),
+        api: api.0.trim_end_matches('/').to_owned(),
+        sources,
+        ignored_keys,
     }
 }
 
@@ -425,16 +426,16 @@ impl Config {
     }
 
     /// Reads the project `.env` (from `REPOHUB_ENV`, else the current folder or one of its
-    /// parents in debug builds) and the app's own settings file, then the process environment, which wins.
+    /// parents) and the app's own settings file, then the process environment, which wins.
     pub fn load() -> Config {
-        #[cfg(not(target_arch = "wasm32"))]
-        let initial_api_in_env = std::env::var("GITHUB_API_URL").ok().filter(|v| !v.trim().is_empty());
         #[cfg(not(target_arch = "wasm32"))]
         let loaded = load_env_files();
         #[cfg(not(target_arch = "wasm32"))]
-        let (env_file, account_locked) = (loaded.env_file.clone(), loaded.account_locked);
+        let (env_file, account_locked, token, user, api, sources, ignored_keys) =
+            (loaded.env_file, loaded.account_locked, loaded.token, loaded.user, loaded.api, loaded.sources, loaded.ignored_keys);
         #[cfg(target_arch = "wasm32")]
-        let (env_file, account_locked): (Option<String>, bool) = (None, true);
+        let (env_file, account_locked, token, user, api, sources, ignored_keys): (Option<String>, bool, Option<String>, Option<String>, String, ConfigSources, Vec<String>) =
+            (None, true, None, None, "https://api.github.com".into(), ConfigSources::default(), Vec::new());
 
         let get = |k: &str| -> Option<String> {
             #[cfg(not(target_arch = "wasm32"))]
@@ -447,125 +448,6 @@ impl Config {
                 None
             }
         };
-
-        #[cfg(not(target_arch = "wasm32"))]
-        let (token, user) = (loaded.token, loaded.user);
-        #[cfg(target_arch = "wasm32")]
-        let (token, user): (Option<String>, Option<String>) = (None, None);
-
-        // Determine API URL with safety rule:
-        // If token came from user_env_file (<data dir>/.env), GITHUB_API_URL must come from
-        // the process environment (if explicitly set before loading project .env),
-        // or from <data dir>/.env, or be the default ("https://api.github.com").
-        // A project .env (upward or REPOHUB_ENV) MUST NOT redirect the saved token.
-        #[cfg(not(target_arch = "wasm32"))]
-        let api = {
-            if loaded.token_from_user_env {
-                if let Some(ref proc_api) = initial_api_in_env {
-                    proc_api.trim_end_matches('/').to_owned()
-                } else if loaded.user_file_has_api {
-                    get("GITHUB_API_URL").unwrap_or_else(|| "https://api.github.com".into()).trim_end_matches('/').to_owned()
-                } else {
-                    "https://api.github.com".into()
-                }
-            } else {
-                get("GITHUB_API_URL").unwrap_or_else(|| "https://api.github.com".into()).trim_end_matches('/').to_owned()
-            }
-        };
-        #[cfg(target_arch = "wasm32")]
-        let api = "https://api.github.com".to_owned();
-
-        // Compute source attribution.
-        #[cfg(not(target_arch = "wasm32"))]
-        let sources = {
-            let user_file_str = user_env_file().display().to_string();
-            let proj_file_str = loaded.project_loc.as_ref().map(|loc| {
-                if loc.is_explicit() {
-                    format!("explicit REPOHUB_ENV ({})", loc.path().display())
-                } else {
-                    format!("project .env ({})", loc.path().display())
-                }
-            });
-
-            // Token source
-            let token_src = if token.is_none() {
-                None
-            } else if loaded.initial_token_in_process {
-                Some("the environment".into())
-            } else if loaded.token_from_user_env {
-                Some(user_file_str.clone())
-            } else if loaded.project_file_has_token {
-                proj_file_str.clone().or_else(|| Some("project .env".into()))
-            } else if loaded.user_file_has_token {
-                Some(user_file_str.clone())
-            } else {
-                Some("the environment".into())
-            };
-
-            // User source
-            let user_src = if user.is_none() {
-                None
-            } else if loaded.initial_user_in_process {
-                Some("the environment".into())
-            } else if loaded.project_file_has_user {
-                proj_file_str.clone().or_else(|| Some("project .env".into()))
-            } else if loaded.user_file_has_user {
-                Some(user_file_str.clone())
-            } else {
-                Some("the environment".into())
-            };
-
-            // API source
-            let api_src = if initial_api_in_env.is_some() {
-                Some("the environment".into())
-            } else if loaded.token_from_user_env {
-                if loaded.user_file_has_api {
-                    Some(user_file_str.clone())
-                } else {
-                    Some("default (https://api.github.com)".into())
-                }
-            } else if loaded.project_file_has_api && loaded.project_loc.as_ref().is_some_and(|l| l.is_explicit()) {
-                proj_file_str.clone().or_else(|| Some("REPOHUB_ENV".into()))
-            } else if loaded.user_file_has_api {
-                Some(user_file_str.clone())
-            } else {
-                Some("default (https://api.github.com)".into())
-            };
-
-            let orgs_src = if get("REPOHUB_ORGS").is_some() {
-                if loaded.project_file_has_orgs {
-                    proj_file_str.clone().or_else(|| Some("project .env".into()))
-                } else if loaded.user_file_has_orgs {
-                    Some(user_file_str.clone())
-                } else {
-                    Some("the environment".into())
-                }
-            } else {
-                None
-            };
-
-            let pinned_src = if get("REPOHUB_PINNED").is_some() {
-                if loaded.project_file_has_pinned {
-                    proj_file_str.clone().or_else(|| Some("project .env".into()))
-                } else if loaded.user_file_has_pinned {
-                    Some(user_file_str.clone())
-                } else {
-                    Some("the environment".into())
-                }
-            } else {
-                None
-            };
-
-            ConfigSources {
-                token: token_src,
-                user: user_src,
-                api: api_src,
-                orgs: orgs_src,
-                pinned: pinned_src,
-            }
-        };
-        #[cfg(target_arch = "wasm32")]
-        let sources = ConfigSources::default();
 
         let num = |k: &str, d: usize| get(k).and_then(|v| v.parse().ok()).unwrap_or(d);
         Config {
@@ -591,6 +473,7 @@ impl Config {
             env_file,
             account_locked,
             sources,
+            ignored_keys,
         }
     }
 
@@ -628,6 +511,7 @@ impl Config {
             env_file: Some("provided by repohub-server (Docker)".into()),
             account_locked: true,
             sources: ConfigSources::default(),
+            ignored_keys: Vec::new(),
         })
     }
 }
@@ -772,8 +656,8 @@ mod tests {
         let cfg = Config::load();
         assert_eq!(cfg.token.as_deref(), Some("saved_ghp_token"));
         assert_eq!(cfg.api, "https://api.github.com", "Project .env must not override GITHUB_API_URL when token is from settings file");
-        assert_eq!(cfg.sources.api.as_deref(), Some("default (https://api.github.com)"));
-        assert_eq!(cfg.sources.token.as_deref(), Some(data_dir.join(".env").display().to_string().as_str()));
+        assert_eq!(cfg.sources.api.as_ref().map(ToString::to_string).as_deref(), Some("default (https://api.github.com)"));
+        assert_eq!(cfg.sources.token.as_ref().map(ToString::to_string).as_deref(), Some(data_dir.join(".env").display().to_string().as_str()));
     }
 
     #[test]
@@ -855,8 +739,8 @@ mod tests {
         let cfg = Config::load();
         assert_eq!(cfg.user.as_deref(), Some("proc_user"));
         assert_eq!(cfg.token.as_deref(), Some("saved_secret_tok"));
-        assert_eq!(cfg.sources.user.as_deref(), Some("the environment"));
-        assert_eq!(cfg.sources.token.as_deref(), Some(user_env_path.display().to_string().as_str()));
+        assert_eq!(cfg.sources.user.as_ref().map(ToString::to_string).as_deref(), Some("the environment"));
+        assert_eq!(cfg.sources.token.as_ref().map(ToString::to_string).as_deref(), Some(user_env_path.display().to_string().as_str()));
     }
 
     #[test]
@@ -894,9 +778,71 @@ mod tests {
         assert!(cfg.account_locked, "Explicit REPOHUB_ENV setting token locks account");
 
         let explicit_str = format!("explicit REPOHUB_ENV ({})", explicit_env.display());
-        assert_eq!(cfg.sources.token.as_deref(), Some(explicit_str.as_str()));
-        assert_eq!(cfg.sources.user.as_deref(), Some(data_dir.join(".env").display().to_string().as_str()));
-        assert_eq!(cfg.sources.api.as_deref(), Some(explicit_str.as_str()));
+        assert_eq!(cfg.sources.token.as_ref().map(ToString::to_string).as_deref(), Some(explicit_str.as_str()));
+        assert_eq!(cfg.sources.user.as_ref().map(ToString::to_string).as_deref(), Some(data_dir.join(".env").display().to_string().as_str()));
+        assert_eq!(cfg.sources.api.as_ref().map(ToString::to_string).as_deref(), Some(explicit_str.as_str()));
+    }
+
+    #[test]
+    fn a_saved_token_goes_to_the_settings_files_api_not_repohub_envs() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = EnvVarGuard::new(&["GITHUB_TOKEN", "GITHUB_USER", "GITHUB_API_URL", "REPOHUB_ENV", "REPOHUB_DATA_DIR"]);
+        let test_root = std::env::temp_dir().join(format!("repohub-test-two-apis-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&test_root);
+        let data_dir = test_root.join("data");
+        let explicit_env = test_root.join("custom.env");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        guard.temp_dir = Some(test_root);
+        // SAFETY: serialized by ENV_LOCK
+        unsafe { std::env::set_var("REPOHUB_DATA_DIR", &data_dir) };
+        std::fs::write(data_dir.join(".env"), "GITHUB_TOKEN=saved\nGITHUB_API_URL=https://mine.example/api/v3/\n").unwrap();
+        std::fs::write(&explicit_env, "GITHUB_API_URL=https://other.example\n").unwrap();
+        // SAFETY: serialized by ENV_LOCK
+        unsafe { std::env::set_var("REPOHUB_ENV", &explicit_env) };
+
+        let cfg = Config::load();
+        assert_eq!(cfg.token.as_deref(), Some("saved"));
+        assert_eq!(cfg.api, "https://mine.example/api/v3", "both files set the API: the saved token's own file wins");
+        assert_eq!(cfg.sources.api, Some(super::Source::UserFile(data_dir.join(".env").display().to_string())));
+
+        // Without an API of its own, the saved token goes to GitHub.
+        std::fs::write(data_dir.join(".env"), "GITHUB_TOKEN=saved\n").unwrap();
+        // SAFETY: serialized by ENV_LOCK
+        unsafe { std::env::remove_var("GITHUB_API_URL") };
+        let cfg = Config::load();
+        assert_eq!(cfg.api, "https://api.github.com");
+        assert_eq!(cfg.sources.api, Some(super::Source::Default));
+    }
+
+    #[test]
+    fn a_project_env_gives_the_account_but_not_the_blocked_settings() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = EnvVarGuard::new(&["GITHUB_TOKEN", "GITHUB_USER", "GITHUB_API_URL", "REPOHUB_ENV", "REPOHUB_DATA_DIR", "REPOHUB_CLAUDE", "REPOHUB_PINNED"]);
+        let test_root = std::env::temp_dir().join(format!("repohub-test-project-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&test_root);
+        let (data_dir, sub) = (test_root.join("data"), test_root.join("project").join("sub"));
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::create_dir_all(&sub).unwrap();
+        guard.temp_dir = Some(test_root.clone());
+        // SAFETY: serialized by ENV_LOCK
+        unsafe { std::env::set_var("REPOHUB_DATA_DIR", &data_dir) };
+        let project_env = test_root.join("project").join(".env");
+        std::fs::write(&project_env, "GITHUB_TOKEN=ghp_project\nGITHUB_API_URL=https://evil.example\nREPOHUB_CLAUDE=./evil.sh\nREPOHUB_PINNED=a\n").unwrap();
+        guard.set_cwd(&sub);
+
+        let cfg = Config::load();
+        assert_eq!(cfg.token.as_deref(), Some("ghp_project"), "the documented `.env` + run flow keeps working");
+        assert!(matches!(cfg.sources.token, Some(super::Source::ProjectFile(_))));
+        assert_eq!(cfg.api, "https://api.github.com");
+        assert_eq!(cfg.sources.api, Some(super::Source::Default));
+        assert!(std::env::var("REPOHUB_CLAUDE").is_err());
+        assert_eq!(cfg.ignored_keys, ["GITHUB_API_URL", "REPOHUB_CLAUDE"], "Settings says what was ignored");
+        assert!(matches!(cfg.sources.pinned, Some(super::Source::ProjectFile(_))));
+
+        // The same value from the environment is named as such.
+        // SAFETY: serialized by ENV_LOCK
+        unsafe { std::env::set_var("REPOHUB_PINNED", "b") };
+        assert_eq!(Config::load().sources.pinned, Some(super::Source::Environment));
     }
 
     #[test]
@@ -928,8 +874,8 @@ mod tests {
         let cfg = Config::load();
         assert_eq!(cfg.token.as_deref(), Some("process_token"));
         assert_eq!(cfg.api, "https://api.process.example");
-        assert_eq!(cfg.sources.token.as_deref(), Some("the environment"));
-        assert_eq!(cfg.sources.api.as_deref(), Some("the environment"));
+        assert_eq!(cfg.sources.token.as_ref().map(ToString::to_string).as_deref(), Some("the environment"));
+        assert_eq!(cfg.sources.api.as_ref().map(ToString::to_string).as_deref(), Some("the environment"));
         assert!(cfg.account_locked);
     }
 
