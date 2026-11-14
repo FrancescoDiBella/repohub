@@ -68,6 +68,11 @@ The sections are **Added**, **Changed** and **Fixed**.
 - A new look, with a more readable layout.
 
 ### Fixed
+- Drawings no longer lose edits when you close one and reopen it, or create one with the same
+  name, while it's still saving. Saves still finish after an account switch, and deleting a
+  drawing while it saves deletes it once the save ends.
+- Only one merge confirmation shows for a pull request whose diff is open, and it goes away
+  with its diff.
 - Pull request file diffs no longer clobber or reset uncommitted local diffs on the Changes tab:
   viewing a pull request diff uses dedicated diff state, leaving local changes and merge previews
   intact, and merging from the diff panel requires explicit confirmation before submitting.
