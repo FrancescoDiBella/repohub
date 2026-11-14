@@ -1491,16 +1491,23 @@ impl App {
         let Some((full, branch)) = self.notes_branch(i) else { return };
         self.board_load_gen = self.board_load_gen.wrapping_add(1);
         let board_epoch = self.board_load_gen;
+        let id = (full.clone(), branch.clone(), name.clone());
         let mut b = board::Board::new(&full, &branch, &name);
         if new {
+            self.pending_note_saves.remove(&id);
             self.board = Some(b);
             return;
         }
-        let id = (full.clone(), branch.clone(), name.clone());
-        if let Some(json) = self.pending_note_saves.get(&id) {
-            let _ = b.load_json(json);
-            b.save = Save::Saving { dirty: false };
-            self.board = Some(b);
+        if let Some(json) = self.pending_note_saves.remove(&id) {
+            let _ = b.load_json(&json);
+            if self.saving_notes.contains(&id) {
+                b.save = Save::Saving { dirty: true };
+                self.board = Some(b);
+            } else {
+                b.save = Save::Saving { dirty: false };
+                self.board = Some(b);
+                self.write_board();
+            }
             return;
         }
         b.save = Save::Loading;
@@ -1517,24 +1524,22 @@ impl App {
     fn save_board(&mut self) {
         let Some(b) = self.board.as_mut() else { return };
         let id = (b.repo.clone(), b.branch.clone(), b.name.clone());
-        if self.saving_notes.contains(&id) {
-            b.save.edit();
-            return;
-        }
-        if b.save.edit() {
+        let in_flight = self.saving_notes.contains(&id);
+        let start = b.save.edit();
+        if in_flight {
+            if start || matches!(b.save, Save::Saving { .. }) {
+                b.save = Save::Saving { dirty: true };
+            }
+        } else if start {
             self.write_board();
         }
     }
 
     fn write_board(&mut self) {
-        if let Some(b) = self.board.as_ref() {
-            let id = (b.repo.clone(), b.branch.clone(), b.name.clone());
-            let json = b.to_json();
-            self.write_note(id, json);
-        } else if let Some((id, json)) = self.pending_note_saves.iter().next().map(|(k, v)| (k.clone(), v.clone())) {
-            self.pending_note_saves.remove(&id);
-            self.write_note(id, json);
-        }
+        let Some(b) = self.board.as_ref() else { return };
+        let id = (b.repo.clone(), b.branch.clone(), b.name.clone());
+        let json = b.to_json();
+        self.write_note(id, json);
     }
 
     fn write_note(&mut self, id: (String, String, String), json: String) {
@@ -3402,7 +3407,124 @@ mod fix56_tests {
         let b = s.board.as_ref().unwrap();
         assert_eq!(b.elements.len(), 1);
         assert_eq!(b.elements[0].id, "pending-rect");
+        assert_eq!(b.save, Save::Saving { dirty: true });
+        assert!(!s.pending_note_saves.contains_key(&id));
+    }
+
+    #[test]
+    fn reopen_board_from_pending_saves_during_in_flight_write_and_edit_again() {
+        let mut s = setup_app();
+        let (full, branch) = s.notes_branch(0).unwrap();
+        let id = (full.clone(), branch.clone(), "ReopenEdit".into());
+
+        // 1. Open drawing as new and add elem-1
+        s.open_board(0, "ReopenEdit".into(), true);
+        let b = s.board.as_mut().unwrap();
+        b.elements.push(Element {
+            id: "elem-1".into(), kind: Kind::Rectangle,
+            x: 10.0, y: 10.0, w: 20.0, h: 20.0, points: vec![],
+            stroke: "#000".into(), fill: None, width: 2.0,
+            text: String::new(), font: 20.0, seed: 1,
+        });
+
+        // 2. Write 1 starts in-flight (snapshot with elem-1)
+        assert!(b.save.edit());
+        s.saving_notes.insert(id.clone());
+
+        // 3. User edits elem-2 while write 1 is in flight
+        let b = s.board.as_mut().unwrap();
+        b.elements.push(Element {
+            id: "elem-2".into(), kind: Kind::Ellipse,
+            x: 50.0, y: 50.0, w: 30.0, h: 30.0, points: vec![],
+            stroke: "#f00".into(), fill: None, width: 2.0,
+            text: String::new(), font: 20.0, seed: 2,
+        });
+        s.save_board();
+        assert_eq!(s.board.as_ref().unwrap().save, Save::Saving { dirty: true });
+
+        // 4. User closes drawing while write 1 is in-flight -> queued in pending_note_saves
+        s.close_board(0);
+        assert!(s.board.is_none());
+        assert!(s.pending_note_saves.contains_key(&id));
+
+        // 5. Re-open drawing while write 1 is STILL in flight
+        s.open_board(0, "ReopenEdit".into(), false);
+        // It should have removed id from pending_note_saves and set Save::Saving { dirty: true }
+        assert!(!s.pending_note_saves.contains_key(&id));
+        let b = s.board.as_ref().unwrap();
+        assert_eq!(b.elements.len(), 2);
+        assert_eq!(b.save, Save::Saving { dirty: true });
+
+        // 6. User adds elem-3 while still in-flight
+        let b = s.board.as_mut().unwrap();
+        b.elements.push(Element {
+            id: "elem-3".into(), kind: Kind::Diamond,
+            x: 80.0, y: 80.0, w: 40.0, h: 40.0, points: vec![],
+            stroke: "#0f0".into(), fill: None, width: 2.0,
+            text: String::new(), font: 20.0, seed: 3,
+        });
+        s.save_board();
+        assert_eq!(s.board.as_ref().unwrap().save, Save::Saving { dirty: true });
+
+        // 7. Write 1 finishes!
+        s.apply_board_write(s.load_gen, id.clone(), Ok(()));
+        // Board is open, so apply_board_write calls written(Ok(())) which returns true and triggers write_board()!
+        // b.save becomes Saving { dirty: false }
+        let b = s.board.as_ref().unwrap();
         assert_eq!(b.save, Save::Saving { dirty: false });
+        // The newly written JSON contains elem-1, elem-2, AND elem-3!
+        let json = b.to_json();
+        assert!(json.contains("elem-1"));
+        assert!(json.contains("elem-2"));
+        assert!(json.contains("elem-3"));
+
+        // Write 2 finishes
+        s.apply_board_write(s.load_gen, id.clone(), Ok(()));
+        assert_eq!(s.board.as_ref().unwrap().save, Save::Saved);
+        assert!(s.saving_notes.is_empty());
+    }
+
+    #[test]
+    fn edit_saved_new_board_while_saving_notes_contains_id_triggers_write() {
+        let mut s = setup_app();
+        let (full, branch) = s.notes_branch(0).unwrap();
+        let id = (full.clone(), branch.clone(), "NewWhileSaving".into());
+
+        // Simulate an old in-flight write for this same drawing name
+        s.saving_notes.insert(id.clone());
+
+        // User creates new drawing with same name (b.save == Save::Saved)
+        s.open_board(0, "NewWhileSaving".into(), true);
+        let b = s.board.as_ref().unwrap();
+        assert_eq!(b.save, Save::Saved);
+        assert!(b.elements.is_empty());
+
+        // User adds an element and triggers save_board()
+        let b = s.board.as_mut().unwrap();
+        b.elements.push(Element {
+            id: "elem-new".into(), kind: Kind::Rectangle,
+            x: 10.0, y: 10.0, w: 20.0, h: 20.0, points: vec![],
+            stroke: "#000".into(), fill: None, width: 2.0,
+            text: String::new(), font: 20.0, seed: 1,
+        });
+        s.save_board();
+
+        // Because in_flight was true, b.save must be transitioned to Saving { dirty: true }
+        assert_eq!(s.board.as_ref().unwrap().save, Save::Saving { dirty: true });
+
+        // When the old in-flight write completes:
+        s.apply_board_write(s.load_gen, id.clone(), Ok(()));
+
+        // It detects dirty: true, calls write_board() with elem-new, and transitions to dirty: false
+        let b = s.board.as_ref().unwrap();
+        assert_eq!(b.save, Save::Saving { dirty: false });
+        let json = b.to_json();
+        assert!(json.contains("elem-new"));
+
+        // When write for elem-new completes:
+        s.apply_board_write(s.load_gen, id.clone(), Ok(()));
+        assert_eq!(s.board.as_ref().unwrap().save, Save::Saved);
+        assert!(s.saving_notes.is_empty());
     }
 
     #[cfg(not(target_arch = "wasm32"))]
