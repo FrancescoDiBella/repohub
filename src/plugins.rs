@@ -431,7 +431,7 @@ pub fn context(s: &App, dark: bool) -> Data {
         ("topics", Data::List(r.topics.iter().map(|t| text(t)).collect())),
     ]);
     let (page, repo) = match &s.page {
-        Page::Repo(full) => ("repo", s.data.repos.iter().find(|r| r.full_name == *full)),
+        Page::Repo(full) => ("repo", s.data.repos.iter().find(|r| r.full_name.eq_ignore_ascii_case(full))),
         Page::Plugin(_) => ("plugin", None),
         Page::Overview => ("overview", None),
         Page::Repos => ("repos", None),

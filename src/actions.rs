@@ -139,14 +139,14 @@ pub fn form_panel(s: &App, k: &Kit, i: usize) -> El {
     };
     let submit = Button::new(submit_label).variant(ButtonVariant::Submit).control_size(ControlSize::Small)
         .disabled(sending || check.is_err() || blocked.is_some())
-        .on_press(move |s: &mut App| s.submit_form(i)).build(k).key("form-submit");
+        .on_press(|s: &mut App| s.submit_form()).build(k).key("form-submit");
     let mut body = col().w_full().padding(16.0).gap(12.0);
     match f.kind {
         Compose::Branch => {
             body = body
                 .child(TextInput::new(&f.title).placeholder("feature/my-change").label("Branch name")
                     .on_edit(|s: &mut App| &mut s.form.as_mut().expect("form open").title)
-                    .on_submit(move |s: &mut App, _| s.submit_form(i)).build(k).key("form-title").w_full())
+                    .on_submit(|s: &mut App, _| s.submit_form()).build(k).key("form-title").w_full())
                 .child(row().gap(8.0).center_y().flex_wrap()
                     .child(text("Starts from").font(k.ty.small).color(k.c.text_muted))
                     .child(branch_button(s, k, i, BranchSlot::From, &f.from, "form-from")))

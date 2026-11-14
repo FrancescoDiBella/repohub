@@ -615,7 +615,7 @@ impl App {
             tray::Action::Go(p) => self.go(p),
             tray::Action::OpenRepo(full) => if let Some(i) = repo(self, &full) { self.open(i) },
             tray::Action::NewIssue(full) => if let Some(i) = repo(self, &full) {
-                if !matches!(&self.page, Page::Repo(f) if f == &full) {
+                if !matches!(&self.page, Page::Repo(f) if f.eq_ignore_ascii_case(&full)) {
                     self.open(i);
                 }
                 self.open_form(i, Compose::Issue);
@@ -835,7 +835,7 @@ impl App {
     fn open(&mut self, i: usize) {
         let Some(r) = self.data.repos.get(i) else { return };
         let full = r.full_name.clone();
-        if !matches!(&self.page, Page::Repo(f) if f == &full) {
+        if !matches!(&self.page, Page::Repo(f) if f.eq_ignore_ascii_case(&full)) {
             self.local_dir.clear();
             self.local_file = None;
         }
@@ -1229,7 +1229,7 @@ impl App {
     }
 
     /// Sends the open form.
-    fn submit_form(&mut self, _i: usize) {
+    fn submit_form(&mut self) {
         if actions::blocked(self).is_some() {
             return;
         }
@@ -1279,9 +1279,10 @@ impl App {
             return;
         }
         self.confirm_merge = None;
-        let repo_owned = repo.to_owned();
-        let i = self.data.repos.iter().position(|r| r.full_name.eq_ignore_ascii_case(repo) || r.name.eq_ignore_ascii_case(repo)).unwrap_or(usize::MAX);
-        let full = if i != usize::MAX { self.data.repos[i].full_name.clone() } else { repo.to_owned() };
+        let full = self.data.repos.iter()
+            .find(|r| r.full_name.eq_ignore_ascii_case(repo) || (!repo.contains('/') && r.name.eq_ignore_ascii_case(repo)))
+            .map(|r| r.full_name.clone()).unwrap_or_else(|| repo.to_owned());
+        let full_cb = full.clone();
         let Some(h) = self.handle.clone() else { return };
         let cfg = self.cfg.clone();
         let epoch = self.load_gen;
@@ -1291,7 +1292,7 @@ impl App {
             }
             s.busy.remove(&key);
             match r {
-                Ok(done) => s.apply_done(&repo_owned, done),
+                Ok(done) => s.apply_done(&full_cb, done),
                 Err(e) => s.notify_problem(e),
             }
         });
@@ -1304,12 +1305,14 @@ impl App {
     }
 
     fn apply_done_inner(&mut self, repo: &str, done: github::Done) {
-        let full_name = self.data.repos.iter().find(|r| same_repo(&r.full_name, repo) || same_repo(&r.name, repo)).map(|r| r.full_name.clone()).unwrap_or_else(|| repo.to_owned());
+        let full_name = self.data.repos.iter()
+            .find(|r| r.full_name.eq_ignore_ascii_case(repo) || (!repo.contains('/') && r.name.eq_ignore_ascii_case(repo)))
+            .map(|r| r.full_name.clone()).unwrap_or_else(|| repo.to_owned());
         match done {
             github::Done::Issue(c) => {
                 let title = self.form_title.take().unwrap_or_default();
                 self.data.issues.insert(0, model::Issue { number: c.number, title, repo: full_name.clone(), label: None, created_at: self.now, comments: 0, url: c.url });
-                if let Some(r) = self.data.repos.iter_mut().find(|r| same_repo(&r.full_name, &full_name) || same_repo(&r.name, &full_name)) {
+                if let Some(r) = self.data.repos.iter_mut().find(|r| r.full_name.eq_ignore_ascii_case(&full_name)) {
                     r.issues += 1;
                 }
                 self.notify(format!("Opened issue #{} in {full_name}", c.number));
@@ -1337,7 +1340,7 @@ impl App {
             }
             github::Done::Closed(n) => {
                 self.data.issues.retain(|x| !(x.number == n && same_repo(&x.repo, &full_name)));
-                if let Some(r) = self.data.repos.iter_mut().find(|r| same_repo(&r.full_name, &full_name) || same_repo(&r.name, &full_name)) {
+                if let Some(r) = self.data.repos.iter_mut().find(|r| r.full_name.eq_ignore_ascii_case(&full_name)) {
                     r.issues = r.issues.saturating_sub(1);
                 }
                 self.notify(format!("Closed issue #{n}"));
@@ -1527,12 +1530,10 @@ impl App {
         let full = self.data.repos.get(i).map(|r| r.full_name.clone());
         self.flush_board();
         self.board = None;
-        if let Some(full) = full {
-            if let Some(curr) = self.repo_index_of(&full) {
-                self.load_notes(curr);
-            }
-        } else if i < self.data.repos.len() {
-            self.load_notes(i);
+        if let Some(full) = full
+            && let Some(curr) = self.repo_index_of(&full)
+        {
+            self.load_notes(curr);
         }
     }
 
@@ -1635,7 +1636,7 @@ impl App {
         let Some(p) = p else { return };
         let Some(r) = self.data.repos.get(i) else { return };
         let full = r.full_name.clone();
-        if !matches!(&self.page, Page::Repo(f) if f == &full) {
+        if !matches!(&self.page, Page::Repo(f) if f.eq_ignore_ascii_case(&full)) {
             self.go(Page::Repo(full));
         }
         self.leave_tab();
@@ -2107,7 +2108,7 @@ fn sidebar(s: &App, k: &Kit) -> El {
         let r = &s.data.repos[i];
         let full = r.full_name.clone();
         SidebarRow::new(r.name.clone()).avatar(ui::avatar(k, &r.name, r.hue, 16.0)).height(30.0)
-            .selected(matches!(&s.page, Page::Repo(f) if f == &full)).on_select(move |s: &mut App, _| s.open(i)).build(k).key(format!("pin-{}", r.full_name))
+            .selected(matches!(&s.page, Page::Repo(f) if f.eq_ignore_ascii_case(&full))).on_select(move |s: &mut App, _| s.open(i)).build(k).key(format!("pin-{}", r.full_name))
     }).collect();
     let org_rows: Vec<El> = orgs(s).into_iter().map(|(o, n)| {
         let on = s.page == Page::Repos && s.owner == OwnerFilter::Org(o.clone());
@@ -2997,9 +2998,15 @@ mod fix60_tests {
         assert!(s.data.repos.len() >= 2);
         let repo_1 = s.data.repos[1].full_name.clone();
 
-        // Open repository 1
+        // Open repository 1, set branch, tab, local_dir, local_file
         s.open(1);
+        s.set_tab(1, crate::RepoTab::Terminal);
+        s.branch_of.insert(repo_1.clone(), "feature-x".into());
+        s.local_dir = "src/components".into();
+        s.local_file = Some(("mod.rs".into(), crate::state::Load::Ready(crate::local::Content::Missing)));
+
         assert_eq!(s.page, Page::Repo(repo_1.clone()));
+        assert_eq!(s.tab, crate::RepoTab::Terminal);
         assert_eq!(s.repo_index(), Some(1));
         assert_eq!(s.place().repo.as_deref(), Some(repo_1.as_str()));
 
@@ -3008,19 +3015,119 @@ mod fix60_tests {
         reordered.repos.swap(0, 1);
         s.apply(s.load_gen, Ok(reordered));
 
-        // The page should still track repo_1, but its index is now 0
+        // The page should still track repo_1, but its index is now 0.
+        // Its tab, branch_of, local_dir, and local_file must survive the reorder.
         assert_eq!(s.page, Page::Repo(repo_1.clone()));
+        assert_eq!(s.tab, crate::RepoTab::Terminal);
+        assert_eq!(s.branch_of.get(&repo_1).map(|b| b.as_str()), Some("feature-x"));
+        assert_eq!(s.local_dir, "src/components");
+        assert_eq!(s.local_file.as_ref().map(|(f, _)| f.as_str()), Some("mod.rs"));
         assert_eq!(s.repo_index(), Some(0));
         assert_eq!(s.place().repo.as_deref(), Some(repo_1.as_str()));
+
+        // Simulate having a board open for repo_1
+        s.open_board(0, "architecture".into(), true);
+        assert!(s.board.is_some(), "board editor is open");
 
         // Simulate refresh where repo_1 was deleted/unloaded from GitHub
         let mut without_repo_1 = s.data.clone();
         without_repo_1.repos.retain(|r| r.full_name != repo_1);
         s.apply(s.load_gen, Ok(without_repo_1));
 
-        // Missing repository falls back safely to Page::Repos
+        // Missing repository falls back safely to Page::Repos and closes board via leave_tab
         assert_eq!(s.page, Page::Repos);
         assert_eq!(s.repo_index(), None);
+        assert!(s.board.is_none(), "board must be cleared on fallback to Repos");
+    }
+
+    #[test]
+    fn apply_done_updates_intended_repository_after_reordering() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = crate::init();
+        s.now = 1_700_000_000;
+        s.data = crate::model::Data::sample_at(s.now);
+        assert!(s.data.repos.len() >= 2);
+        let repo_0 = s.data.repos[0].full_name.clone();
+        let repo_1 = s.data.repos[1].full_name.clone();
+        let issues_1_before = s.data.repos[1].issues;
+
+        // Initialize branches cache for repo_1
+        s.branches.insert(repo_1.clone(), crate::state::Load::Ready(vec!["main".into()]));
+
+        // Reorder repos before asynchronous done response arrives
+        s.data.repos.swap(0, 1);
+        assert_eq!(s.data.repos[0].full_name, repo_1);
+        assert_eq!(s.data.repos[1].full_name, repo_0);
+
+        // A Done::Branch for repo_1 arrives
+        s.apply_done(&repo_1, crate::github::Done::Branch("feature/reorder".into()));
+        if let Some(crate::state::Load::Ready(branches)) = s.branches.get(&repo_1) {
+            assert!(branches.contains(&"feature/reorder".to_string()), "branches list updated for repo_1");
+        } else {
+            panic!("branches cache missing for repo_1");
+        }
+        assert_eq!(s.branch_of.get(&repo_1).map(|b| b.as_str()), Some("feature/reorder"));
+
+        // A Done::Issue for repo_1 arrives
+        s.form_title = Some("New reordered issue".into());
+        s.apply_done(&repo_1, crate::github::Done::Issue(crate::github::Created { number: 888, url: "https://example.invalid/888".into() }));
+        assert_eq!(s.data.issues[0].number, 888);
+        assert_eq!(s.data.issues[0].repo, repo_1);
+        let repo_1_entry = s.data.repos.iter().find(|r| r.full_name == repo_1).unwrap();
+        assert_eq!(repo_1_entry.issues, issues_1_before + 1);
+
+        // A Done::Closed for repo_1 arrives
+        s.apply_done(&repo_1, crate::github::Done::Closed(888));
+        assert!(s.data.issues.iter().all(|x| x.number != 888));
+        let repo_1_entry = s.data.repos.iter().find(|r| r.full_name == repo_1).unwrap();
+        assert_eq!(repo_1_entry.issues, issues_1_before);
+    }
+
+    #[test]
+    fn apply_done_on_unloaded_external_repo_does_not_mutate_loaded_same_name_repo() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = crate::init();
+        s.now = 1_700_000_000;
+        s.data = crate::model::Data::sample_at(s.now);
+        // Ensure alice/app is in data.repos
+        s.data.repos[0].owner = "alice".into();
+        s.data.repos[0].name = "app".into();
+        s.data.repos[0].full_name = "alice/app".into();
+        s.data.repos[0].issues = 5;
+
+        // Add a pull request and an issue belonging to external repo other-org/app
+        s.data.pulls.insert(0, crate::model::Pull {
+            number: 42,
+            title: "External PR".into(),
+            repo: "other-org/app".into(),
+            author: "bob".into(),
+            state: crate::model::PullState::Open,
+            checks: None,
+            updated_at: s.now,
+            comments: 0,
+            url: "https://github.com/other-org/app/pull/42".into(),
+        });
+        s.data.issues.insert(0, crate::model::Issue {
+            number: 77,
+            title: "External Issue".into(),
+            repo: "other-org/app".into(),
+            label: None,
+            created_at: s.now,
+            comments: 0,
+            url: "https://github.com/other-org/app/issues/77".into(),
+        });
+
+        // Merge PR 42 on other-org/app
+        s.apply_done_inner("other-org/app", crate::github::Done::Merged(42));
+        assert_eq!(s.data.pulls[0].number, 42);
+        assert_eq!(s.data.pulls[0].state, crate::model::PullState::Merged, "external PR updated to merged");
+
+        // Close issue 77 on other-org/app
+        s.apply_done_inner("other-org/app", crate::github::Done::Closed(77));
+        assert!(s.data.issues.iter().all(|x| !(x.number == 77 && x.repo == "other-org/app")), "external issue removed");
+
+        // alice/app issues count MUST remain unchanged
+        assert_eq!(s.data.repos[0].issues, 5, "alice/app issues count must not be decremented by external repo close");
     }
 
     #[test]

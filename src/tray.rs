@@ -103,7 +103,7 @@ pub fn menu(s: &App) -> Vec<Entry> {
     }
     // A new issue goes to the repository on screen, else the first pinned one.
     let target = match &s.page {
-        Page::Repo(full) => d.repos.iter().find(|r| r.full_name == *full),
+        Page::Repo(full) => d.repos.iter().find(|r| r.full_name.eq_ignore_ascii_case(full)),
         _ => crate::pinned(s).first().and_then(|i| d.repos.get(*i)),
     };
     m.push(Entry::sep());

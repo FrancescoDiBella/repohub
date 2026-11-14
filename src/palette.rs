@@ -75,7 +75,7 @@ pub fn entries(s: &App) -> Vec<Entry> {
     let mut out = Vec::new();
     // The repository on screen first: what you most likely want next.
     if let Page::Repo(full) = &s.page
-        && let Some((i, r)) = s.data.repos.iter().enumerate().find(|(_, r)| r.full_name == *full)
+        && let Some((i, r)) = s.data.repos.iter().enumerate().find(|(_, r)| r.full_name.eq_ignore_ascii_case(full))
     {
         let n = &r.name;
         out.push(entry(format!("New issue in {n}"), "Action", &icons::ISSUE, Command::Compose(i, Compose::Issue)));
