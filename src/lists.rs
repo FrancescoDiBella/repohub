@@ -179,18 +179,27 @@ pub fn settings(s: &App, k: &Kit) -> El {
             Some(src) => format!("{} (from {src})", cfg.api),
             None => cfg.api.clone(),
         }),
-        ("Organizations (REPOHUB_ORGS)", match &cfg.orgs {
-            crate::state::Orgs::All => match crate::orgs(s).iter().map(|o| o.0.clone()).collect::<Vec<_>>().join(", ") {
-                l if l.is_empty() => "all you belong to (none found)".into(),
-                l => format!("all you belong to: {l}"),
-            },
-            crate::state::Orgs::Off => "none: only your own repositories".into(),
-            crate::state::Orgs::Only(l) => l.join(", "),
+        ("Organizations (REPOHUB_ORGS)", {
+            let base = match &cfg.orgs {
+                crate::state::Orgs::All => match crate::orgs(s).iter().map(|o| o.0.clone()).collect::<Vec<_>>().join(", ") {
+                    l if l.is_empty() => "all you belong to (none found)".into(),
+                    l => format!("all you belong to: {l}"),
+                },
+                crate::state::Orgs::Off => "none: only your own repositories".into(),
+                crate::state::Orgs::Only(l) => l.join(", "),
+            };
+            match &cfg.sources.orgs {
+                Some(src) => format!("{base} (from {src})"),
+                None => base,
+            }
         }),
         ("Pinned", match (&s.pins, cfg.pinned.is_empty()) {
             (Some(p), _) => format!("{} chosen in the app (pin or unpin from a repository)", p.len()),
             (None, true) => "the 3 most recently pushed (REPOHUB_PINNED is empty)".into(),
-            (None, false) => format!("{} (REPOHUB_PINNED)", cfg.pinned.join(", ")),
+            (None, false) => match &cfg.sources.pinned {
+                Some(src) => format!("{} (REPOHUB_PINNED, from {src})", cfg.pinned.join(", ")),
+                None => format!("{} (REPOHUB_PINNED)", cfg.pinned.join(", ")),
+            },
         }),
         ("Notes", if cfg.notes { notes_where() } else { "not available here (needs the desktop app or Docker)".into() }),
         ("Filters", format!("forks {}, archived {}, at most {} repositories", if cfg.include_forks { "yes" } else { "no" }, if cfg.include_archived { "yes" } else { "no" }, cfg.max_repos)),

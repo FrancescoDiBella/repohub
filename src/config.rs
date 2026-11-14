@@ -165,7 +165,8 @@ struct LoadedEnvFiles {
     account_locked: bool,
     token_from_user_env: bool,
     project_loc: Option<EnvFileLocation>,
-    initial_user_or_token_in_process: bool,
+    initial_token_in_process: bool,
+    initial_user_in_process: bool,
     user_file_has_api: bool,
     user_file_has_user: bool,
     user_file_has_token: bool,
@@ -183,7 +184,8 @@ struct LoadedEnvFiles {
 fn load_env_files() -> LoadedEnvFiles {
     // 1. Initial process environment checks.
     let proc_has = |k: &str| std::env::var(k).is_ok_and(|v| !v.trim().is_empty());
-    let initial_user_or_token_in_process = proc_has("GITHUB_TOKEN") || proc_has("GITHUB_USER");
+    let initial_token_in_process = proc_has("GITHUB_TOKEN");
+    let initial_user_in_process = proc_has("GITHUB_USER");
 
     // 2. Compute user_env_file before any upward project `.env` can touch REPOHUB_DATA_DIR.
     let user_path = user_env_file();
@@ -263,7 +265,8 @@ fn load_env_files() -> LoadedEnvFiles {
         account_locked,
         token_from_user_env,
         project_loc: if project_file_loaded { project_loc } else { None },
-        initial_user_or_token_in_process,
+        initial_token_in_process,
+        initial_user_in_process,
         user_file_has_api,
         user_file_has_user,
         user_file_has_token,
@@ -428,7 +431,7 @@ impl Config {
             // Token source
             let token_src = if token.is_none() {
                 None
-            } else if loaded.initial_user_or_token_in_process && std::env::var("GITHUB_TOKEN").is_ok() {
+            } else if loaded.initial_token_in_process {
                 Some("the environment".into())
             } else if loaded.token_from_user_env {
                 Some(user_file_str.clone())
@@ -443,7 +446,7 @@ impl Config {
             // User source
             let user_src = if user.is_none() {
                 None
-            } else if loaded.initial_user_or_token_in_process && std::env::var("GITHUB_USER").is_ok() {
+            } else if loaded.initial_user_in_process {
                 Some("the environment".into())
             } else if loaded.project_file_has_user {
                 proj_file_str.clone().or_else(|| Some("project .env".into()))
@@ -753,9 +756,46 @@ mod tests {
         // Blocked keys MUST NOT be loaded into process env or update::api or claude or notes::data_dir:
         assert_eq!(crate::update::api(), "https://api.github.com", "REPOHUB_UPDATE_API must not be loaded from upward .env");
         assert_ne!(std::env::var("REPOHUB_CLAUDE").as_deref(), Ok("./evil.sh"));
+        assert_ne!(crate::claude::find(), Some(std::path::PathBuf::from("./evil.sh")));
         assert_ne!(std::env::var("REPOHUB_DATA_DIR").as_deref(), Ok("/tmp/evil-data"));
+        assert_ne!(crate::notes::data_dir(), std::path::PathBuf::from("/tmp/evil-data"));
         assert_ne!(std::env::var("REPOHUB_TERMINAL_COMMANDS").as_deref(), Ok("evil-command"));
         assert_eq!(cfg.api, "https://api.github.com");
+    }
+
+    #[test]
+    fn mixed_source_attribution_preserves_distinct_sources() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = EnvVarGuard::new(&[
+            "GITHUB_TOKEN",
+            "GITHUB_USER",
+            "GITHUB_API_URL",
+            "REPOHUB_ENV",
+            "REPOHUB_DATA_DIR",
+        ]);
+
+        let test_root = std::env::temp_dir().join(format!("repohub-test-mixed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&test_root);
+        let data_dir = test_root.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        guard.temp_dir = Some(test_root);
+
+        // Put user in process environment only:
+        // SAFETY: serialized by ENV_LOCK
+        unsafe {
+            std::env::set_var("REPOHUB_DATA_DIR", &data_dir);
+            std::env::set_var("GITHUB_USER", "proc_user");
+        };
+
+        // Put token in data_dir/.env:
+        let user_env_path = data_dir.join(".env");
+        std::fs::write(&user_env_path, "GITHUB_TOKEN=\"saved_secret_tok\"\n").unwrap();
+
+        let cfg = Config::load();
+        assert_eq!(cfg.user.as_deref(), Some("proc_user"));
+        assert_eq!(cfg.token.as_deref(), Some("saved_secret_tok"));
+        assert_eq!(cfg.sources.user.as_deref(), Some("the environment"));
+        assert_eq!(cfg.sources.token.as_deref(), Some(user_env_path.display().to_string().as_str()));
     }
 
     #[test]

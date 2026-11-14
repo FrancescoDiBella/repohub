@@ -736,6 +736,25 @@ impl App {
         cfg.env_file = Some(user_file.clone());
         cfg.sources.user = cfg.user.as_ref().map(|_| user_file.clone());
         cfg.sources.token = cfg.token.as_ref().map(|_| user_file.clone());
+        // If the token is now saved in the user settings file, ensure the API host
+        // is tied to that file or the default; an external project .env or REPOHUB_ENV
+        // must not redirect the newly saved token.
+        if cfg.token.is_some() {
+            let user_env_api = std::fs::read_to_string(config::user_env_file()).ok().and_then(|s| {
+                config::parse_env(&s).into_iter().find(|(k, v)| k == "GITHUB_API_URL" && !v.trim().is_empty()).map(|(_, v)| v.trim_end_matches('/').to_owned())
+            });
+            let initial_proc_api = std::env::var("GITHUB_API_URL").ok().filter(|v| !v.trim().is_empty()).map(|v| v.trim_end_matches('/').to_owned());
+            if let Some(proc_api) = initial_proc_api {
+                cfg.api = proc_api;
+                cfg.sources.api = Some("the environment".into());
+            } else if let Some(user_api) = user_env_api {
+                cfg.api = user_api;
+                cfg.sources.api = Some(user_file);
+            } else {
+                cfg.api = "https://api.github.com".into();
+                cfg.sources.api = Some("default (https://api.github.com)".into());
+            }
+        }
         self.cfg = Arc::new(cfg);
         self.acct_error = None;
         self.acct_token.clear();
@@ -2936,6 +2955,27 @@ mod load_gen_tests {
         assert_eq!(rt.state.page, crate::Page::Overview);
         assert!(rt.state.data.sample);
         assert!(rt.elements().iter().all(|e| e.text.as_deref() != Some("secret-repo")));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn saving_account_in_settings_resets_api_to_user_env_or_default() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _tmp = TempDataDir::new("save-account-api-reset");
+
+        let mut s = crate::init();
+        let mut cfg = (*s.cfg).clone();
+        cfg.account_locked = false;
+        cfg.api = "https://untrusted-api.example".into();
+        cfg.sources.api = Some("project .env".into());
+        s.cfg = std::sync::Arc::new(cfg);
+
+        s.acct_user = rune::TextEdit::new("carol");
+        s.acct_token = rune::TextEdit::new("ghp_carol_tok");
+        s.save_account(false);
+
+        assert_eq!(s.cfg.api, "https://api.github.com", "saving account must reset untrusted API host to default or user env");
+        assert_eq!(s.cfg.sources.api.as_deref(), Some("default (https://api.github.com)"));
     }
 }
 
