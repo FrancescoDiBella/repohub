@@ -244,8 +244,7 @@ pub fn parse_line(line: &str) -> Vec<Event> {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::{Proc, start};
-#[cfg(not(target_arch = "wasm32"))]
-#[allow(unused_imports)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 pub use native::find;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) use native::command;
