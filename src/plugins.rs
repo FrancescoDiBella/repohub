@@ -316,6 +316,14 @@ impl Plugins {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn clone_command(source: &str, dest: &Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new("git");
+    crate::config::scrub_child_env(&mut cmd);
+    cmd.args(["clone", "--depth", "1", "--", source]).arg(dest);
+    cmd
+}
+
 /// Installs a plugin from a folder (copied) or a Git address (cloned); returns its id.
 pub fn install(source: &str) -> Result<String, String> {
     let source = source.trim();
@@ -336,8 +344,8 @@ pub fn install(source: &str) -> Result<String, String> {
         return Err(format!("A plugin called {id} is already installed: remove it first."));
     }
     if remote {
-        let out = std::process::Command::new("git").args(["clone", "--depth", "1", "--", source]).arg(&dest).output()
-            .map_err(|e| format!("Couldn't run git: {e}"))?;
+        let mut cmd = clone_command(source, &dest);
+        let out = cmd.output().map_err(|e| format!("Couldn't run git: {e}"))?;
         if !out.status.success() {
             let _ = std::fs::remove_dir_all(&dest);
             return Err(format!("git clone failed: {}", String::from_utf8_lossy(&out.stderr).trim()));

@@ -247,6 +247,8 @@ pub use native::{Proc, start};
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(unused_imports)]
 pub use native::find;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) use native::command;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
@@ -300,8 +302,8 @@ mod native {
     }
 
     /// The command line: `claude -p … --resume <session>`, through the login shell when needed.
-    fn command(flags: &[String]) -> Command {
-        match find() {
+    pub(crate) fn command(flags: &[String]) -> Command {
+        let mut cmd = match find() {
             Some(bin) if bin.extension().is_some_and(|e| e == "cmd") => {
                 let mut c = Command::new("cmd");
                 c.arg("/C").arg(bin).args(flags);
@@ -323,7 +325,9 @@ mod native {
                 c.args(["-l", "-c", "exec claude \"$@\"", "claude"]).args(flags);
                 c
             }
-        }
+        };
+        crate::config::scrub_child_env(&mut cmd);
+        cmd
     }
 
     /// Starts one answer: `prompt` in `cwd`. `on_event` runs for each event (on a reader

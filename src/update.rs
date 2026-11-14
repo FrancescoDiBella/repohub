@@ -256,6 +256,7 @@ mod native {
     }
 
     fn run(cmd: &mut Command, what: &str) -> Result<(), String> {
+        crate::config::scrub_child_env(cmd);
         let out = cmd.output().map_err(|e| format!("Couldn't {what}: {e}"))?;
         if out.status.success() {
             Ok(())
@@ -294,7 +295,9 @@ mod native {
         run(Command::new("hdiutil").args(["attach", "-nobrowse", "-readonly", "-mountpoint"]).arg(&mnt).arg(&dmg), "open the disk image")?;
         let staged = tmp.join("RepoHub.app");
         let copied = run(Command::new("ditto").arg(mnt.join("RepoHub.app")).arg(&staged), "copy the new app");
-        let _ = Command::new("hdiutil").args(["detach", "-quiet"]).arg(&mnt).output();
+        let mut detach = Command::new("hdiutil");
+        crate::config::scrub_child_env(&mut detach);
+        let _ = detach.args(["detach", "-quiet"]).arg(&mnt).output();
         copied?;
         let old = parent.join(".RepoHub-old.app");
         let _ = std::fs::remove_dir_all(&old);
@@ -359,11 +362,17 @@ mod native {
     /// Starts the new app a moment after this one quits.
     pub fn relaunch(target: &Path) -> Result<(), String> {
         let spawned = if cfg!(target_os = "macos") {
-            Command::new("sh").args(["-c", "sleep 1; open \"$0\""]).arg(target).spawn()
+            let mut cmd = Command::new("sh");
+            crate::config::scrub_child_env(&mut cmd);
+            cmd.args(["-c", "sleep 1; open \"$0\""]).arg(target).spawn()
         } else if cfg!(windows) {
-            Command::new(target).spawn()
+            let mut cmd = Command::new(target);
+            crate::config::scrub_child_env(&mut cmd);
+            cmd.spawn()
         } else {
-            Command::new("sh").args(["-c", "sleep 1; exec \"$0\""]).arg(target).spawn()
+            let mut cmd = Command::new("sh");
+            crate::config::scrub_child_env(&mut cmd);
+            cmd.args(["-c", "sleep 1; exec \"$0\""]).arg(target).spawn()
         };
         spawned.map(|_| ()).map_err(|e| format!("The update is installed, but RepoHub couldn't restart: {e}. Open it again."))
     }
