@@ -135,8 +135,11 @@ mod js {
     #[wasm_bindgen(inline_js = "
 export async function gh_fetch(method, url, accept, body) {
     try {
-        const init = { method, headers: { Accept: accept }, credentials: 'same-origin' };
-        if (body) { init.body = body; init.headers['Content-Type'] = 'application/json'; }
+        const init = { method, headers: { Accept: accept, 'X-RepoHub': '1' }, credentials: 'same-origin' };
+        if (method !== 'GET' && method !== 'HEAD') {
+            init.headers['Content-Type'] = 'application/json';
+        }
+        if (body) { init.body = body; }
         const r = await fetch(url, init);
         const text = await r.text();
         return [r.status, text, r.headers.get('x-ratelimit-remaining') || '', r.headers.get('x-ratelimit-reset') || ''];

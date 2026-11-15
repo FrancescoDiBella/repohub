@@ -76,6 +76,8 @@ pub struct Config {
     pub sources: ConfigSources,
     /// Settings a project `.env` isn't allowed to change, found (and ignored) in the one loaded.
     pub ignored_keys: Vec<String>,
+    /// Whether write actions (creating issues, branches, PRs, merging, starring) are allowed.
+    pub allow_writes: bool,
 }
 
 impl std::fmt::Debug for Config {
@@ -474,6 +476,7 @@ impl Config {
             account_locked,
             sources,
             ignored_keys,
+            allow_writes: true,
         }
     }
 
@@ -512,6 +515,7 @@ impl Config {
             account_locked: true,
             sources: ConfigSources::default(),
             ignored_keys: Vec::new(),
+            allow_writes: bo("allowWrites", true),
         })
     }
 }
@@ -525,9 +529,12 @@ mod tests {
         let c = Config::from_json(r#"{"user":"octocat","hasToken":true,"pinned":["a","b"],"theme":"dark","maxRepos":20}"#).unwrap();
         assert_eq!(c.user.as_deref(), Some("octocat"));
         assert!(c.live() && c.token.is_some());
+        assert!(c.allow_writes);
         assert_eq!(c.pinned, vec!["a", "b"]);
         assert_eq!((c.theme, c.max_repos), (crate::state::Theme::Dark, 20));
         assert!(!Config::from_json(r#"{"hasToken":false}"#).unwrap().live());
+        let no_writes = Config::from_json(r#"{"user":"octocat","hasToken":true,"allowWrites":false}"#).unwrap();
+        assert!(!no_writes.allow_writes);
     }
 
     #[test]

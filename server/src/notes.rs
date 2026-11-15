@@ -105,7 +105,23 @@ fn text(req: Request, code: u16, msg: &str) {
     reply(req, code, "text/plain; charset=utf-8", msg.as_bytes().to_vec());
 }
 
-pub fn handle(data: &Path, mut req: Request) {
+fn dir_size(path: &Path) -> u64 {
+    let mut total = 0;
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                total += dir_size(&p);
+            } else if let Ok(meta) = entry.metadata() {
+                total += meta.len();
+            }
+        }
+    }
+    total
+}
+
+
+pub fn handle(data: &Path, allow_writes: bool, max_bytes: u64, mut req: Request) {
     let url = req.url().to_owned();
     let q = query(&url);
     let get = |k: &str| q.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone()).unwrap_or_default();
@@ -144,6 +160,9 @@ pub fn handle(data: &Path, mut req: Request) {
             Err(_) => text(req, 404, "No such drawing"),
         },
         Method::Put => {
+            if !allow_writes {
+                return text(req, 403, "Writes are disabled on this server (set REPOHUB_ALLOW_WRITES=true)");
+            }
             if req.body_length().is_some_and(|n| n as u64 > MAX_BYTES) {
                 return text(req, 413, "Drawing too large (25 MB at most)");
             }
@@ -153,6 +172,19 @@ pub fn handle(data: &Path, mut req: Request) {
             }
             if !body.starts_with(b"{") {
                 return text(req, 400, "Expected an Excalidraw JSON document");
+            }
+            let notes_root = data.join("notes");
+            let cur_total = dir_size(&notes_root);
+            let existing_len = file.metadata().map(|m| m.len()).unwrap_or(0);
+            let limit = max_bytes;
+            if cur_total.saturating_sub(existing_len) + (body.len() as u64) > limit {
+                let mb = limit >> 20;
+                let msg = if mb > 0 {
+                    format!("Total notes storage limit exceeded ({mb} MB at most)")
+                } else {
+                    "Total notes storage limit exceeded".into()
+                };
+                return text(req, 413, &msg);
             }
             static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
             let id = TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -166,10 +198,15 @@ pub fn handle(data: &Path, mut req: Request) {
                 Err(e) => text(req, 500, &format!("Couldn't save the drawing: {e}")),
             }
         }
-        Method::Delete => match std::fs::remove_file(&file) {
-            Ok(()) => text(req, 204, ""),
-            Err(_) => text(req, 404, "No such drawing"),
-        },
+        Method::Delete => {
+            if !allow_writes {
+                return text(req, 403, "Writes are disabled on this server (set REPOHUB_ALLOW_WRITES=true)");
+            }
+            match std::fs::remove_file(&file) {
+                Ok(()) => text(req, 204, ""),
+                Err(_) => text(req, 404, "No such drawing"),
+            }
+        }
         _ => text(req, 405, "Method not allowed"),
     }
 }
@@ -187,5 +224,17 @@ mod tests {
         assert_eq!(d, Path::new("/d/notes/octo/repo/feature%2Fx"));
         assert_eq!(segment(".."), "%2E.");
         assert_eq!(percent_decode("feature%2Fx+y"), "feature/x y");
+    }
+
+    #[test]
+    fn test_dir_size_calculation() {
+        let tmp = std::env::temp_dir().join(format!("repohub-notes-size-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let folder = tmp.join("sub");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(tmp.join("a.txt"), "hello").unwrap(); // 5 bytes
+        std::fs::write(folder.join("b.txt"), "world!").unwrap(); // 6 bytes
+        assert_eq!(dir_size(&tmp), 11);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
