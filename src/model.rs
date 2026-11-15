@@ -156,7 +156,8 @@ pub struct Data {
     pub retry_after: Option<u64>,
     /// True for the built-in sample data.
     pub sample: bool,
-    pub pulls_total: Option<usize>,
+    pub open_pulls_total: Option<usize>,
+    pub closed_pulls_total: Option<usize>,
     pub issues_total: Option<usize>,
     pub runs_total: usize,
     pub repos_capped: bool,
@@ -289,9 +290,20 @@ pub fn sample_detail(r: &Repo) -> Detail {
 
 impl Data {
     pub fn prs_capped(&self) -> bool {
-        match self.pulls_total {
-            Some(total) => total > self.pulls.len(),
+        let open = self.pulls.iter().filter(|p| matches!(p.state, PullState::Open | PullState::Draft)).count();
+        match self.open_pulls_total {
+            Some(total) => total > open,
             None => self.pulls.len() >= SEARCH_CAP,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn pulls_total(&self) -> Option<usize> {
+        match (self.open_pulls_total, self.closed_pulls_total) {
+            (Some(o), Some(c)) => Some(o + c),
+            (Some(o), None) => Some(o),
+            (None, Some(c)) => Some(c),
+            (None, None) => None,
         }
     }
 
@@ -393,7 +405,8 @@ impl Data {
             runs_failed: false,
             retry_after: None,
             sample: true,
-            pulls_total: None,
+            open_pulls_total: None,
+            closed_pulls_total: None,
             issues_total: None,
             runs_total: 5,
             repos_capped: false,

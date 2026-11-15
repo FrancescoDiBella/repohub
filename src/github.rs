@@ -228,7 +228,39 @@ impl Gh {
         }
         self.get("/user").await.ok().map(|v| s(&v, "login"))
     }
+}
 
+pub fn parse_pull(v: &Value) -> Pull {
+    let merged = v.get("pull_request").and_then(|p| p.get("merged_at")).is_some_and(|m| !m.is_null());
+    let state = if merged { PullState::Merged } else if s(v, "state") == "closed" { PullState::Closed } else if b(v, "draft") { PullState::Draft } else { PullState::Open };
+    let updated_at = s(v, "updated_at");
+    Pull {
+        number: n(v, "number"),
+        title: s(v, "title"),
+        repo: repo_from_url(&s(v, "repository_url")),
+        author: v.get("user").map(|u| s(u, "login")).unwrap_or_default(),
+        state,
+        checks: None,
+        updated_at: parse_iso(&updated_at).unwrap_or(0),
+        comments: n(v, "comments"),
+        url: s(v, "html_url"),
+    }
+}
+
+pub fn parse_issue(v: &Value) -> Issue {
+    let created_at = s(v, "created_at");
+    Issue {
+        number: n(v, "number"),
+        title: s(v, "title"),
+        repo: repo_from_url(&s(v, "repository_url")),
+        label: v.get("labels").and_then(Value::as_array).and_then(|l| l.first()).map(|l| (s(l, "name"), hex_hue(&s(l, "color")))),
+        created_at: parse_iso(&created_at).unwrap_or(0),
+        comments: n(v, "comments"),
+        url: s(v, "html_url"),
+    }
+}
+
+impl Gh {
     fn repo(&self, v: &Value, starred: &HashSet<String>) -> Repo {
         let full = s(v, "full_name");
         let language = Some(s(v, "language")).filter(|l| !l.is_empty()).unwrap_or_else(|| "—".into());
@@ -327,27 +359,71 @@ impl Gh {
                 }
                 next = next_page_path(resp.link.as_deref(), &self.api_base);
             }
-            // Public organizations, then their public repositories (one request each).
+            // Public organizations, then their public repositories.
             let orgs: Vec<String> = match &cfg.orgs {
                 Orgs::Off => Vec::new(),
                 Orgs::Only(list) => list.clone(),
-                Orgs::All => match self.get(&format!("/users/{login}/orgs?per_page=100")).await {
-                    Ok(v) => v.as_array().cloned().unwrap_or_default()
-                        .iter().map(|o| s(o, "login")).filter(|o| !o.is_empty()).collect(),
-                    Err(e) => {
-                        warnings.push(format!("Organizations couldn't load: {e}"));
-                        Vec::new()
+                Orgs::All => {
+                    let mut list = Vec::new();
+                    let mut next = Some(format!("/users/{login}/orgs?per_page=100"));
+                    let mut pages = 0;
+                    while let Some(path) = next {
+                        if pages >= 5 {
+                            break;
+                        }
+                        pages += 1;
+                        match self.get_resp(&path).await {
+                            Ok((v, resp)) => {
+                                let items = v.as_array().cloned().unwrap_or_default();
+                                let n = items.len();
+                                list.extend(items.iter().map(|o| s(o, "login")).filter(|o| !o.is_empty()));
+                                if n < 100 {
+                                    break;
+                                }
+                                next = next_page_path(resp.link.as_deref(), &self.api_base);
+                            }
+                            Err(e) => {
+                                warnings.push(format!("Organizations couldn't load: {e}"));
+                                break;
+                            }
+                        }
                     }
-                },
+                    list
+                }
             };
+            if orgs.len() > 50 {
+                repos_capped = true;
+            }
             let mut org_errs = Vec::new();
-            for org in orgs.iter().take(20) {
-                match self.get(&format!("/orgs/{org}/repos?type=public&sort=pushed&per_page=100")).await {
-                    Ok(v) => {
-                        out.extend(v.as_array().cloned().unwrap_or_default().iter().map(|r| self.repo(r, &starred)).filter(wanted));
+            for org in orgs.iter().take(50) {
+                let mut next = Some(format!("/orgs/{org}/repos?type=public&sort=pushed&per_page=100"));
+                let mut pages = 0;
+                while let Some(path) = next {
+                    if pages >= 5 {
+                        repos_capped = true;
+                        break;
                     }
-                    Err(e) => {
-                        org_errs.push((org.clone(), e));
+                    pages += 1;
+                    match self.get_resp(&path).await {
+                        Ok((v, resp)) => {
+                            let items = v.as_array().cloned().unwrap_or_default();
+                            let n = items.len();
+                            out.extend(items.iter().map(|r| self.repo(r, &starred)).filter(wanted));
+                            if n < 100 {
+                                break;
+                            }
+                            next = next_page_path(resp.link.as_deref(), &self.api_base);
+                            if next.is_none() {
+                                break;
+                            }
+                            if pages == 5 && n == 100 {
+                                repos_capped = true;
+                            }
+                        }
+                        Err(e) => {
+                            org_errs.push((org.clone(), e));
+                            break;
+                        }
                     }
                 }
             }
@@ -367,52 +443,76 @@ impl Gh {
         Ok((out, repos_capped))
     }
 
-    async fn search(&self, q: &str) -> Result<(Vec<Value>, usize), String> {
+    pub async fn search_page(&self, q: &str, page: usize) -> Result<(Vec<Value>, usize), String> {
         let q = q.replace(' ', "+").replace(':', "%3A");
-        let v = self.get(&format!("/search/issues?q={q}&sort=updated&order=desc&per_page={}", crate::model::SEARCH_CAP)).await?;
+        let v = self.get(&format!("/search/issues?q={q}&sort=updated&order=desc&per_page={}&page={page}", crate::model::SEARCH_CAP)).await?;
         let total = v.get("total_count").and_then(Value::as_u64).unwrap_or(0) as usize;
         let items = v.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
         Ok((items, total))
     }
 
-    pub async fn pulls(&self, login: &str) -> Result<(Vec<Pull>, usize), String> {
-        let (items, total) = self.search(&format!("is:pr involves:{login}")).await?;
-        let pulls = items.iter().map(|v| {
-            let merged = v.get("pull_request").and_then(|p| p.get("merged_at")).is_some_and(|m| !m.is_null());
-            let state = if merged { PullState::Merged } else if s(v, "state") == "closed" { PullState::Closed } else if b(v, "draft") { PullState::Draft } else { PullState::Open };
-            let updated_at = s(v, "updated_at");
-            Pull {
-                number: n(v, "number"),
-                title: s(v, "title"),
-                repo: repo_from_url(&s(v, "repository_url")),
-                author: v.get("user").map(|u| s(u, "login")).unwrap_or_default(),
-                state,
-                checks: None,
-                updated_at: parse_iso(&updated_at).unwrap_or(0),
-                comments: n(v, "comments"),
-                url: s(v, "html_url"),
-            }
-        }).collect();
+    pub async fn pulls_page(&self, login: &str, open: bool, page: usize) -> Result<(Vec<Pull>, usize), String> {
+        let q = if open {
+            format!("is:pr is:open involves:{login}")
+        } else {
+            format!("is:pr is:closed involves:{login}")
+        };
+        let (items, total) = self.search_page(&q, page).await?;
+        let pulls = items.iter().map(parse_pull).collect();
         Ok((pulls, total))
     }
 
-    /// Open issues in the account's repositories and in those of `orgs` (search ORs the owners).
-    pub async fn issues(&self, login: &str, orgs: &[String]) -> Result<(Vec<Issue>, usize), String> {
-        let owners: String = orgs.iter().take(20).map(|o| format!(" org:{o}")).collect();
-        let (items, total) = self.search(&format!("is:issue is:open archived:false user:{login}{owners}")).await?;
-        let issues = items.iter().map(|v| {
-            let created_at = s(v, "created_at");
-            Issue {
-                number: n(v, "number"),
-                title: s(v, "title"),
-                repo: repo_from_url(&s(v, "repository_url")),
-                label: v.get("labels").and_then(Value::as_array).and_then(|l| l.first()).map(|l| (s(l, "name"), hex_hue(&s(l, "color")))),
-                created_at: parse_iso(&created_at).unwrap_or(0),
-                comments: n(v, "comments"),
-                url: s(v, "html_url"),
+    pub async fn pulls(&self, login: &str) -> Result<(Vec<Pull>, usize, usize), String> {
+        let (open_items, open_total) = self.pulls_page(login, true, 1).await?;
+        let (closed_items, closed_total) = self.pulls_page(login, false, 1).await?;
+        let mut pulls = open_items;
+        for p in closed_items {
+            if !pulls.iter().any(|existing| existing.number == p.number && existing.repo.eq_ignore_ascii_case(&p.repo)) {
+                pulls.push(p);
             }
-        }).collect();
-        Ok((issues, total))
+        }
+        Ok((pulls, open_total, closed_total))
+    }
+
+    /// Open issues in the account's repositories and in those of `orgs` (search ORs the owners).
+    pub async fn issues_page(&self, login: &str, orgs: &[String], page: usize) -> Result<(Vec<Issue>, usize), String> {
+        if orgs.is_empty() {
+            let (items, total) = self.search_page(&format!("is:issue is:open archived:false user:{login}"), page).await?;
+            let issues = items.iter().map(parse_issue).collect();
+            return Ok((issues, total));
+        }
+        let mut all_issues: Vec<Issue> = Vec::new();
+        let mut grand_total = 0;
+        for (idx, chunk) in orgs.chunks(20).enumerate() {
+            let owners: String = chunk.iter().map(|o| format!(" org:{o}")).collect();
+            let q = if idx == 0 {
+                format!("is:issue is:open archived:false user:{login}{owners}")
+            } else {
+                format!("is:issue is:open archived:false{owners}")
+            };
+            match self.search_page(&q, page).await {
+                Ok((items, total)) => {
+                    grand_total += total;
+                    for v in &items {
+                        let issue = parse_issue(v);
+                        if !all_issues.iter().any(|existing| existing.number == issue.number && existing.repo.eq_ignore_ascii_case(&issue.repo)) {
+                            all_issues.push(issue);
+                        }
+                    }
+                }
+                Err(e) => {
+                    if idx == 0 {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        all_issues.sort_by_key(|i| std::cmp::Reverse(i.created_at));
+        Ok((all_issues, grand_total))
+    }
+
+    pub async fn issues(&self, login: &str, orgs: &[String]) -> Result<(Vec<Issue>, usize), String> {
+        self.issues_page(login, orgs, 1).await
     }
 
     pub async fn runs(&self, full: &str) -> Result<Vec<Run>, String> {
@@ -523,6 +623,9 @@ impl Gh {
             }
             next = next_page_path(resp.link.as_deref(), &self.api_base);
         }
+        if !default.is_empty() && !names.iter().any(|n| n == default) {
+            names.push(default.to_owned());
+        }
         names.sort_by_key(|n| (n != default, n.to_lowercase()));
         names.dedup();
         Ok(names)
@@ -600,10 +703,12 @@ pub async fn load_all(cfg: &Config) -> Result<Data, LoadError> {
         Err(e) => return Err(LoadError::new(e, gh.retry_after())),
     };
     let mut pulls_failed = false;
-    let mut pulls_total = None;
+    let mut open_pulls_total = None;
+    let mut closed_pulls_total = None;
     let pulls = match gh.pulls(&profile.login).await {
-        Ok((p, total)) => {
-            pulls_total = Some(total);
+        Ok((p, open_tot, closed_tot)) => {
+            open_pulls_total = Some(open_tot);
+            closed_pulls_total = Some(closed_tot);
             p
         }
         Err(e) => {
@@ -680,11 +785,20 @@ pub async fn load_all(cfg: &Config) -> Result<Data, LoadError> {
         runs_failed,
         retry_after: gh.retry_after(),
         sample: false,
-        pulls_total,
+        open_pulls_total,
+        closed_pulls_total,
         issues_total,
         runs_total,
         repos_capped,
     })
+}
+
+pub async fn load_more_pulls(cfg: &Config, login: &str, open: bool, page: usize) -> Result<(Vec<Pull>, usize), String> {
+    Gh::new(cfg).pulls_page(login, open, page).await
+}
+
+pub async fn load_more_issues(cfg: &Config, login: &str, orgs: &[String], page: usize) -> Result<(Vec<Issue>, usize), String> {
+    Gh::new(cfg).issues_page(login, orgs, page).await
 }
 
 /// One file of a pull request, as GitHub lists it.

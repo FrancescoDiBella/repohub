@@ -218,8 +218,12 @@ pub struct App {
     acct_token: TextEdit,
     acct_error: Option<String>,
     term_error: Option<String>,
-    /// The window is phone-sized: the pages use the layout in `mobile`.
     compact: bool,
+    pub open_pulls_page: usize,
+    pub closed_pulls_page: usize,
+    pub issues_page: usize,
+    pub loading_more_pulls: bool,
+    pub loading_more_issues: bool,
     /// When GitHub's data on screen was loaded, and when the last load started (Unix seconds).
     loaded_at: Option<i64>,
     last_load: Option<i64>,
@@ -709,6 +713,11 @@ impl App {
         self.last_load = None;
         self.load_clock = None;
         self.loaded_clock = None;
+        self.open_pulls_page = 1;
+        self.closed_pulls_page = 1;
+        self.issues_page = 1;
+        self.loading_more_pulls = false;
+        self.loading_more_issues = false;
         // `self.data` is now empty, so `go()` -> `save_place()` skips writing `"place"`.
         prefs::set("place", state::Place { page: "overview".into(), tab: None, repo: None }.to_json());
         self.go(Page::Overview);
@@ -928,6 +937,11 @@ impl App {
                 self.loaded_at = Some(net::now());
                 self.loaded_clock = Some(self.clock);
                 self.now = net::now();
+                self.open_pulls_page = 1;
+                self.closed_pulls_page = 1;
+                self.issues_page = 1;
+                self.loading_more_pulls = false;
+                self.loading_more_issues = false;
                 self.set_status(Status::Ready);
                 if let Page::Repo(full) = &self.page.clone() {
                     if let Some(i) = self.repo_index_of(full) {
@@ -1424,6 +1438,9 @@ impl App {
                 if let Some(r) = self.data.repos.iter_mut().find(|r| r.full_name.eq_ignore_ascii_case(&full_name)) {
                     r.issues += 1;
                 }
+                if let Some(t) = self.data.issues_total.as_mut() {
+                    *t += 1;
+                }
                 self.notify(format!("Opened issue #{} in {full_name}", c.number));
             }
             github::Done::Branch(name) => {
@@ -1445,6 +1462,9 @@ impl App {
                     state: if draft { PullState::Draft } else { PullState::Open },
                     checks: None, updated_at: self.now, comments: 0, url: c.url,
                 });
+                if let Some(t) = self.data.open_pulls_total.as_mut() {
+                    *t += 1;
+                }
                 self.notify(format!("Opened pull request #{}", c.number));
             }
             github::Done::Closed(n) => {
@@ -1452,15 +1472,115 @@ impl App {
                 if let Some(r) = self.data.repos.iter_mut().find(|r| r.full_name.eq_ignore_ascii_case(&full_name)) {
                     r.issues = r.issues.saturating_sub(1);
                 }
+                if let Some(t) = self.data.issues_total.as_mut() {
+                    *t = t.saturating_sub(1);
+                }
                 self.notify(format!("Closed issue #{n}"));
             }
             github::Done::Merged(n) => {
+                let mut changed = false;
                 for p in self.data.pulls.iter_mut().filter(|p| p.number == n && same_repo(&p.repo, &full_name)) {
+                    if matches!(p.state, PullState::Open | PullState::Draft) {
+                        changed = true;
+                    }
                     p.state = PullState::Merged;
+                }
+                if changed {
+                    if let Some(t) = self.data.open_pulls_total.as_mut() {
+                        *t = t.saturating_sub(1);
+                    }
+                    if let Some(t) = self.data.closed_pulls_total.as_mut() {
+                        *t += 1;
+                    }
                 }
                 self.notify(format!("Merged pull request #{n}"));
             }
         }
+    }
+
+    pub fn load_more_pulls(&mut self, open: bool) {
+        if self.loading_more_pulls || self.data.sample {
+            return;
+        }
+        let Some(h) = self.handle.clone() else { return };
+        let cfg = self.cfg.clone();
+        let login = self.data.profile.login.clone();
+        if login.is_empty() {
+            return;
+        }
+        let next_page = if open { self.open_pulls_page + 1 } else { self.closed_pulls_page + 1 };
+        self.loading_more_pulls = true;
+        let epoch = self.load_gen;
+        net::spawn(h, move || async move {
+            github::load_more_pulls(&cfg, &login, open, next_page).await
+        }, move |s: &mut App, r| {
+            if s.load_gen != epoch {
+                return;
+            }
+            s.loading_more_pulls = false;
+            match r {
+                Ok((items, total)) => {
+                    if open {
+                        s.open_pulls_page = next_page;
+                        s.data.open_pulls_total = Some(total);
+                    } else {
+                        s.closed_pulls_page = next_page;
+                        s.data.closed_pulls_total = Some(total);
+                    }
+                    for p in items {
+                        if !s.data.pulls.iter().any(|existing| existing.number == p.number && existing.repo.eq_ignore_ascii_case(&p.repo)) {
+                            s.data.pulls.push(p);
+                        }
+                    }
+                    s.sync_tray();
+                }
+                Err(e) => {
+                    s.notify_problem(format!("Could not load more pull requests: {e}"));
+                }
+            }
+        });
+    }
+
+    pub fn load_more_issues(&mut self) {
+        if self.loading_more_issues || self.data.sample {
+            return;
+        }
+        let Some(h) = self.handle.clone() else { return };
+        let cfg = self.cfg.clone();
+        let login = self.data.profile.login.clone();
+        if login.is_empty() {
+            return;
+        }
+        let mut orgs: Vec<String> = self.data.repos.iter().map(|r| r.owner.clone()).filter(|o| !o.eq_ignore_ascii_case(&login)).collect();
+        orgs.sort_by_key(|o| o.to_lowercase());
+        orgs.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+        let next_page = self.issues_page + 1;
+        self.loading_more_issues = true;
+        let epoch = self.load_gen;
+        net::spawn(h, move || async move {
+            github::load_more_issues(&cfg, &login, &orgs, next_page).await
+        }, move |s: &mut App, r| {
+            if s.load_gen != epoch {
+                return;
+            }
+            s.loading_more_issues = false;
+            match r {
+                Ok((items, total)) => {
+                    s.issues_page = next_page;
+                    s.data.issues_total = Some(total);
+                    for issue in items {
+                        if !s.data.issues.iter().any(|existing| existing.number == issue.number && existing.repo.eq_ignore_ascii_case(&issue.repo)) {
+                            s.data.issues.push(issue);
+                        }
+                    }
+                    s.data.issues.sort_by_key(|i| std::cmp::Reverse(i.created_at));
+                    s.sync_tray();
+                }
+                Err(e) => {
+                    s.notify_problem(format!("Could not load more issues: {e}"));
+                }
+            }
+        });
     }
 
     /// Stars or unstars repository `i`: on GitHub when a token is configured, locally otherwise.
@@ -2146,6 +2266,11 @@ fn init() -> App {
         acct_error: None,
         term_error: None,
         compact: starts_compact(),
+        open_pulls_page: 1,
+        closed_pulls_page: 1,
+        issues_page: 1,
+        loading_more_pulls: false,
+        loading_more_issues: false,
         #[cfg(not(target_arch = "wasm32"))]
         tray: None,
         tray_menu: Vec::new(),
@@ -4944,11 +5069,19 @@ mod fix58_tests {
                     { "name": "repo2", "full_name": "alice/repo2", "owner": { "login": "alice" }, "description": "", "language": "Rust", "stargazers_count": 5, "forks_count": 0, "open_issues_count": 0, "pushed_at": "2026-11-09T09:30:00Z", "private": false, "fork": false, "archived": false, "default_branch": "main", "topics": [], "html_url": "https://github.com/alice/repo2" }
                 ]);
                 (200, vec![("Content-Type", "application/json")], repos.to_string())
-            } else if path.contains("/search/issues") && path.contains("is%3Apr") {
+            } else if path.contains("/search/issues") && path.contains("is%3Aopen") && path.contains("is%3Apr") {
                 let pulls = serde_json::json!({
                     "total_count": 132,
                     "items": [
                         { "number": 1, "title": "Add feature", "repository_url": "https://api.github.com/repos/alice/repo1", "user": { "login": "alice" }, "state": "open", "draft": false, "updated_at": "2026-11-09T10:00:00Z", "comments": 2, "html_url": "https://github.com/alice/repo1/pull/1" }
+                    ]
+                });
+                (200, vec![("Content-Type", "application/json")], pulls.to_string())
+            } else if path.contains("/search/issues") && path.contains("is%3Aclosed") && path.contains("is%3Apr") {
+                let pulls = serde_json::json!({
+                    "total_count": 200,
+                    "items": [
+                        { "number": 50, "title": "Old PR", "repository_url": "https://api.github.com/repos/alice/repo1", "user": { "login": "alice" }, "state": "closed", "draft": false, "updated_at": "2026-11-08T10:00:00Z", "comments": 1, "html_url": "https://github.com/alice/repo1/pull/50" }
                     ]
                 });
                 (200, vec![("Content-Type", "application/json")], pulls.to_string())
@@ -4984,7 +5117,9 @@ mod fix58_tests {
         // 2. Load all: paged stars (beyond 100), sorted runs across repos, totals populated
         let data = pollster::block_on(crate::github::load_all(&cfg)).expect("load_all succeeds");
         assert!(data.repos[0].starred, "alice/repo1 was on page 2 of starred and must be starred=true");
-        assert_eq!(data.pulls_total, Some(132));
+        assert_eq!(data.open_pulls_total, Some(132));
+        assert_eq!(data.closed_pulls_total, Some(200));
+        assert_eq!(data.pulls_total(), Some(332));
         assert_eq!(data.issues_total, Some(75));
         assert_eq!(data.runs.len(), 2);
         // Runs sorted by updated_at descending: repo2 (09:30) before repo1 (08:30)
@@ -5007,11 +5142,191 @@ mod fix58_tests {
 
         let mut rt = rune::Runtime::new(app, crate::view, (1180.0, 2400.0), rune::Env::new(true, 1.0));
         rt.frame(0.0);
-        assert!(rt.elements().iter().any(|e| e.text.as_deref().is_some_and(|t| t.contains("Showing 1 of 132"))), "PR subtitle shows 'Showing 1 of 132'");
+        assert!(rt.elements().iter().any(|e| e.text.as_deref().is_some_and(|t| t.contains("Showing 1 of 132 open pull requests"))), "PR subtitle shows 'Showing 1 of 132 open pull requests'");
+        assert!(rt.elements().iter().any(|e| e.key.as_deref() == Some("pulls-load-more")), "Load more button exists on Pulls");
 
         rt.update(|s, _| s.page = crate::Page::Issues);
         rt.frame(0.0);
         assert!(rt.elements().iter().any(|e| e.text.as_deref().is_some_and(|t| t.contains("Showing 1 of 75"))), "Issues subtitle shows 'Showing 1 of 75'");
+        assert!(rt.elements().iter().any(|e| e.key.as_deref() == Some("issues-load-more")), "Load more button exists on Issues");
+    }
+
+    #[test]
+    fn prs_capped_no_zero_plus_regression() {
+        // When there are 0 open PRs, but closed_pulls_total has 200, prs_capped() must be false!
+        let data = Data {
+            pulls: vec![
+                model::Pull {
+                    number: 1,
+                    title: "Closed PR".into(),
+                    repo: "alice/repo1".into(),
+                    author: "alice".into(),
+                    state: model::PullState::Closed,
+                    checks: None,
+                    updated_at: 1000,
+                    comments: 0,
+                    url: String::new(),
+                }
+            ],
+            open_pulls_total: Some(0),
+            closed_pulls_total: Some(200),
+            ..Data::default()
+        };
+        assert!(!data.prs_capped(), "0 open PRs must NOT be capped even if closed_pulls_total is 200");
+    }
+
+    #[test]
+    fn branches_default_branch_guaranteed_when_past_ten_pages() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let server = MockServer::new(|_method, path| {
+            if path.contains("/branches") {
+                let branches: Vec<serde_json::Value> = (1..=100)
+                    .map(|i| serde_json::json!({ "name": format!("feature-{i:03}") }))
+                    .collect();
+                (200, vec![
+                    ("Content-Type", "application/json"),
+                    ("Link", r#"<https://api.github.com/repos/alice/huge/branches?per_page=100&page=2>; rel="next""#),
+                ], serde_json::to_string(&branches).unwrap())
+            } else {
+                (200, vec![("Content-Type", "application/json")], "[]".into())
+            }
+        });
+
+        let mut cfg = Config::from_json("{}").unwrap();
+        cfg.api = server.url();
+        cfg.token = Some("tok".into());
+
+        let gh = crate::github::Gh::new(&cfg);
+        let branches = pollster::block_on(gh.branches("alice/huge", "main")).expect("branches load");
+        assert_eq!(branches[0], "main", "default branch 'main' must be index 0 even if omitted from first 10 pages");
+    }
+
+    #[test]
+    fn issues_chunking_with_more_than_twenty_orgs() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let server = MockServer::new(|_method, path| {
+            if path.contains("/search/issues") {
+                if path.contains("user%3Aalice") {
+                    let res = serde_json::json!({
+                        "total_count": 10,
+                        "items": [
+                            { "number": 1, "title": "Chunk 1 issue", "repository_url": "https://api.github.com/repos/alice/repo1", "created_at": "2026-11-09T10:00:00Z", "comments": 0, "html_url": "https://github.com/alice/repo1/issues/1" }
+                        ]
+                    });
+                    (200, vec![("Content-Type", "application/json")], res.to_string())
+                } else {
+                    let res = serde_json::json!({
+                        "total_count": 5,
+                        "items": [
+                            { "number": 2, "title": "Chunk 2 issue", "repository_url": "https://api.github.com/repos/org25/repo2", "created_at": "2026-11-09T11:00:00Z", "comments": 0, "html_url": "https://github.com/org25/repo2/issues/2" }
+                        ]
+                    });
+                    (200, vec![("Content-Type", "application/json")], res.to_string())
+                }
+            } else {
+                (200, vec![("Content-Type", "application/json")], "[]".into())
+            }
+        });
+
+        let mut cfg = Config::from_json("{}").unwrap();
+        cfg.api = server.url();
+        cfg.token = Some("tok".into());
+
+        let gh = crate::github::Gh::new(&cfg);
+        let orgs: Vec<String> = (1..=25).map(|i| format!("org{i}")).collect();
+        let (issues, total) = pollster::block_on(gh.issues("alice", &orgs)).expect("issues load");
+        assert_eq!(total, 15, "sum of chunk totals: 10 + 5 = 15");
+        assert_eq!(issues.len(), 2, "both chunk issues merged");
+        assert_eq!(issues[0].title, "Chunk 2 issue", "sorted newest first");
+    }
+
+    #[test]
+    fn load_more_pulls_and_issues_pages() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let server = MockServer::new(|_method, path| {
+            if path.contains("/search/issues") && path.contains("is%3Apr") && path.contains("page=2") {
+                let pulls = serde_json::json!({
+                    "total_count": 2,
+                    "items": [
+                        { "number": 1, "title": "Dupe PR", "repository_url": "https://api.github.com/repos/alice/repo1", "user": { "login": "alice" }, "state": "open", "draft": false, "updated_at": "2026-11-09T10:00:00Z", "comments": 2, "html_url": "https://github.com/alice/repo1/pull/1" },
+                        { "number": 2, "title": "Page 2 PR", "repository_url": "https://api.github.com/repos/alice/repo1", "user": { "login": "alice" }, "state": "open", "draft": false, "updated_at": "2026-11-09T09:00:00Z", "comments": 0, "html_url": "https://github.com/alice/repo1/pull/2" }
+                    ]
+                });
+                (200, vec![("Content-Type", "application/json")], pulls.to_string())
+            } else if path.contains("/search/issues") && path.contains("is%3Aissue") && path.contains("page=2") {
+                let issues = serde_json::json!({
+                    "total_count": 2,
+                    "items": [
+                        { "number": 10, "title": "Page 2 Issue", "repository_url": "https://api.github.com/repos/alice/repo1", "created_at": "2026-11-09T12:00:00Z", "comments": 0, "html_url": "https://github.com/alice/repo1/issues/10" }
+                    ]
+                });
+                (200, vec![("Content-Type", "application/json")], issues.to_string())
+            } else {
+                (200, vec![("Content-Type", "application/json")], "[]".into())
+            }
+        });
+
+        let mut cfg = Config::from_json("{}").unwrap();
+        cfg.api = server.url();
+        cfg.token = Some("tok".into());
+
+        let gh = crate::github::Gh::new(&cfg);
+
+        // Load more pulls page 2 deduplicates against page 1
+        let (pulls, total) = pollster::block_on(gh.pulls_page("alice", true, 2)).expect("pulls_page succeeds");
+        assert_eq!(total, 2);
+        assert_eq!(pulls.len(), 2);
+
+        // Load more issues page 2
+        let (issues, total) = pollster::block_on(gh.issues_page("alice", &[], 2)).expect("issues_page succeeds");
+        assert_eq!(total, 2);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].title, "Page 2 Issue");
+    }
+
+    #[test]
+    fn public_orgs_and_repos_pagination_caps() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let server = MockServer::new(|_method, path| {
+            if path.contains("/users/alice/orgs") && !path.contains("page=2") {
+                let orgs: Vec<serde_json::Value> = (1..=100)
+                    .map(|i| serde_json::json!({ "login": format!("org{i:03}") }))
+                    .collect();
+                (200, vec![
+                    ("Content-Type", "application/json"),
+                    ("Link", r#"<https://api.github.com/users/alice/orgs?per_page=100&page=2>; rel="next""#),
+                ], serde_json::to_string(&orgs).unwrap())
+            } else if path.contains("/users/alice/orgs?per_page=100&page=2") {
+                let orgs = serde_json::json!([
+                    { "login": "org101" }
+                ]);
+                (200, vec![("Content-Type", "application/json")], orgs.to_string())
+            } else if path.contains("/users/alice/repos") {
+                (200, vec![("Content-Type", "application/json")], "[]".into())
+            } else if path.contains("/orgs/") && path.contains("/repos") {
+                let repos = serde_json::json!([
+                    { "name": "repo", "full_name": "org/repo", "owner": { "login": "org" }, "description": "", "language": "Rust", "stargazers_count": 0, "forks_count": 0, "open_issues_count": 0, "pushed_at": "2026-11-09T09:30:00Z", "private": false, "fork": false, "archived": false, "default_branch": "main", "topics": [], "html_url": "https://github.com/org/repo" }
+                ]);
+                (200, vec![("Content-Type", "application/json")], repos.to_string())
+            } else {
+                (200, vec![("Content-Type", "application/json")], "[]".into())
+            }
+        });
+
+        let mut cfg = Config::from_json("{}").unwrap();
+        cfg.api = server.url();
+        cfg.token = None; // unauthenticated: calls public orgs flow
+        cfg.max_repos = 500;
+
+        let gh = crate::github::Gh::new(&cfg);
+        let mut warnings = Vec::new();
+        let (repos, repos_capped) = pollster::block_on(gh.repos(&cfg, "alice", false, &mut warnings)).expect("repos load");
+        assert!(repos_capped, "101 orgs > 50 must set repos_capped = true");
+        assert_eq!(repos.len(), 50, "only first 50 orgs queried");
     }
 }
 

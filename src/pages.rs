@@ -48,7 +48,7 @@ pub fn overview(s: &App, k: &Kit) -> El {
             .on_press(move |s: &mut App| s.go(target.clone()))
     };
     let metrics = row().w_full().gap(12.0).flex_wrap()
-        .child(metric(&icons::REPO, d.repos.len().to_string(), "Repositories", k.c.info.icon, Page::Repos))
+        .child(metric(&icons::REPO, crate::model::capped_if(d.repos.len(), d.repos_capped), "Repositories", k.c.info.icon, Page::Repos))
         .child(metric(&icons::STAR, s.starred_count().to_string(), "Stars received", k.c.warning.icon, Page::Repos))
         .child(metric(&icons::PULL, crate::model::capped_if(open_prs, prs_capped), "Open pull requests", k.c.success.icon, Page::Pulls))
         .child(metric(&icons::ISSUE, crate::model::capped_if(issues, issues_capped), "Open issues", k.c.danger.icon, Page::Issues));
@@ -148,12 +148,19 @@ pub fn repos(s: &App, k: &Kit) -> El {
             .child(text(msg).font(k.ty.ui).color(k.c.text_muted)));
     }
     let sub = if s.data.repos_capped {
-        format!("{} of {}+ repositories", shown.len(), all.len())
+        format!("Showing {} of {}+ repositories", shown.len(), all.len())
     } else {
         format!("{} of {} repositories", shown.len(), all.len())
     };
+    let action = if !s.data.sample && s.data.repos_capped {
+        let me = &s.data.profile.login;
+        let url = format!("{}/{}?tab=repositories", s.cfg.web_root(), me);
+        Some(row().gap(8.0).center_y().child(open_button(k, "Open on GitHub", &url, "repos-gh")).child(new_repo_button(k)))
+    } else {
+        Some(new_repo_button(k))
+    };
     col().w_full().gap(16.0)
-        .child(heading(k, "Repositories", &sub, Some(new_repo_button(k))))
+        .child(heading(k, "Repositories", &sub, action))
         .child(owners)
         .child(row().w_full().gap(12.0).center_y().flex_wrap().child(search).child(seg).child(sort))
         .child(list)

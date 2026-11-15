@@ -95,24 +95,53 @@ pub const PR_LABELS: [&str; 4] = ["Open", "Drafts", "Merged", "Closed"];
 
 pub fn pulls(s: &App, k: &Kit) -> El {
     let rows: Vec<El> = s.data.pulls.iter().filter(|p| p.state == s.pr_filter).map(|p| crate::actions::pull_line(s, k, p, s.compact)).collect();
-    let action = if !s.data.sample && s.data.prs_capped() {
+    let is_open_group = matches!(s.pr_filter, PullState::Open | PullState::Draft);
+    let (group_loaded, group_total) = if is_open_group {
+        let count = s.data.pulls.iter().filter(|p| matches!(p.state, PullState::Open | PullState::Draft)).count();
+        (count, s.data.open_pulls_total)
+    } else {
+        let count = s.data.pulls.iter().filter(|p| matches!(p.state, PullState::Closed | PullState::Merged)).count();
+        (count, s.data.closed_pulls_total)
+    };
+    let can_load_more = !s.data.sample && group_total.is_some_and(|tot| group_loaded < tot && group_loaded < 1000);
+    let is_capped = can_load_more || (is_open_group && s.data.prs_capped());
+
+    let mut actions = row().gap(8.0).center_y();
+    if can_load_more {
+        let btn_label = if s.loading_more_pulls { "Loading…" } else { "Load more" };
+        actions = actions.child(
+            Button::new(btn_label)
+                .control_size(ControlSize::Small)
+                .disabled(s.loading_more_pulls)
+                .on_press(move |s: &mut App| s.load_more_pulls(is_open_group))
+                .build(k)
+                .key("pulls-load-more")
+        );
+    }
+    if !s.data.sample && is_capped {
         let me = &s.data.profile.login;
         let url = format!("{}/pulls?q=is%3Apr+involves%3A{me}", s.cfg.web_root());
-        Some(open_button(k, "Open on GitHub", &url, "pulls-gh"))
+        actions = actions.child(open_button(k, "Open on GitHub", &url, "pulls-gh"));
+    }
+    let action_el = if can_load_more || (!s.data.sample && is_capped) {
+        Some(actions)
     } else {
         None
     };
+
     let sub = if s.data.sample {
         "Pull requests you opened or that wait for your review.".to_owned()
-    } else if let Some(total) = s.data.pulls_total.filter(|&t| t > s.data.pulls.len()) {
-        format!("Showing {} of {} pull requests you're involved in. Click one to open it on GitHub.", s.data.pulls.len(), total)
+    } else if let Some(tot) = group_total.filter(|&t| t > group_loaded) {
+        format!("Showing {} of {} {} pull requests you're involved in. Click one to open it on GitHub.", group_loaded, tot, if is_open_group { "open" } else { "closed/merged" })
+    } else if let Some(tot) = group_total {
+        format!("Showing all {} {} pull requests you're involved in. Click one to open it on GitHub.", tot, if is_open_group { "open" } else { "closed/merged" })
     } else if s.data.pulls.len() >= crate::model::SEARCH_CAP {
         format!("The {} most recently updated pull requests you're involved in (author, reviewer, assignee or mentioned). Click one to open it on GitHub.", s.data.pulls.len())
     } else {
         "Pull requests you're involved in (author, reviewer, assignee or mentioned). Click one to open it on GitHub.".to_owned()
     };
     col().w_full().gap(16.0)
-        .child(heading(k, "Pull requests", &sub, action))
+        .child(heading(k, "Pull requests", &sub, action_el))
         .children(crate::changes_page::pull_panel(s, k))
         .child(SegmentedControl::new(&PR_LABELS, PR_STATES.iter().position(|p| *p == s.pr_filter)).label("State").fit()
             .on_pick(|s: &mut App, i, _| s.pr_filter = PR_STATES[i.min(3)]).build(k).key("pr-filter"))
@@ -120,22 +149,44 @@ pub fn pulls(s: &App, k: &Kit) -> El {
 }
 
 pub fn issues(s: &App, k: &Kit) -> El {
-    let action = if !s.data.sample && s.data.issues_capped() {
+    let loaded = s.data.issues.len();
+    let can_load_more = !s.data.sample && s.data.issues_total.is_some_and(|tot| loaded < tot && loaded < 1000);
+    let is_capped = can_load_more || s.data.issues_capped();
+
+    let mut actions = row().gap(8.0).center_y();
+    if can_load_more {
+        let btn_label = if s.loading_more_issues { "Loading…" } else { "Load more" };
+        actions = actions.child(
+            Button::new(btn_label)
+                .control_size(ControlSize::Small)
+                .disabled(s.loading_more_issues)
+                .on_press(|s: &mut App| s.load_more_issues())
+                .build(k)
+                .key("issues-load-more")
+        );
+    }
+    if !s.data.sample && is_capped {
         let me = &s.data.profile.login;
         let url = format!("{}/issues?q=is%3Aissue+is%3Aopen+archived%3Afalse+user%3A{me}", s.cfg.web_root());
-        Some(open_button(k, "Open on GitHub", &url, "issues-gh"))
+        actions = actions.child(open_button(k, "Open on GitHub", &url, "issues-gh"));
+    }
+    let action_el = if can_load_more || (!s.data.sample && is_capped) {
+        Some(actions)
     } else {
         None
     };
-    let sub = if let Some(total) = s.data.issues_total.filter(|&t| t > s.data.issues.len()) {
-        format!("Showing {} of {} open issues in your repositories. Click one to open it on GitHub.", s.data.issues.len(), total)
-    } else if s.data.issues.len() >= crate::model::SEARCH_CAP {
-        format!("The {} most recently updated open issues in your repositories. Click one to open it on GitHub.", s.data.issues.len())
+
+    let sub = if let Some(total) = s.data.issues_total.filter(|&t| t > loaded) {
+        format!("Showing {} of {} open issues in your repositories. Click one to open it on GitHub.", loaded, total)
+    } else if let Some(total) = s.data.issues_total {
+        format!("Showing all {} open issues in your repositories. Click one to open it on GitHub.", total)
+    } else if loaded >= crate::model::SEARCH_CAP {
+        format!("The {} most recently updated open issues in your repositories. Click one to open it on GitHub.", loaded)
     } else {
         "Open issues in your repositories. Click one to open it on GitHub.".to_owned()
     };
     col().w_full().gap(16.0)
-        .child(heading(k, "Issues", &sub, action))
+        .child(heading(k, "Issues", &sub, action_el))
         .child(listing(k, s.data.issues.iter().map(|i| crate::actions::issue_line(s, k, i)).collect(), "No open issues"))
 }
 

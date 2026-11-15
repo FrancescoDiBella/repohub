@@ -100,7 +100,8 @@ pub fn menu(s: &App) -> Vec<Entry> {
     } else if d.issues.is_empty() && !issues_capped {
         "No open issues".into()
     } else {
-        plural_capped(d.issues.len().min(SEARCH_CAP), issues_capped, "open issue", "open issues")
+        let count = if d.issues_total.is_some() { d.issues.len() } else { d.issues.len().min(SEARCH_CAP) };
+        plural_capped(count, issues_capped, "open issue", "open issues")
     };
     let runs_label = if failed > 0 {
         plural(failed, "failed run", "failed runs")
