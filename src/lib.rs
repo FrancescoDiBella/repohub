@@ -248,6 +248,8 @@ pub struct App {
     update_checked: Option<f64>,
     /// The command palette, while it's open (⌘K / Ctrl+K).
     palette: Option<palette::Palette>,
+    /// Seconds to back off until the next automatic refresh if rate limited.
+    retry_after: Option<u64>,
     /// The status-bar widget, and the menu it shows now.
     #[cfg(not(target_arch = "wasm32"))]
     tray: Option<tray::Native>,
@@ -446,8 +448,12 @@ impl App {
     /// interval counts from when the last load started, so a failed load waits a whole one.
     fn refresh_in(&self) -> Option<i64> {
         let every = self.cfg.refresh_every()? as i64 * 60;
+        let interval = match self.retry_after.or(self.data.retry_after) {
+            Some(ra) => every.max(ra as i64),
+            None => every,
+        };
         let since = self.since(self.last_load.or(self.loaded_at), self.load_clock.or(self.loaded_clock))?;
-        Some(every - since)
+        Some(interval - since)
     }
 
     /// Every 30 seconds: move the labels' clock, and refresh when it's due. A load already
@@ -884,6 +890,7 @@ impl App {
         }
         self.go(Page::Repo(full));
         self.set_tab(i, RepoTab::Code);
+        self.load_branches(i, true);
         self.load_detail(i);
     }
 
@@ -892,6 +899,7 @@ impl App {
         if !self.cfg.live() || !self.status.can_load() {
             return;
         }
+        self.retry_after = None;
         self.last_load = Some(net::now());
         self.load_clock = Some(self.clock);
         self.set_status(Status::Loading);
@@ -902,19 +910,24 @@ impl App {
         }
     }
 
-    fn apply(&mut self, epoch: u64, result: Result<Data, String>) {
+    fn apply(&mut self, epoch: u64, result: Result<Data, github::LoadError>) {
         if epoch != self.load_gen {
             return;
         }
         match result {
             Ok(d) => {
+                self.retry_after = d.retry_after;
                 // Details of repositories nobody pushed to since stay: no new requests for them.
                 let same = |full: &str| {
                     let pushed = |data: &Data| data.repos.iter().find(|r| r.full_name == full).map(|r| r.pushed);
                     pushed(&self.data).is_some_and(|p| Some(p) == pushed(&d))
                 };
                 let kept: HashMap<_, _> = std::mem::take(&mut self.details).into_iter()
-                    .filter(|((full, _), v)| matches!(v, Load::Ready(_)) && same(full)).collect();
+                    .filter(|((full, _), v)| match v {
+                        Load::Ready(detail) => detail.error.is_none() && detail.readme_error.is_none() && same(full),
+                        _ => false,
+                    }).collect();
+                self.branches.clear();
                 self.data = d;
                 self.details = kept;
                 self.loaded_at = Some(net::now());
@@ -948,7 +961,12 @@ impl App {
                 }
                 self.restore_place();
             }
-            Err(e) => self.set_status(Status::Failed(e)),
+            Err(e) => {
+                if let Some(ra) = e.retry_after {
+                    self.retry_after = Some(ra);
+                }
+                self.set_status(Status::Failed(e.message));
+            }
         }
     }
 
@@ -959,7 +977,17 @@ impl App {
 
     fn apply_detail(&mut self, epoch: u64, key: (String, String), d: Detail) {
         if epoch == self.load_gen {
-            self.details.insert(key, Load::Ready(d));
+            let load = if let Some(e) = &d.error
+                && d.files.is_empty()
+                && d.readme.is_none()
+                && d.languages.is_empty()
+                && d.commit.is_none()
+            {
+                Load::Failed(e.clone())
+            } else {
+                Load::Ready(d)
+            };
+            self.details.insert(key, load);
         }
     }
 
@@ -974,10 +1002,14 @@ impl App {
             self.details.insert(key, Load::Ready(d));
             return;
         }
-        self.load_branches(i);
+        self.load_branches(i, false);
         self.load_local(i, false);
-        if self.details.contains_key(&key) {
-            return;
+        if let Some(load) = self.details.get(&key) {
+            match load {
+                Load::Loading => return,
+                Load::Ready(d) if d.error.is_none() && d.readme_error.is_none() => return,
+                _ => {}
+            }
         }
         self.details.insert(key.clone(), Load::Loading);
         if let Some(h) = self.handle.clone() {
@@ -1204,14 +1236,35 @@ impl App {
         {
             f.from = other.clone();
         }
+        if let Ok(names) = &r
+            && let Some(picked) = self.branch_of.get(&key)
+            && !names.contains(picked)
+        {
+            self.branch_of.remove(&key);
+            if let Page::Repo(full) = &self.page
+                && full.eq_ignore_ascii_case(&key)
+                && let Some(i) = self.repo_index_of(&key)
+            {
+                self.load_detail(i);
+                if self.tab == RepoTab::Notes {
+                    self.load_notes(i);
+                }
+            }
+        }
         self.branches.insert(key, r.into());
     }
 
-    /// Loads repository `i`'s branch list, once. The sample data has its default branch only.
-    fn load_branches(&mut self, i: usize) {
+    /// Loads repository `i`'s branch list. The sample data has its default branch only.
+    fn load_branches(&mut self, i: usize, force: bool) {
         let Some(r) = self.data.repos.get(i) else { return };
         let full = r.full_name.clone();
-        if self.branches.contains_key(&full) {
+        if !force {
+            if let Some(entry) = self.branches.get(&full)
+                && !matches!(entry, Load::Failed(_))
+            {
+                return;
+            }
+        } else if matches!(self.branches.get(&full), Some(Load::Loading)) {
             return;
         }
         if self.data.sample || !self.cfg.live() {
@@ -1220,8 +1273,10 @@ impl App {
             self.branches.insert(full, Load::Ready(names));
             return;
         }
+        if !matches!(self.branches.get(&full), Some(Load::Ready(_))) {
+            self.branches.insert(full.clone(), Load::Loading);
+        }
         let Some(h) = self.handle.clone() else { return };
-        self.branches.insert(full.clone(), Load::Loading);
         let (cfg, default, key) = (self.cfg.clone(), r.branch.clone(), full.clone());
         let epoch = self.load_gen;
         net::spawn(h, move || async move { github::branches(&cfg, &full, &default).await }, move |s: &mut App, r: Result<Vec<String>, String>| {
@@ -1280,7 +1335,7 @@ impl App {
         if self.tab != kind.tab() {
             self.set_tab(i, kind.tab());
         }
-        self.load_branches(i);
+        self.load_branches(i, false);
         // `set_tab` tidies up the section it leaves; the form opened for the new one stays.
         if let Some(f) = self.form.as_mut() {
             f.title.focused = true;
@@ -1475,17 +1530,9 @@ impl App {
             return;
         }
         let Some((full, branch)) = self.notes_branch(i) else { return };
-        let default = self.data.repos[i].branch.clone();
         let Some(h) = self.handle.clone() else { return };
         let epoch = self.load_gen;
-        if !self.branches.contains_key(&full) {
-            self.branches.insert(full.clone(), Load::Loading);
-            let (cfg, f) = (self.cfg.clone(), full.clone());
-            let key = full.clone();
-            net::spawn(h.clone(), move || async move { github::branches(&cfg, &f, &default).await }, move |s: &mut App, r| {
-                s.apply_branches(epoch, key, r);
-            });
-        }
+        self.load_branches(i, false);
         let k = (full.clone(), branch.clone());
         self.notes.entry(k.clone()).or_default().state = Refresh::Loading;
         net::spawn(h, move || async move { notes::list(&full, &branch).await }, move |s: &mut App, r| {
@@ -2108,6 +2155,7 @@ fn init() -> App {
         tray: None,
         tray_menu: Vec::new(),
         palette: None,
+        retry_after: None,
         update: update::Update::initial(),
         #[cfg(not(target_arch = "wasm32"))]
         update_cancel: None,
@@ -2404,14 +2452,22 @@ fn banner(s: &App, k: &Kit) -> Option<El> {
     let (msg, tint, action) = match &s.status {
         Status::Starting | Status::Loading => ("Loading data from GitHub…".to_owned(), k.c.info.icon, false),
         Status::Failed(e) => (e.clone(), k.c.danger.icon, true),
+        Status::Ready if !s.data.warnings.is_empty() => (s.data.warnings.join(" · "), k.c.warning.icon, true),
         Status::Sample if !s.cfg.demo && cfg!(not(target_arch = "wasm32")) => ("This is sample data. Connect your GitHub account to see your repositories.".to_owned(), k.c.warning.icon, false),
         Status::Sample if !s.cfg.demo => ("Sample data. To see your repositories, create a .env file with GITHUB_USER or GITHUB_TOKEN (see .env.example) and run RepoHub with Docker or as the desktop app.".to_owned(), k.c.warning.icon, false),
         _ => return None,
     };
     let connect = s.status == Status::Sample && cfg!(not(target_arch = "wasm32")) && s.page != Page::Settings;
+    let icon = if s.status == Status::Ready && !s.data.warnings.is_empty() {
+        &icons::BELL
+    } else if action {
+        &icons::CROSS
+    } else {
+        &icons::BELL
+    };
     let mut r = row().w_full().px(14.0).py(10.0).gap(10.0).center_y().radius(k.radius.lg)
         .fill(tint.alpha(0.12)).border(1.0, tint.alpha(0.45))
-        .child(ui::ico(if action { &icons::CROSS } else { &icons::BELL }, 15.0, tint))
+        .child(ui::ico(icon, 15.0, tint))
         .child(text(msg).font(k.ty.small).color(k.c.text_base).wrap().grow(1.0).shrink());
     if action {
         r = r.child(rune_kit::Button::new("Retry").control_size(ControlSize::Small).on_press(|s: &mut App| s.refresh()).build(k).key("retry"));
@@ -4388,3 +4444,405 @@ mod fix83_tests {
         assert!(s.toast.as_ref().is_some_and(|t| t.text.contains("Writes are disabled on this server")));
     }
 }
+
+#[cfg(test)]
+mod fix58_tests {
+    use super::*;
+    use crate::net::Resp;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct MockServer {
+        port: u16,
+        running: Arc<AtomicBool>,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl MockServer {
+        fn new(handler: impl Fn(&str, &str) -> (u16, Vec<(&'static str, &'static str)>, String) + Send + Sync + 'static) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let running = Arc::new(AtomicBool::new(true));
+            let r = running.clone();
+            let handler = Arc::new(handler);
+            listener.set_nonblocking(true).unwrap();
+
+            let handle = std::thread::spawn(move || {
+                while r.load(Ordering::Relaxed) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            let mut buf = [0u8; 4096];
+                            let mut n = 0;
+                            while n < buf.len() {
+                                match stream.read(&mut buf[n..]) {
+                                    Ok(0) => break,
+                                    Ok(bytes) => {
+                                        n += bytes;
+                                        if buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+                                            break;
+                                        }
+                                    }
+                                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                        std::thread::sleep(std::time::Duration::from_millis(5));
+                                    }
+                                    Err(_) => break,
+                                }
+                            }
+                            let req_str = String::from_utf8_lossy(&buf[..n]);
+                            let mut lines = req_str.lines();
+                            let req_line = lines.next().unwrap_or("");
+                            let mut parts = req_line.split_whitespace();
+                            let method = parts.next().unwrap_or("GET");
+                            let path = parts.next().unwrap_or("/");
+
+                            let (status, headers, body) = handler(method, path);
+                            let reason = match status {
+                                200 => "OK",
+                                403 => "Forbidden",
+                                404 => "Not Found",
+                                429 => "Too Many Requests",
+                                500 => "Internal Server Error",
+                                _ => "Status",
+                            };
+                            let mut resp = format!("HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n", body.len());
+                            for (k, v) in headers {
+                                resp.push_str(&format!("{k}: {v}\r\n"));
+                            }
+                            resp.push_str("\r\n");
+                            resp.push_str(&body);
+                            let _ = stream.write_all(resp.as_bytes());
+                            let _ = stream.flush();
+                        }
+                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+
+            MockServer { port, running, handle: Some(handle) }
+        }
+
+        fn url(&self) -> String {
+            format!("http://127.0.0.1:{}", self.port)
+        }
+    }
+
+    impl Drop for MockServer {
+        fn drop(&mut self) {
+            self.running.store(false, Ordering::Relaxed);
+            if let Some(h) = self.handle.take() {
+                let _ = h.join();
+            }
+        }
+    }
+
+    #[test]
+    fn detail_with_error_not_kept_after_refresh_and_readme_404_vs_500() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // 1. Mock HTTP: verify README 404 vs 500 and contents failure
+        let server = MockServer::new(|_method, path| {
+            if path.contains("/contents") {
+                (500, vec![("Content-Type", "application/json")], r#"{"message":"Server error loading files"}"#.into())
+            } else if path.contains("/readme") {
+                if path.contains("404-repo") {
+                    (404, vec![("Content-Type", "application/json")], r#"{"message":"Not Found"}"#.into())
+                } else {
+                    (500, vec![("Content-Type", "application/json")], r#"{"message":"Internal Server Error"}"#.into())
+                }
+            } else {
+                (200, vec![("Content-Type", "application/json")], "[]".into())
+            }
+        });
+
+        let mut cfg = Config::from_json("{}").unwrap();
+        cfg.api = server.url();
+        cfg.token = Some("mock_tok".into());
+        let gh = crate::github::Gh::new(&cfg);
+
+        // README 404 returns Ok(None) -> detail has readme: None and readme_error: None
+        let d_404 = pollster::block_on(gh.detail("user/404-repo", "main"));
+        assert!(d_404.readme.is_none());
+        assert!(d_404.readme_error.is_none());
+
+        // README 500 returns Err -> detail has readme_error: Some(...)
+        let d_500 = pollster::block_on(gh.detail("user/500-repo", "main"));
+        assert!(d_500.readme.is_none());
+        assert!(d_500.readme_error.is_some());
+
+        // Contents 500 returns Err -> detail has error: Some(...)
+        assert!(d_404.error.is_some());
+        assert!(d_500.error.is_some());
+
+        // 2. apply_detail: contents failed and nothing else loaded -> stores Load::Failed
+        let mut app = crate::init();
+        let key_failed = ("user/failed-repo".into(), "main".into());
+        let d_all_failed = Detail {
+            error: Some("Failed to load contents".into()),
+            ..Detail::default()
+        };
+        app.apply_detail(app.load_gen, key_failed.clone(), d_all_failed);
+        assert!(matches!(app.details.get(&key_failed), Some(Load::Failed(_))));
+
+        // When partial data is loaded, stores Load::Ready with error visible
+        let key_partial = ("user/partial-repo".into(), "main".into());
+        let d_partial = Detail {
+            error: Some("Partial error".into()),
+            files: vec![("file.txt".into(), false)],
+            ..Detail::default()
+        };
+        app.apply_detail(app.load_gen, key_partial.clone(), d_partial);
+        assert!(matches!(app.details.get(&key_partial), Some(Load::Ready(_))));
+
+        // 3. Cache persistence across refresh:
+        // - Error-free detail for an unpushed repo IS kept
+        // - Detail with an error (d.error or d.readme_error) is NOT kept
+        // - Load::Failed is NOT kept
+        let mut s = crate::init();
+        let mut s_cfg = (*s.cfg).clone();
+        s_cfg.token = Some("tok".into());
+        s.cfg = std::sync::Arc::new(s_cfg);
+        s.data = model::Data::sample_at(1_700_000_000);
+        s.data.sample = false;
+        let unpushed = s.data.repos[0].full_name.clone();
+        let errored = s.data.repos[1].full_name.clone();
+        let readme_errored = s.data.repos[2].full_name.clone();
+
+        s.details.insert((unpushed.clone(), "main".into()), Load::Ready(Detail::default()));
+        s.details.insert((errored.clone(), "main".into()), Load::Ready(Detail {
+            error: Some("Failed".into()),
+            ..Detail::default()
+        }));
+        s.details.insert((readme_errored.clone(), "main".into()), Load::Ready(Detail {
+            readme_error: Some("Failed README".into()),
+            ..Detail::default()
+        }));
+        s.details.insert(("user/load-failed".into(), "main".into()), Load::Failed("network error".into()));
+
+        let mut next = model::Data::sample_at(1_700_000_000);
+        next.sample = false;
+        let epoch = s.load_gen;
+        s.apply(epoch, Ok(next));
+
+        assert!(s.details.contains_key(&(unpushed, "main".into())), "clean detail on unpushed repo is kept");
+        assert!(!s.details.contains_key(&(errored, "main".into())), "detail with error is not kept");
+        assert!(!s.details.contains_key(&(readme_errored, "main".into())), "detail with readme_error is not kept");
+        assert!(!s.details.contains_key(&("user/load-failed".into(), "main".into())), "Load::Failed is not kept");
+
+        // 4. load_detail retries Load::Failed and errored entries, skipping only Loading and clean Ready
+        s.details.insert(("user/clean".into(), "main".into()), Load::Ready(Detail::default()));
+        s.details.insert(("user/err".into(), "main".into()), Load::Ready(Detail { error: Some("err".into()), ..Detail::default() }));
+        s.details.insert(("user/readme-err".into(), "main".into()), Load::Ready(Detail { readme_error: Some("err".into()), ..Detail::default() }));
+        s.details.insert(("user/failed".into(), "main".into()), Load::Failed("err".into()));
+        s.details.insert(("user/loading".into(), "main".into()), Load::Loading);
+
+        // repo index 0 in s.data has full_name matching repo 0
+        let r0 = s.data.repos[0].full_name.clone();
+        let key0 = (r0.clone(), s.branch(0));
+
+        // When clean: load_detail skips without resetting to Loading
+        s.details.insert(key0.clone(), Load::Ready(Detail::default()));
+        s.load_detail(0);
+        assert!(matches!(s.details.get(&key0), Some(Load::Ready(_))));
+
+        // When errored: load_detail retries, moving entry to Loading
+        s.details.insert(key0.clone(), Load::Ready(Detail { error: Some("failed".into()), ..Detail::default() }));
+        s.load_detail(0);
+        assert!(matches!(s.details.get(&key0), Some(Load::Loading)));
+
+        // When Load::Failed: load_detail retries, moving entry to Loading
+        s.details.insert(key0.clone(), Load::Failed("failed".into()));
+        s.load_detail(0);
+        assert!(matches!(s.details.get(&key0), Some(Load::Loading)));
+    }
+
+    #[test]
+    fn secondary_rate_limit_and_retry_after() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let mut cfg = Config::from_json("{}").unwrap();
+        cfg.api = "http://127.0.0.1:9".into();
+        let gh = crate::github::Gh::new(&cfg);
+
+        // 1. 403 with "You have exceeded a secondary rate limit" and remaining 4999
+        let resp_403 = Resp {
+            status: 403,
+            body: r#"{"message": "You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}"#.into(),
+            remaining: Some("4999".into()),
+            reset: None,
+            retry_after: None,
+        };
+        let msg_403 = gh.explain(&resp_403);
+        assert!(msg_403.contains("rate limit"), "must explain rate limit: {msg_403}");
+        assert!(!msg_403.contains("write access"), "must NOT claim write access: {msg_403}");
+
+        // 2. 429 with retry-after: 40
+        let resp_429 = Resp {
+            status: 429,
+            body: r#"{"message": "rate limited"}"#.into(),
+            remaining: None,
+            reset: None,
+            retry_after: Some(40),
+        };
+        let msg_429 = gh.explain(&resp_429);
+        assert!(msg_429.contains("40 s") || msg_429.contains("40"), "must mention retry duration: {msg_429}");
+        assert!(!msg_429.contains("write access"), "must NOT claim write access: {msg_429}");
+        assert_eq!(gh.retry_after(), Some(40), "Gh must record the 40s backoff");
+
+        // 3. Regular 403 write permission failure still says write access
+        let resp_generic_403 = Resp {
+            status: 403,
+            body: r#"{"message": "Resource not accessible by integration"}"#.into(),
+            remaining: Some("4999".into()),
+            reset: None,
+            retry_after: None,
+        };
+        let msg_generic_403 = gh.explain(&resp_generic_403);
+        assert!(msg_generic_403.contains("The token needs write access"), "generic 403 must explain write access: {msg_generic_403}");
+
+        // 4. Mock HTTP server returning 429 with retry-after: 40
+        let server = MockServer::new(|_method, _path| {
+            (429, vec![("Content-Type", "application/json"), ("retry-after", "40")], r#"{"message":"rate limited"}"#.into())
+        });
+        cfg.api = server.url();
+        cfg.token = Some("tok".into());
+        let gh_live = crate::github::Gh::new(&cfg);
+        let err = pollster::block_on(gh_live.profile(&cfg)).unwrap_err();
+        assert!(err.contains("40 s") || err.contains("40"));
+        assert_eq!(gh_live.retry_after(), Some(40));
+
+        // 5. App::refresh_in honours retry_after
+        let mut app = crate::init();
+        let mut app_cfg = (*app.cfg).clone();
+        app_cfg.token = Some("tok".into());
+        app_cfg.refresh_minutes = 5; // 5 minutes = 300 seconds
+        app.cfg = std::sync::Arc::new(app_cfg);
+        app.status = Status::Ready;
+        app.now = 1_700_000_100;
+        app.last_load = Some(1_700_000_000); // 100 seconds elapsed
+        app.load_clock = Some(0.0);
+        app.clock = 100.0;
+
+        // Normal refresh: 300 - 100 = 200s left
+        assert_eq!(app.refresh_in(), Some(200));
+
+        // Rate limit backoff: retry_after of 500s > 300s -> 500 - 100 = 400s left
+        app.retry_after = Some(500);
+        assert_eq!(app.refresh_in(), Some(400));
+
+        // When refresh is initiated, retry_after is cleared
+        app.refresh();
+        assert_eq!(app.retry_after, None);
+    }
+
+    #[test]
+    fn partial_failure_warnings_banner_and_tray_menu() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let server = MockServer::new(|_method, path| {
+            if path.contains("/search/issues") {
+                (403, vec![("Content-Type", "application/json")], r#"{"message":"You have exceeded a secondary rate limit"}"#.into())
+            } else if path.contains("/actions/runs") {
+                (500, vec![("Content-Type", "application/json")], r#"{"message":"Internal Server Error"}"#.into())
+            } else if path.contains("/stats/participation") {
+                (202, vec![("Content-Type", "application/json")], "null".into())
+            } else if path.contains("/user/starred") {
+                (403, vec![("Content-Type", "application/json")], r#"{"message":"rate limit"}"#.into())
+            } else if path.contains("/user/repos") {
+                (200, vec![("Content-Type", "application/json")], r#"[{"name":"repo1","full_name":"alice/repo1","owner":{"login":"alice"},"description":"","language":"Rust","stargazers_count":10,"forks_count":1,"open_issues_count":2,"pushed_at":"2026-11-09T09:35:11Z","private":false,"fork":false,"archived":false,"default_branch":"main","topics":[],"html_url":"https://github.com/alice/repo1"}]"#.into())
+            } else if path.contains("/user") {
+                (200, vec![("Content-Type", "application/json")], r#"{"login":"alice","name":"Alice"}"#.into())
+            } else {
+                (200, vec![("Content-Type", "application/json")], "[]".into())
+            }
+        });
+
+        let mut cfg = Config::from_json("{}").unwrap();
+        cfg.api = server.url();
+        cfg.token = Some("tok_alice".into());
+        cfg.activity_repos = 1;
+
+        let res = pollster::block_on(crate::github::load_all(&cfg));
+        let data = res.expect("load_all succeeds partially despite search and runs failure");
+
+        // Verify partial failure tracking in Data
+        assert!(data.pulls_failed, "pulls_failed must be true");
+        assert!(data.issues_failed, "issues_failed must be true");
+        assert!(data.runs_failed, "runs_failed must be true");
+        assert!(!data.warnings.is_empty(), "warnings must be populated");
+        assert!(data.warnings.iter().any(|w| w.contains("Pull requests couldn't load")));
+        assert!(data.warnings.iter().any(|w| w.contains("Issues couldn't load")));
+        assert!(data.warnings.iter().any(|w| w.contains("Workflow runs couldn't load")));
+        assert!(data.warnings.iter().any(|w| w.contains("Starred repositories couldn't load")));
+
+        // Verify tray menu with failure flags and empty lists
+        let mut app = crate::init();
+        app.data = data.clone();
+        let menu = crate::tray::menu(&app);
+
+        let pulls_item = menu.iter().find(|e| e.id == "go:pulls").expect("go:pulls found");
+        assert_eq!(pulls_item.label, "Pull requests couldn't load");
+
+        let issues_item = menu.iter().find(|e| e.id == "go:issues").expect("go:issues found");
+        assert_eq!(issues_item.label, "Issues couldn't load");
+
+        let runs_item = menu.iter().find(|e| e.id == "go:actions").expect("go:actions found");
+        assert_eq!(runs_item.label, "Workflow runs couldn't load", "must NOT claim 'Recent runs passed'");
+
+        // Verify banner rendering when Ready with warnings
+        app.status = Status::Ready;
+        let kit = themes::kit(themes::Looks::default().active(false));
+        let banner_el = banner(&app, &kit);
+        assert!(banner_el.is_some(), "banner must be visible when Ready with warnings");
+    }
+
+    #[test]
+    fn branches_cleared_on_refresh_retried_and_deleted_fallback() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let mut s = crate::init();
+        let mut s_cfg = (*s.cfg).clone();
+        s_cfg.token = Some("tok".into());
+        s.cfg = std::sync::Arc::new(s_cfg);
+        s.now = 1_700_000_000;
+        s.data = model::Data::sample_at(s.now);
+        s.data.sample = false;
+        let repo_full = s.data.repos[0].full_name.clone();
+
+        // 1. Branches are cleared on refresh
+        s.branches.insert(repo_full.clone(), Load::Ready(vec!["main".into(), "feature".into()]));
+        assert!(!s.branches.is_empty());
+        let epoch = s.load_gen;
+        s.apply(epoch, Ok(s.data.clone()));
+        assert!(s.branches.is_empty(), "branches must be cleared on apply(refresh)");
+
+        // 2. Retrying Load::Failed in load_branches
+        s.branches.insert(repo_full.clone(), Load::Failed("network timeout".into()));
+        // calling load_branches(0, false) must NOT return early on Load::Failed
+        s.load_branches(0, false);
+        // Without handle, in live mode, branches is set to Loading
+        assert!(matches!(s.branches.get(&repo_full), Some(Load::Loading)), "Load::Failed must be retried");
+
+        // 3. App::open calls load_branches with force=true
+        s.branches.insert(repo_full.clone(), Load::Ready(vec!["main".into()]));
+        s.open(0);
+        // Calling open(0) forces refresh of branches
+        assert!(s.page == Page::Repo(repo_full.clone()));
+
+        // 4. Deleted branch fallback: if branch_of points to a branch no longer in names
+        s.page = Page::Repo(repo_full.clone());
+        s.branch_of.insert(repo_full.clone(), "deleted-branch".into());
+        assert_eq!(s.branch(0), "deleted-branch");
+
+        s.apply_branches(s.load_gen, repo_full.clone(), Ok(vec!["main".into(), "feature-alive".into()]));
+
+        // branch_of removed for that repo, falling back to default branch ("main")
+        assert!(!s.branch_of.contains_key(&repo_full), "deleted branch must be removed from branch_of");
+        assert_eq!(s.branch(0), "main", "must fall back to default branch");
+    }
+}
+

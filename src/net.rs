@@ -17,6 +17,7 @@ pub struct Resp {
     pub body: String,
     pub remaining: Option<String>,
     pub reset: Option<i64>,
+    pub retry_after: Option<u64>,
 }
 
 /// Runs `work` in the background and hands its result to `done` on the UI thread.
@@ -103,8 +104,9 @@ impl Transport {
         let status = resp.status();
         let remaining = resp.header("x-ratelimit-remaining").map(str::to_owned);
         let reset = resp.header("x-ratelimit-reset").and_then(|v| v.parse().ok());
+        let retry_after = resp.header("retry-after").and_then(|v| v.trim().parse().ok());
         let body = resp.into_string().map_err(|e| e.to_string())?;
-        Ok(Resp { status, body, remaining, reset })
+        Ok(Resp { status, body, remaining, reset, retry_after })
     }
 }
 

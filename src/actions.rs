@@ -72,7 +72,7 @@ pub fn branch_button(s: &App, k: &Kit, i: usize, slot: BranchSlot, branch: &str,
         .on_press(move |s: &mut App| {
             s.picker = if s.picker == Some(slot) { None } else { Some(slot) };
             s.branch_filter.clear();
-            s.load_branches(i);
+            s.load_branches(i, false);
         })
         .build(k).key(key.to_owned())
 }

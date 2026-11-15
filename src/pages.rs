@@ -374,9 +374,11 @@ fn code_tab(s: &App, k: &Kit, i: usize, r: &Repo) -> El {
         }
     }
     let readme = detail.and_then(|d| d.readme.clone());
-    let readme_body = match &readme {
-        Some(src) => readme_view(k, &crate::markdown::prepare(src, &r.full_name, &at)),
-        None => text(if loading { "Loading…" } else { "This repository has no README." }).font(k.ty.ui).color(k.c.text_muted),
+    let readme_err = detail.and_then(|d| d.readme_error.as_deref());
+    let readme_body = match (&readme, readme_err) {
+        (Some(src), _) => readme_view(k, &crate::markdown::prepare(src, &r.full_name, &at)),
+        (None, Some(err)) => text(err).font(k.ty.small).color(k.c.danger.icon).wrap(),
+        (None, None) => text(if loading { "Loading…" } else { "This repository has no README." }).font(k.ty.ui).color(k.c.text_muted),
     };
     // The README panel's head: copy the whole file as Markdown, or read it on GitHub.
     let readme_tools = match readme {

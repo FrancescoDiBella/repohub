@@ -88,10 +88,31 @@ pub fn menu(s: &App) -> Vec<Entry> {
         m.push(Entry::item("update", format!("Install the new version and restart ({})", r.short())));
         m.push(Entry::sep());
     }
+    let pulls_label = if d.pulls_failed && d.pulls.is_empty() {
+        "Pull requests couldn't load".into()
+    } else if prs == 0 && !prs_capped {
+        "No open pull requests".into()
+    } else {
+        plural_capped(prs, prs_capped, "open pull request", "open pull requests")
+    };
+    let issues_label = if d.issues_failed && d.issues.is_empty() {
+        "Issues couldn't load".into()
+    } else if d.issues.is_empty() {
+        "No open issues".into()
+    } else {
+        plural_capped(d.issues.len().min(SEARCH_CAP), issues_capped, "open issue", "open issues")
+    };
+    let runs_label = if d.runs_failed && d.runs.is_empty() {
+        "Workflow runs couldn't load".into()
+    } else if failed == 0 {
+        "Recent runs passed".into()
+    } else {
+        plural(failed, "failed run", "failed runs")
+    };
     m.extend([
-        Entry::item("go:pulls", if prs == 0 && !prs_capped { "No open pull requests".into() } else { plural_capped(prs, prs_capped, "open pull request", "open pull requests") }),
-        Entry::item("go:issues", if d.issues.is_empty() { "No open issues".into() } else { plural_capped(d.issues.len().min(SEARCH_CAP), issues_capped, "open issue", "open issues") }),
-        Entry::item("go:actions", if failed == 0 { "Recent runs passed".into() } else { plural(failed, "failed run", "failed runs") }),
+        Entry::item("go:pulls", pulls_label),
+        Entry::item("go:issues", issues_label),
+        Entry::item("go:actions", runs_label),
     ]);
     let pinned = crate::pinned(s);
     if !pinned.is_empty() {

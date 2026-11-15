@@ -128,6 +128,8 @@ impl Commit {
 pub struct Detail {
     /// Something couldn't be loaded; what could is still here.
     pub error: Option<String>,
+    /// The README couldn't be loaded (distinct from having no README).
+    pub readme_error: Option<String>,
     /// (name, is directory)
     pub files: Vec<(String, bool)>,
     pub readme: Option<String>,
@@ -145,6 +147,13 @@ pub struct Data {
     pub runs: Vec<Run>,
     /// Commits per week, oldest first.
     pub activity: Vec<u32>,
+    /// Warnings from partial failures during data load.
+    pub warnings: Vec<String>,
+    pub pulls_failed: bool,
+    pub issues_failed: bool,
+    pub runs_failed: bool,
+    /// Backoff seconds until next refresh if rate-limited.
+    pub retry_after: Option<u64>,
     /// True for the built-in sample data.
     pub sample: bool,
 }
@@ -258,6 +267,7 @@ pub fn sample_detail(r: &Repo) -> Detail {
     let files = [(".github", true), ("bunny", true), ("css", true), ("js", true), ("repohub", true), ("README.md", false), ("index.html", false)];
     Detail {
         error: None,
+        readme_error: None,
         files: files.iter().map(|(n, d)| (n.to_string(), *d)).collect(),
         readme: Some(format!("# {}\n\n{}\n\n## Quick start\n\n```sh\ngit clone {}.git\ncd {}\n```\n\nSee the [contributing guide](CONTRIBUTING.md) for the details.", r.name, r.description, r.url, r.name)),
         languages: vec![(r.language.clone(), 70), ("HTML".into(), 20), ("CSS".into(), 10)],
@@ -351,6 +361,11 @@ impl Data {
             issues,
             runs,
             activity: vec![2, 4, 1, 0, 3, 6, 8, 5, 2, 0, 1, 4, 7, 9, 6, 3, 2, 5, 8, 12, 10, 6, 4, 7, 11, 9],
+            warnings: Vec::new(),
+            pulls_failed: false,
+            issues_failed: false,
+            runs_failed: false,
+            retry_after: None,
             sample: true,
         }
     }
