@@ -4658,6 +4658,16 @@ mod fix58_tests {
         s.details.insert(key0.clone(), Load::Failed("failed".into()));
         s.load_detail(0);
         assert!(matches!(s.details.get(&key0), Some(Load::Loading)));
+
+        // When Load::Failed, repo page renders retry buttons and does NOT claim "This repository has no README."
+        s.details.insert(key0.clone(), Load::Failed("Could not connect to GitHub".into()));
+        s.page = Page::Repo(r0.clone());
+        let mut rt = rune::Runtime::new(s, crate::view, (1180.0, 2400.0), rune::Env::new(true, 1.0));
+        rt.frame(0.0);
+        assert!(rt.find("retry-files").is_some(), "retry-files button must be present on Load::Failed");
+        assert!(rt.find("readme-retry").is_some(), "readme-retry button must be present on Load::Failed");
+        assert!(rt.elements().iter().all(|e| e.text.as_deref() != Some("This repository has no README.")), "must NOT claim no README on Load::Failed");
+        assert!(rt.elements().iter().any(|e| e.text.as_deref() == Some("Could not connect to GitHub")), "must display the error message");
     }
 
     #[test]
@@ -4704,7 +4714,20 @@ mod fix58_tests {
         let msg_generic_403 = gh.explain(&resp_generic_403);
         assert!(msg_generic_403.contains("The token needs write access"), "generic 403 must explain write access: {msg_generic_403}");
 
-        // 4. Mock HTTP server returning 429 with retry-after: 40
+        // 4. Primary rate limit (status 403, remaining 0, no retry-after):
+        let resp_primary_403 = Resp {
+            status: 403,
+            body: r#"{"message": "API rate limit exceeded for user"}"#.into(),
+            remaining: Some("0".into()),
+            reset: Some(crate::net::now() + 600),
+            retry_after: None,
+        };
+        let msg_primary_403 = gh.explain(&resp_primary_403);
+        assert!(msg_primary_403.contains("API rate limit reached."), "must start with API rate limit reached.: {msg_primary_403}");
+        assert!(msg_primary_403.contains("With GITHUB_TOKEN the limit goes up to 5,000 requests an hour."), "must mention GITHUB_TOKEN: {msg_primary_403}");
+        assert_eq!(gh.retry_after(), Some(600), "must record reset backoff");
+
+        // 5. Mock HTTP server returning 429 with retry-after: 40
         let server = MockServer::new(|_method, _path| {
             (429, vec![("Content-Type", "application/json"), ("retry-after", "40")], r#"{"message":"rate limited"}"#.into())
         });
@@ -4715,7 +4738,7 @@ mod fix58_tests {
         assert!(err.contains("40 s") || err.contains("40"));
         assert_eq!(gh_live.retry_after(), Some(40));
 
-        // 5. App::refresh_in honours retry_after
+        // 6. App::refresh_in honours retry_after
         let mut app = crate::init();
         let mut app_cfg = (*app.cfg).clone();
         app_cfg.token = Some("tok".into());
@@ -4792,6 +4815,27 @@ mod fix58_tests {
 
         let runs_item = menu.iter().find(|e| e.id == "go:actions").expect("go:actions found");
         assert_eq!(runs_item.label, "Workflow runs couldn't load", "must NOT claim 'Recent runs passed'");
+
+        // When runs is not empty with passing run, but runs_failed is true, label must still be "Workflow runs couldn't load"
+        app.data.runs = vec![crate::model::Run {
+            workflow: "CI".into(),
+            repo: "alice/repo1".into(),
+            branch: "main".into(),
+            checks: crate::model::Checks::Passing,
+            duration: "1m".into(),
+            updated_at: 1_700_000_000,
+            url: String::new(),
+        }];
+        app.data.runs_failed = true;
+        let menu = crate::tray::menu(&app);
+        let runs_item = menu.iter().find(|e| e.id == "go:actions").expect("go:actions found");
+        assert_eq!(runs_item.label, "Workflow runs couldn't load", "must NOT claim 'Recent runs passed' on partial failure even if some runs passed");
+
+        // When runs_failed is false and runs passed, label is "Recent runs passed"
+        app.data.runs_failed = false;
+        let menu = crate::tray::menu(&app);
+        let runs_item = menu.iter().find(|e| e.id == "go:actions").expect("go:actions found");
+        assert_eq!(runs_item.label, "Recent runs passed");
 
         // Verify banner rendering when Ready with warnings
         app.status = Status::Ready;

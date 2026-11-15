@@ -102,12 +102,14 @@ pub fn menu(s: &App) -> Vec<Entry> {
     } else {
         plural_capped(d.issues.len().min(SEARCH_CAP), issues_capped, "open issue", "open issues")
     };
-    let runs_label = if d.runs_failed && d.runs.is_empty() {
-        "Workflow runs couldn't load".into()
-    } else if failed == 0 {
-        "Recent runs passed".into()
-    } else {
+    let runs_label = if failed > 0 {
         plural(failed, "failed run", "failed runs")
+    } else if d.runs_failed {
+        "Workflow runs couldn't load".into()
+    } else if d.runs.is_empty() {
+        "No recent workflow runs".into()
+    } else {
+        "Recent runs passed".into()
     };
     m.extend([
         Entry::item("go:pulls", pulls_label),

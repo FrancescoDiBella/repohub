@@ -92,6 +92,17 @@ impl Gh {
             msg = format!("{msg}: {}", detail.trim());
         }
 
+        if (r.status == 403 || r.status == 429) && r.remaining.as_deref() == Some("0") && r.retry_after.is_none() {
+            let when = if let Some(t) = r.reset {
+                let secs = (t - self.now).max(1) as u64;
+                self.record_backoff(secs);
+                format!(" Try again in {} minutes.", (secs / 60).max(1))
+            } else {
+                String::new()
+            };
+            return format!("API rate limit reached.{when} With GITHUB_TOKEN the limit goes up to 5,000 requests an hour.");
+        }
+
         let is_secondary = r.status == 429
             || (r.status == 403
                 && (r.retry_after.is_some()
@@ -121,17 +132,6 @@ impl Gh {
                 return format!("GitHub rate limit reached: {msg}.");
             }
             return "GitHub rate limit reached.".into();
-        }
-
-        if (r.status == 403 || r.status == 429) && r.remaining.as_deref() == Some("0") {
-            let when = if let Some(t) = r.reset {
-                let secs = (t - self.now).max(1) as u64;
-                self.record_backoff(secs);
-                format!(" Try again in {} minutes.", (secs / 60).max(1))
-            } else {
-                String::new()
-            };
-            return format!("API rate limit reached.{when} With GITHUB_TOKEN the limit goes up to 5,000 requests an hour.");
         }
 
         match r.status {
