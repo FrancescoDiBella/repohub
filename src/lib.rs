@@ -801,8 +801,78 @@ impl App {
         }
     }
 
+    /// The phone app: the account is kept by the app's own side (`PUT api/account`), which
+    /// answers with the new configuration. The token never comes back to the page.
     #[cfg(target_arch = "wasm32")]
-    fn save_account(&mut self, _: bool) {}
+    fn save_account(&mut self, sign_out: bool) {
+        if self.cfg.account_locked {
+            return;
+        }
+        let Some(h) = self.handle.clone() else { return };
+        let user = self.acct_user.text.trim().trim_start_matches('@').to_owned();
+        let typed = self.acct_token.text.trim().to_owned();
+        if !sign_out && user.is_empty() && typed.is_empty() && self.cfg.token.is_none() {
+            self.acct_error = Some("Type your GitHub user name, a token, or both.".into());
+            return;
+        }
+        // An empty token keeps the saved one (`null`).
+        let body = serde_json::json!({
+            "signOut": sign_out,
+            "user": user,
+            "token": if typed.is_empty() { serde_json::Value::Null } else { typed.into() },
+        }).to_string();
+        net::spawn(h, move || async move {
+            let r = net::request("PUT", "api/account", "application/json", &body).await?;
+            if r.status != 200 {
+                return Err(if r.body.trim().is_empty() { format!("The account wasn't saved ({}).", r.status) } else { r.body });
+            }
+            Config::from_json(&r.body).ok_or_else(|| "The account wasn't saved: the app's answer couldn't be read.".to_owned())
+        }, move |s: &mut App, r: Result<Config, String>| match r {
+            Err(e) => s.acct_error = Some(e),
+            Ok(cfg) => {
+                s.cfg = Arc::new(cfg);
+                s.acct_error = None;
+                s.acct_token.clear();
+                if sign_out {
+                    s.acct_user.clear();
+                }
+                s.reset_account_state();
+                if s.cfg.live() {
+                    s.set_status(Status::Starting);
+                    s.refresh();
+                    s.notify("Account saved. Loading your repositories…");
+                } else {
+                    s.now = net::now();
+                    s.data = Data::sample();
+                    s.set_status(Status::Sample);
+                    s.notify("Signed out. Showing the sample data.");
+                }
+            }
+        });
+    }
+
+    /// The phone's back button: closes what's open, goes up a level, and leaves the app from
+    /// the first page.
+    #[cfg(target_arch = "wasm32")]
+    fn back(&mut self) {
+        if self.palette.is_some() {
+            self.palette = None;
+        } else if self.editing_board() {
+            if let Page::Repo(full) = &self.page
+                && let Some(i) = self.repo_index_of(full)
+            {
+                self.close_board(i);
+            }
+        } else if self.pull_diff_of.is_some() {
+            self.close_pull_diff();
+        } else {
+            match self.page {
+                Page::Overview => net::leave_app(),
+                Page::Repo(_) => self.go(Page::Repos),
+                _ => self.go(Page::Overview),
+            }
+        }
+    }
 
     /// Picks the theme and remembers it.
     fn set_theme(&mut self, theme: Theme) {
@@ -2602,11 +2672,11 @@ fn banner(s: &App, k: &Kit) -> Option<El> {
         Status::Starting | Status::Loading => ("Loading data from GitHub…".to_owned(), k.c.info.icon, false),
         Status::Failed(e) => (e.clone(), k.c.danger.icon, true),
         Status::Ready if !s.data.warnings.is_empty() => (s.data.warnings.join(" · "), k.c.warning.icon, true),
-        Status::Sample if !s.cfg.demo && cfg!(not(target_arch = "wasm32")) => ("This is sample data. Connect your GitHub account to see your repositories.".to_owned(), k.c.warning.icon, false),
+        Status::Sample if !s.cfg.demo && !s.cfg.account_locked => ("This is sample data. Connect your GitHub account to see your repositories.".to_owned(), k.c.warning.icon, false),
         Status::Sample if !s.cfg.demo => ("Sample data. To see your repositories, create a .env file with GITHUB_USER or GITHUB_TOKEN (see .env.example) and run RepoHub with Docker or as the desktop app.".to_owned(), k.c.warning.icon, false),
         _ => return None,
     };
-    let connect = s.status == Status::Sample && cfg!(not(target_arch = "wasm32")) && s.page != Page::Settings;
+    let connect = s.status == Status::Sample && !s.cfg.account_locked && !s.cfg.demo && s.page != Page::Settings;
     let icon = if s.status == Status::Ready && !s.data.warnings.is_empty() {
         &icons::BELL
     } else if action {
@@ -2726,7 +2796,7 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
             Page::Repo(full) => s.repo_index_of(full).and_then(|i| s.data.repos.get(i)).map(|r| r.name.clone()).unwrap_or_else(|| full.clone()),
             _ => title(s),
         };
-        mobile::shell(s, &k, cx.safe_area(), name, trailing.child(theme).child(settings), main.grow(1.0))
+        mobile::shell(s, &k, cx.safe_area(), name, trailing.child(theme).child(settings), main.grow(1.0).min_h(0.0))
     } else {
         let toolbar = Toolbar::new().title(title(s)).trailing(trailing
             .child(theme)
@@ -2872,6 +2942,23 @@ const FONTS: &[&[u8]] = &[
 ];
 const FAMILIES: (&str, &str) = ("Inter", "ui-monospace, IBM Plex Mono");
 
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    /// The running app, for [`repohub_back`].
+    static BACK: std::cell::RefCell<Option<AppHandle<App>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The Android app calls this when the back button is pressed.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn repohub_back() {
+    BACK.with(|b| {
+        if let Some(h) = b.borrow().as_ref() {
+            h.update(|s: &mut App, _| s.back());
+        }
+    });
+}
+
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen::prelude::wasm_bindgen(start))]
 pub fn start() {
     let mut app = rune::App::new(AppSpec { on_key: Some(on_key), poll: Some(poll), setup: Some(setup), fonts: FONTS, families: FAMILIES, ..AppSpec::new("RepoHub", (1180.0, 760.0), init, view) });
@@ -2898,19 +2985,25 @@ pub fn start() {
         // The web build asks repohub-server for its configuration; a static host (GitHub Pages)
         // has none, and then shows the sample data.
         #[cfg(target_arch = "wasm32")]
-        net::spawn(h2, || net::fetch_config(), |s: &mut App, cfg| match cfg.filter(|c| c.live()) {
-            Some(cfg) => {
-                if prefs::load_theme().is_none() {
+        net::spawn(h2.clone(), || net::fetch_config(), |s: &mut App, cfg| {
+            let live = cfg.as_ref().is_some_and(|c| c.live());
+            // The phone app has a configuration before it has an account.
+            if let Some(cfg) = cfg.filter(|c| live || c.device) {
+                if live && prefs::load_theme().is_none() {
                     s.theme = cfg.theme;
                 }
+                s.acct_user = TextEdit::new(cfg.user.clone().unwrap_or_default());
                 s.cfg = Arc::new(cfg);
-                s.refresh();
             }
-            None => {
+            if live {
+                s.refresh();
+            } else {
                 s.data = Data::sample();
                 s.set_status(Status::Sample);
             }
         });
+        #[cfg(target_arch = "wasm32")]
+        BACK.with(|b| *b.borrow_mut() = Some(h2.clone()));
     });
     app.run();
 }
@@ -4430,6 +4523,9 @@ mod fix83_tests {
         s.data = crate::model::Data::sample();
         s.data.repos[0].full_name = "owner/repo".into();
         s.data.repos[0].branch = "main".into();
+        // With an account in the environment, `init` waits to reopen the place saved last time
+        // (by another test, here): these tests start from the page they set.
+        s.pending_place = None;
         s
     }
 

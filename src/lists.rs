@@ -284,7 +284,7 @@ pub fn settings(s: &App, k: &Kit) -> El {
                 None => format!("{} (REPOHUB_PINNED)", cfg.pinned.join(", ")),
             },
         }),
-        ("Notes", if cfg.notes { notes_where() } else { "not available here (needs the desktop app or Docker)".into() }),
+        ("Notes", if cfg.device { "kept by the app on this device".into() } else if cfg.notes { notes_where() } else { "not available here (needs the desktop app or Docker)".into() }),
         ("Filters", format!("forks {}, archived {}, at most {} repositories", if cfg.include_forks { "yes" } else { "no" }, if cfg.include_archived { "yes" } else { "no" }, cfg.max_repos)),
     ] {
         if label.starts_with("Ignored") && value.is_empty() {
@@ -370,10 +370,11 @@ fn assistants_panel(s: &App, k: &Kit) -> El {
 
 /// The GitHub account form (desktop): user name and token, saved in the app's settings file.
 fn account_panel(s: &App, k: &Kit) -> El {
-    if cfg!(target_arch = "wasm32") {
+    let cfg = &s.cfg;
+    // In a browser the account is the server's; the phone app keeps its own.
+    if cfg!(target_arch = "wasm32") && cfg.account_locked {
         return rune::el();
     }
-    let cfg = &s.cfg;
     let head = panel(k).child(panel_head(k, "GitHub account", Some(open_button(k, "Create a token", "https://github.com/settings/personal-access-tokens/new", "new-token")))).child(rule(k));
     let account = s.account();
     if account == Account::Locked {
@@ -399,7 +400,7 @@ fn account_panel(s: &App, k: &Kit) -> El {
     let mut body = col().w_full().padding(16.0).gap(12.0)
         .child(row().w_full().gap(12.0).center_y().flex_wrap().child(label("User name")).child(user))
         .child(row().w_full().gap(12.0).center_y().flex_wrap().child(label("Token")).child(token))
-        .child(text("With only a user name RepoHub shows public repositories (60 requests an hour). A token adds private repositories, starring and 5,000 requests an hour: a fine-grained token with read access to Metadata and Actions, and read and write access to Contents, Issues and Pull requests (to create branches, issues and pull requests from the app). A fine-grained token sees one owner's repositories; for your organizations' private repositories use a classic token with repo and read:org. It is saved on this computer only, in a file only you can read.")
+        .child(text("With only a user name RepoHub shows public repositories (60 requests an hour). A token adds private repositories, starring and 5,000 requests an hour: a fine-grained token with read access to Metadata and Actions, and read and write access to Contents, Issues and Pull requests (to create branches, issues and pull requests from the app). A fine-grained token sees one owner's repositories; for your organizations' private repositories use a classic token with repo and read:org. ".to_owned() + if cfg.device { "It stays on this device, encrypted with a key that never leaves it." } else { "It is saved on this computer only, in a file only you can read." })
             .font(k.ty.text_small).color(k.c.text_muted).wrap());
     if let Some(e) = &s.acct_error {
         body = body.child(text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap());

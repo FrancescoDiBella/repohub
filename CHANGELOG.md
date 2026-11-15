@@ -10,6 +10,13 @@ The sections are **Added**, **Changed** and **Fixed**.
 ## Unreleased
 
 ### Added
+- An Android app (APK, Android 12 or later). It needs no server: you sign in from Settings, the
+  token stays encrypted on the phone, and drawings are kept there too. It has the overview,
+  repositories, pull requests, issues, workflow runs, README and code, and you can create
+  issues, branches and pull requests and merge. The back button goes back inside the app.
+- Drawings on a phone open full screen, made for touch: draw with a finger, zoom with the plus
+  and minus buttons, and drag the drawing with the new **Move the view** tool. A drawing opens
+  on what's drawn in it.
 - Merge local branches from the Changes tab. You preview the commits and the diff first. On
   conflicts you see the files and can abort; Commit finishes the merge once they're fixed.
 - Diffs in the app. **Files** on a pull request shows what it changes, unified or side by side,
@@ -68,6 +75,8 @@ The sections are **Added**, **Changed** and **Fixed**.
 - A new look, with a more readable layout.
 
 ### Fixed
+- The phone layout's tab bar (Overview, Repos, Pulls, Issues, Actions) is on screen again: a
+  long page pushed it below the bottom edge.
 - Lists page through GitHub results with the `Link` header rather than stopping at the first page:
   branches and starred repositories page beyond 100 with default branches preserved first, public orgs
   and repositories page via `Link` headers, workflow runs across all active repositories are sorted newest

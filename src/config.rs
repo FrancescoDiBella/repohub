@@ -76,6 +76,8 @@ pub struct Config {
     pub sources: ConfigSources,
     /// Settings a project `.env` isn't allowed to change, found (and ignored) in the one loaded.
     pub ignored_keys: Vec<String>,
+    /// The phone app (Android): the account and the drawings are kept on the device.
+    pub device: bool,
     /// Whether write actions (creating issues, branches, PRs, merging, starring) are allowed.
     pub allow_writes: bool,
 }
@@ -493,6 +495,7 @@ impl Config {
             account_locked,
             sources,
             ignored_keys,
+            device: false,
             allow_writes: true,
         }
     }
@@ -528,10 +531,12 @@ impl Config {
             notes: bo("notes", false),
             terminal_commands: default_commands(),
             terminal_pass_token: false,
-            env_file: Some("provided by repohub-server (Docker)".into()),
-            account_locked: true,
+            env_file: Some(if bo("device", false) { "kept by the app on this device" } else { "provided by repohub-server (Docker)" }.into()),
+            // The phone app lets Settings change the account; a server's comes from its `.env`.
+            account_locked: !bo("accountEditable", false),
             sources: ConfigSources::default(),
             ignored_keys: Vec::new(),
+            device: bo("device", false),
             allow_writes: bo("allowWrites", true),
         })
     }
@@ -550,6 +555,9 @@ mod tests {
         assert_eq!(c.pinned, vec!["a", "b"]);
         assert_eq!((c.theme, c.max_repos), (crate::state::Theme::Dark, 20));
         assert!(!Config::from_json(r#"{"hasToken":false}"#).unwrap().live());
+        assert!(c.account_locked && !c.device, "a server's account is set in its .env");
+        let phone = Config::from_json(r#"{"device":true,"accountEditable":true,"notes":true}"#).unwrap();
+        assert!(phone.device && !phone.account_locked && !phone.live() && phone.notes);
         let no_writes = Config::from_json(r#"{"user":"octocat","hasToken":true,"allowWrites":false}"#).unwrap();
         assert!(!no_writes.allow_writes);
     }
