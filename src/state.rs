@@ -80,6 +80,7 @@ impl<T> Load<T> {
         }
     }
 
+    #[allow(dead_code)]
     pub fn is_loading(&self) -> bool {
         matches!(self, Load::Loading)
     }

@@ -17,6 +17,7 @@ pub struct Resp {
     pub body: String,
     pub remaining: Option<String>,
     pub reset: Option<i64>,
+    pub retry_after: Option<u64>,
 }
 
 /// Runs `work` in the background and hands its result to `done` on the UI thread.
@@ -103,8 +104,9 @@ impl Transport {
         let status = resp.status();
         let remaining = resp.header("x-ratelimit-remaining").map(str::to_owned);
         let reset = resp.header("x-ratelimit-reset").and_then(|v| v.parse().ok());
+        let retry_after = resp.header("retry-after").and_then(|v| v.trim().parse().ok());
         let body = resp.into_string().map_err(|e| e.to_string())?;
-        Ok(Resp { status, body, remaining, reset })
+        Ok(Resp { status, body, remaining, reset, retry_after })
     }
 }
 
@@ -142,9 +144,9 @@ export async function gh_fetch(method, url, accept, body) {
         if (body) { init.body = body; }
         const r = await fetch(url, init);
         const text = await r.text();
-        return [r.status, text, r.headers.get('x-ratelimit-remaining') || '', r.headers.get('x-ratelimit-reset') || ''];
+        return [r.status, text, r.headers.get('x-ratelimit-remaining') || '', r.headers.get('x-ratelimit-reset') || '', r.headers.get('retry-after') || ''];
     } catch (e) {
-        return [0, String(e), '', ''];
+        return [0, String(e), '', '', ''];
     }
 }
 export function now_secs() { return Math.floor(Date.now() / 1000); }
@@ -193,7 +195,8 @@ pub async fn request(method: &str, url: &str, accept: &str, body: &str) -> Resul
     }
     let remaining = a.get(2).as_string().filter(|s| !s.is_empty());
     let reset = a.get(3).as_string().and_then(|s| s.parse().ok());
-    Ok(Resp { status, body, remaining, reset })
+    let retry_after = a.get(4).as_string().and_then(|s| s.trim().parse().ok());
+    Ok(Resp { status, body, remaining, reset, retry_after })
 }
 
 /// Web only: `rel` resolved against the page's address.

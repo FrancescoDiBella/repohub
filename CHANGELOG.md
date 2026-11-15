@@ -68,6 +68,13 @@ The sections are **Added**, **Changed** and **Fixed**.
 - A new look, with a more readable layout.
 
 ### Fixed
+- Data loading and caching handles partial failures and rate limits gracefully: failed repository
+  details and branch lists are retried rather than permanently cached, errored details are dropped
+  on refresh while clean details for unpushed repositories are preserved, and deleted branches fall
+  back to the default branch. Secondary rate limits and HTTP 429 responses display accurate
+  rate-limit explanations instead of misleading write-permission errors, respect the `retry-after`
+  backoff before subsequent refreshes, and surface partial list failures in the warning banner and
+  status-bar menu.
 - `repohub-server` is hardened against unauthorized access, CORS bypasses, and directory traversal:
   a shared secret (`REPOHUB_SECRET`) is required when bound to non-loopback addresses and accepted via
   an `HttpOnly` cookie or bearer header; writes default to disabled on non-loopback bindings and require

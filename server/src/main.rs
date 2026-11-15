@@ -661,7 +661,7 @@ fn proxy(cfg: &Cfg, mut req: Request) {
     };
     let status = resp.status();
     let mut headers = vec![h("Cache-Control", "no-store")];
-    for name in ["Content-Type", "x-ratelimit-remaining", "x-ratelimit-reset", "x-ratelimit-limit"] {
+    for name in ["Content-Type", "x-ratelimit-remaining", "x-ratelimit-reset", "x-ratelimit-limit", "retry-after"] {
         if let Some(v) = resp.header(name) {
             headers.push(h(name, v));
         }

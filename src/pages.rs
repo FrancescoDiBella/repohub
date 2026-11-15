@@ -342,11 +342,12 @@ fn code_tab(s: &App, k: &Kit, i: usize, r: &Repo) -> El {
     if has_local {
         files = files.child(panel_head(k, "Files on GitHub", Some(crate::local_page::source_switch(s, k)))).child(rule(k));
     }
-    let loading = load.is_some_and(Load::is_loading);
     match load {
         None => files = files.child(col().w_full().padding(24.0).items_center().child(text("Open the repository to load its files").font(k.ty.ui).color(k.c.text_muted))),
         Some(Load::Loading) => files = files.child(col().w_full().padding(24.0).items_center().child(text("Loading files…").font(k.ty.ui).color(k.c.text_muted))),
-        Some(Load::Failed(e)) => files = files.child(col().w_full().padding(16.0).child(text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap())),
+        Some(Load::Failed(e)) => files = files.child(row().w_full().padding(16.0).center_y().gap(12.0)
+            .child(text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap().grow(1.0).shrink())
+            .child(Button::new("Retry").control_size(ControlSize::Small).on_press(move |s: &mut App| s.load_detail(i)).build(k).key("retry-files"))),
         Some(Load::Ready(d)) => {
             if let Some(c) = &d.commit {
                 let age = c.age_ago(s.now);
@@ -374,17 +375,30 @@ fn code_tab(s: &App, k: &Kit, i: usize, r: &Repo) -> El {
         }
     }
     let readme = detail.and_then(|d| d.readme.clone());
-    let readme_body = match &readme {
-        Some(src) => readme_view(k, &crate::markdown::prepare(src, &r.full_name, &at)),
-        None => text(if loading { "Loading…" } else { "This repository has no README." }).font(k.ty.ui).color(k.c.text_muted),
+    let readme_err = detail.and_then(|d| d.readme_error.as_deref());
+    let readme_body = match load {
+        Some(Load::Failed(e)) => text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap(),
+        Some(Load::Loading) => text("Loading…").font(k.ty.ui).color(k.c.text_muted),
+        None => text("Open the repository to load its README").font(k.ty.ui).color(k.c.text_muted),
+        Some(Load::Ready(_)) => match (&readme, readme_err) {
+            (Some(src), _) => readme_view(k, &crate::markdown::prepare(src, &r.full_name, &at)),
+            (None, Some(err)) => text(err).font(k.ty.small).color(k.c.danger.icon).wrap(),
+            (None, None) => text("This repository has no README.").font(k.ty.ui).color(k.c.text_muted),
+        },
     };
-    // The README panel's head: copy the whole file as Markdown, or read it on GitHub.
-    let readme_tools = match readme {
-        Some(src) => row().gap(4.0).center_y()
-            .child(Button::new("Copy").icon(&icons::COPY).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
-                .on_press_tx(move |s: &mut App, tx| { tx.copy(src.clone()); s.notify("README copied as Markdown"); })
-                .build(k).key("readme-copy")),
-        None => ui::ico(&icons::BOOK, 16.0, k.c.icon_muted),
+    // The README panel's head: copy the whole file as Markdown, or read it on GitHub, or retry if failed.
+    let readme_tools = match load {
+        Some(Load::Failed(_)) => row().gap(4.0).center_y()
+            .child(Button::new("Retry").control_size(ControlSize::Small)
+                .on_press(move |s: &mut App| s.load_detail(i))
+                .build(k).key("readme-retry")),
+        _ => match readme {
+            Some(src) => row().gap(4.0).center_y()
+                .child(Button::new("Copy").icon(&icons::COPY).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
+                    .on_press_tx(move |s: &mut App, tx| { tx.copy(src.clone()); s.notify("README copied as Markdown"); })
+                    .build(k).key("readme-copy")),
+            None => ui::ico(&icons::BOOK, 16.0, k.c.icon_muted),
+        },
     };
     let readme_panel = panel(k)
         .child(panel_head(k, "README", Some(readme_tools)))

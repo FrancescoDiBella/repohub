@@ -8,9 +8,42 @@ use crate::config::Config;
 use crate::net::{self, Resp, Transport};
 use crate::model::{Checks, Commit, Data, Detail, Issue, Profile, Pull, PullState, Repo, Run, duration, hex_hue, lang_hue, parse_iso};
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoadError {
+    pub message: String,
+    pub retry_after: Option<u64>,
+}
+
+impl LoadError {
+    pub fn new(message: impl Into<String>, retry_after: Option<u64>) -> LoadError {
+        LoadError { message: message.into(), retry_after }
+    }
+}
+
+impl From<String> for LoadError {
+    fn from(message: String) -> LoadError {
+        LoadError { message, retry_after: None }
+    }
+}
+
+impl From<&str> for LoadError {
+    fn from(s: &str) -> LoadError {
+        LoadError { message: s.into(), retry_after: None }
+    }
+}
+
+impl std::fmt::Display for LoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for LoadError {}
+
 pub struct Gh {
     t: Transport,
     now: i64,
+    retry_after: std::sync::Mutex<Option<u64>>,
 }
 
 const JSON: &str = "application/vnd.github+json";
@@ -35,10 +68,20 @@ fn repo_from_url(url: &str) -> String {
 
 impl Gh {
     pub fn new(cfg: &Config) -> Gh {
-        Gh { t: Transport::new(cfg), now: net::now() }
+        Gh { t: Transport::new(cfg), now: net::now(), retry_after: std::sync::Mutex::new(None) }
     }
 
-    fn explain(&self, r: &Resp) -> String {
+    pub fn record_backoff(&self, secs: u64) {
+        if let Ok(mut g) = self.retry_after.lock() {
+            *g = Some(g.map_or(secs, |prev| prev.max(secs)));
+        }
+    }
+
+    pub fn retry_after(&self) -> Option<u64> {
+        self.retry_after.lock().ok().and_then(|g| *g)
+    }
+
+    pub fn explain(&self, r: &Resp) -> String {
         let v = serde_json::from_str::<Value>(&r.body).ok();
         let mut msg = v.as_ref().map(|v| s(v, "message")).unwrap_or_default();
         // Validation errors (422) carry the reason in `errors`: "A pull request already exists…".
@@ -48,12 +91,51 @@ impl Gh {
         {
             msg = format!("{msg}: {}", detail.trim());
         }
+
+        if (r.status == 403 || r.status == 429) && r.remaining.as_deref() == Some("0") && r.retry_after.is_none() {
+            let when = if let Some(t) = r.reset {
+                let secs = (t - self.now).max(1) as u64;
+                self.record_backoff(secs);
+                format!(" Try again in {} minutes.", (secs / 60).max(1))
+            } else {
+                String::new()
+            };
+            return format!("API rate limit reached.{when} With GITHUB_TOKEN the limit goes up to 5,000 requests an hour.");
+        }
+
+        let is_secondary = r.status == 429
+            || (r.status == 403
+                && (r.retry_after.is_some()
+                    || msg.to_ascii_lowercase().contains("rate limit")
+                    || msg.to_ascii_lowercase().contains("abuse")));
+
+        if is_secondary {
+            if let Some(secs) = r.retry_after {
+                self.record_backoff(secs);
+                if !msg.is_empty() && !msg.eq_ignore_ascii_case("rate limited") {
+                    return format!("GitHub rate limit reached: {msg}. Retrying in {secs} s.");
+                } else {
+                    return format!("rate limited, retrying in {secs} s");
+                }
+            }
+            if let Some(t) = r.reset {
+                let secs = (t - self.now).max(1) as u64;
+                self.record_backoff(secs);
+                let mins = (secs / 60).max(1);
+                if !msg.is_empty() {
+                    return format!("GitHub rate limit reached: {msg}. Try again in {mins} minutes.");
+                } else {
+                    return format!("GitHub rate limit reached. Try again in {mins} minutes.");
+                }
+            }
+            if !msg.is_empty() {
+                return format!("GitHub rate limit reached: {msg}.");
+            }
+            return "GitHub rate limit reached.".into();
+        }
+
         match r.status {
             401 => "GitHub rejected the token (401): check the token in Settings, or GITHUB_TOKEN in your .env file.".into(),
-            403 | 429 if r.remaining.as_deref() == Some("0") => {
-                let when = r.reset.map(|t| format!(" Try again in {} minutes.", ((t - self.now) / 60).max(1))).unwrap_or_default();
-                format!("API rate limit reached.{when} With GITHUB_TOKEN the limit goes up to 5,000 requests an hour.")
-            }
             403 => format!("GitHub refused (403): {msg}. The token needs write access to this repository (Contents, Issues and Pull requests)."),
             404 => format!("Not found (404): {msg}. Check GITHUB_USER or the token's permissions."),
             code if msg.is_empty() => format!("GitHub API error {code}."),
@@ -133,11 +215,16 @@ impl Gh {
     /// The account's repositories and those of its organizations (`cfg.orgs`), most recently
     /// pushed first. With the account's own token, `/user/repos` lists both, private ones
     /// included; otherwise the public repositories of the user and of its public organizations.
-    pub async fn repos(&self, cfg: &Config, login: &str, own: bool) -> Result<Vec<Repo>, String> {
+    pub async fn repos(&self, cfg: &Config, login: &str, own: bool, warnings: &mut Vec<String>) -> Result<Vec<Repo>, String> {
         use crate::state::Orgs;
         let starred: HashSet<String> = if self.t.has_token() {
-            self.get("/user/starred?per_page=100").await.ok().and_then(|v| v.as_array().cloned()).unwrap_or_default()
-                .iter().map(|r| s(r, "full_name")).collect()
+            match self.get("/user/starred?per_page=100").await {
+                Ok(v) => v.as_array().cloned().unwrap_or_default().iter().map(|r| s(r, "full_name")).collect(),
+                Err(e) => {
+                    warnings.push(format!("Starred repositories couldn't load: {e}"));
+                    HashSet::new()
+                }
+            }
         } else {
             HashSet::new()
         };
@@ -172,28 +259,48 @@ impl Gh {
             let orgs: Vec<String> = match &cfg.orgs {
                 Orgs::Off => Vec::new(),
                 Orgs::Only(list) => list.clone(),
-                Orgs::All => self.get(&format!("/users/{login}/orgs?per_page=100")).await.ok().and_then(|v| v.as_array().cloned()).unwrap_or_default()
-                    .iter().map(|o| s(o, "login")).filter(|o| !o.is_empty()).collect(),
+                Orgs::All => match self.get(&format!("/users/{login}/orgs?per_page=100")).await {
+                    Ok(v) => v.as_array().cloned().unwrap_or_default()
+                        .iter().map(|o| s(o, "login")).filter(|o| !o.is_empty()).collect(),
+                    Err(e) => {
+                        warnings.push(format!("Organizations couldn't load: {e}"));
+                        Vec::new()
+                    }
+                },
             };
+            let mut org_errs = Vec::new();
             for org in orgs.iter().take(20) {
-                if let Ok(v) = self.get(&format!("/orgs/{org}/repos?type=public&sort=pushed&per_page=100")).await {
-                    out.extend(v.as_array().cloned().unwrap_or_default().iter().map(|r| self.repo(r, &starred)).filter(wanted));
+                match self.get(&format!("/orgs/{org}/repos?type=public&sort=pushed&per_page=100")).await {
+                    Ok(v) => {
+                        out.extend(v.as_array().cloned().unwrap_or_default().iter().map(|r| self.repo(r, &starred)).filter(wanted));
+                    }
+                    Err(e) => {
+                        org_errs.push((org.clone(), e));
+                    }
                 }
             }
-            out.sort_by(|a, b| b.pushed.cmp(&a.pushed));
+            if !org_errs.is_empty() {
+                if org_errs.len() == 1 {
+                    warnings.push(format!("Repositories for {} couldn't load: {}", org_errs[0].0, org_errs[0].1));
+                } else {
+                    warnings.push(format!("Repositories for {} organizations couldn't load: {}", org_errs.len(), org_errs[0].1));
+                }
+            }
+            out.sort_by_key(|r| std::cmp::Reverse(r.pushed));
         }
         out.truncate(cfg.max_repos);
         Ok(out)
     }
 
-    async fn search(&self, q: &str) -> Vec<Value> {
+    async fn search(&self, q: &str) -> Result<Vec<Value>, String> {
         let q = q.replace(' ', "+").replace(':', "%3A");
-        self.get(&format!("/search/issues?q={q}&sort=updated&order=desc&per_page={}", crate::model::SEARCH_CAP)).await
-            .ok().and_then(|v| v.get("items").and_then(Value::as_array).cloned()).unwrap_or_default()
+        let v = self.get(&format!("/search/issues?q={q}&sort=updated&order=desc&per_page={}", crate::model::SEARCH_CAP)).await?;
+        Ok(v.get("items").and_then(Value::as_array).cloned().unwrap_or_default())
     }
 
-    pub async fn pulls(&self, login: &str) -> Vec<Pull> {
-        self.search(&format!("is:pr involves:{login}")).await.iter().map(|v| {
+    pub async fn pulls(&self, login: &str) -> Result<Vec<Pull>, String> {
+        let items = self.search(&format!("is:pr involves:{login}")).await?;
+        Ok(items.iter().map(|v| {
             let merged = v.get("pull_request").and_then(|p| p.get("merged_at")).is_some_and(|m| !m.is_null());
             let state = if merged { PullState::Merged } else if s(v, "state") == "closed" { PullState::Closed } else if b(v, "draft") { PullState::Draft } else { PullState::Open };
             let updated_at = s(v, "updated_at");
@@ -208,13 +315,14 @@ impl Gh {
                 comments: n(v, "comments"),
                 url: s(v, "html_url"),
             }
-        }).collect()
+        }).collect())
     }
 
     /// Open issues in the account's repositories and in those of `orgs` (search ORs the owners).
-    pub async fn issues(&self, login: &str, orgs: &[String]) -> Vec<Issue> {
+    pub async fn issues(&self, login: &str, orgs: &[String]) -> Result<Vec<Issue>, String> {
         let owners: String = orgs.iter().take(10).map(|o| format!(" org:{o}")).collect();
-        self.search(&format!("is:issue is:open archived:false user:{login}{owners}")).await.iter().map(|v| {
+        let items = self.search(&format!("is:issue is:open archived:false user:{login}{owners}")).await?;
+        Ok(items.iter().map(|v| {
             let created_at = s(v, "created_at");
             Issue {
                 number: n(v, "number"),
@@ -225,12 +333,12 @@ impl Gh {
                 comments: n(v, "comments"),
                 url: s(v, "html_url"),
             }
-        }).collect()
+        }).collect())
     }
 
-    pub async fn runs(&self, full: &str) -> Vec<Run> {
-        let v = self.get(&format!("/repos/{full}/actions/runs?per_page=4")).await.unwrap_or(Value::Null);
-        v.get("workflow_runs").and_then(Value::as_array).cloned().unwrap_or_default().iter().map(|r| {
+    pub async fn runs(&self, full: &str) -> Result<Vec<Run>, String> {
+        let v = self.get(&format!("/repos/{full}/actions/runs?per_page=4")).await?;
+        Ok(v.get("workflow_runs").and_then(Value::as_array).cloned().unwrap_or_default().iter().map(|r| {
             let checks = match (s(r, "status").as_str(), s(r, "conclusion").as_str()) {
                 ("completed", "success" | "skipped" | "neutral") => Checks::Passing,
                 ("completed", _) => Checks::Failing,
@@ -251,14 +359,17 @@ impl Gh {
                 checks,
                 url: s(r, "html_url"),
             }
-        }).collect()
+        }).collect())
     }
 
     /// The owner's commits per week over the last 26 weeks (zeros while GitHub computes them).
-    pub async fn participation(&self, full: &str) -> Vec<u32> {
-        let v = self.get(&format!("/repos/{full}/stats/participation")).await.unwrap_or(Value::Null);
+    pub async fn participation(&self, full: &str) -> Result<Vec<u32>, String> {
+        let v = self.get(&format!("/repos/{full}/stats/participation")).await?;
+        if v.is_null() {
+            return Ok(vec![0; 26]);
+        }
         let weeks: Vec<u32> = v.get("owner").and_then(Value::as_array).map(|a| a.iter().map(|x| x.as_u64().unwrap_or(0) as u32).collect()).unwrap_or_default();
-        if weeks.len() >= 26 { weeks[weeks.len() - 26..].to_vec() } else { vec![0; 26] }
+        Ok(if weeks.len() >= 26 { weeks[weeks.len() - 26..].to_vec() } else { vec![0; 26] })
     }
 
     /// Files, README and last commit of `full` at branch `at`; languages for the whole repository.
@@ -274,24 +385,42 @@ impl Gh {
             Err(e) => d.error = Some(e),
         }
         // The whole README (up to 200 KB), so Copy copies all of it.
-        d.readme = self.get_raw(&format!("/repos/{full}/readme?ref={at}")).await.ok().flatten().map(|t| t.chars().take(200_000).collect());
-        if let Ok(v) = self.get(&format!("/repos/{full}/languages")).await {
-            let mut langs: Vec<(String, u64)> = v.as_object().map(|o| o.iter().map(|(k, v)| (k.clone(), v.as_u64().unwrap_or(0))).collect()).unwrap_or_default();
-            langs.sort_by(|a, b| b.1.cmp(&a.1));
-            d.languages = langs;
+        match self.get_raw(&format!("/repos/{full}/readme?ref={at}")).await {
+            Ok(Some(t)) => d.readme = Some(t.chars().take(200_000).collect()),
+            Ok(None) => {}
+            Err(e) => d.readme_error = Some(e),
         }
-        if let Ok(v) = self.get(&format!("/repos/{full}/commits?sha={at}&per_page=1")).await
-            && let Some(c) = v.as_array().and_then(|a| a.first())
-        {
-            let commit = c.get("commit").cloned().unwrap_or(Value::Null);
-            let author = commit.get("author").cloned().unwrap_or(Value::Null);
-            let date = s(&author, "date");
-            d.commit = Some(Commit {
-                author: c.get("author").filter(|a| !a.is_null()).map(|a| s(a, "login")).unwrap_or_else(|| s(&author, "name")),
-                message: s(&commit, "message").lines().next().unwrap_or("").to_owned(),
-                sha: s(c, "sha").chars().take(7).collect(),
-                committed_at: parse_iso(&date).unwrap_or(0),
-            });
+        match self.get(&format!("/repos/{full}/languages")).await {
+            Ok(v) => {
+                let mut langs: Vec<(String, u64)> = v.as_object().map(|o| o.iter().map(|(k, v)| (k.clone(), v.as_u64().unwrap_or(0))).collect()).unwrap_or_default();
+                langs.sort_by_key(|l| std::cmp::Reverse(l.1));
+                d.languages = langs;
+            }
+            Err(e) => {
+                if d.error.is_none() {
+                    d.error = Some(e);
+                }
+            }
+        }
+        match self.get(&format!("/repos/{full}/commits?sha={at}&per_page=1")).await {
+            Ok(v) => {
+                if let Some(c) = v.as_array().and_then(|a| a.first()) {
+                    let commit = c.get("commit").cloned().unwrap_or(Value::Null);
+                    let author = commit.get("author").cloned().unwrap_or(Value::Null);
+                    let date = s(&author, "date");
+                    d.commit = Some(Commit {
+                        author: c.get("author").filter(|a| !a.is_null()).map(|a| s(a, "login")).unwrap_or_else(|| s(&author, "name")),
+                        message: s(&commit, "message").lines().next().unwrap_or("").to_owned(),
+                        sha: s(c, "sha").chars().take(7).collect(),
+                        committed_at: parse_iso(&date).unwrap_or(0),
+                    });
+                }
+            }
+            Err(e) => {
+                if d.error.is_none() {
+                    d.error = Some(e);
+                }
+            }
         }
         d
     }
@@ -360,31 +489,93 @@ impl Gh {
 }
 
 /// Everything the overview and lists need, in one go (about 4 + 2 × `activity_repos` requests).
-pub async fn load_all(cfg: &Config) -> Result<Data, String> {
+pub async fn load_all(cfg: &Config) -> Result<Data, LoadError> {
     let gh = Gh::new(cfg);
-    let profile = gh.profile(cfg).await?;
+    let profile = match gh.profile(cfg).await {
+        Ok(p) => p,
+        Err(e) => return Err(LoadError::new(e, gh.retry_after())),
+    };
     let own = gh.t.has_token() && match &cfg.user {
         None => true,
         Some(u) => gh.viewer_login().await.is_some_and(|v| v.eq_ignore_ascii_case(u)),
     };
-    let repos = gh.repos(cfg, &profile.login, own).await?;
-    let pulls = gh.pulls(&profile.login).await;
+    let mut warnings = Vec::new();
+    let repos = match gh.repos(cfg, &profile.login, own, &mut warnings).await {
+        Ok(r) => r,
+        Err(e) => return Err(LoadError::new(e, gh.retry_after())),
+    };
+    let mut pulls_failed = false;
+    let pulls = match gh.pulls(&profile.login).await {
+        Ok(p) => p,
+        Err(e) => {
+            pulls_failed = true;
+            warnings.push(format!("Pull requests couldn't load: {e}"));
+            Vec::new()
+        }
+    };
     // The organizations whose repositories were loaded: their issues too.
     let mut orgs: Vec<String> = repos.iter().map(|r| r.owner.clone()).filter(|o| !o.eq_ignore_ascii_case(&profile.login)).collect();
     orgs.sort_by_key(|o| o.to_lowercase());
     orgs.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
-    let issues = gh.issues(&profile.login, &orgs).await;
+    let mut issues_failed = false;
+    let issues = match gh.issues(&profile.login, &orgs).await {
+        Ok(i) => i,
+        Err(e) => {
+            issues_failed = true;
+            warnings.push(format!("Issues couldn't load: {e}"));
+            Vec::new()
+        }
+    };
     let active: Vec<String> = repos.iter().filter(|r| !r.archived).take(cfg.activity_repos).map(|r| r.full_name.clone()).collect();
     let mut runs: Vec<Run> = Vec::new();
+    let mut runs_failed = false;
     let mut activity = vec![0u32; 26];
+    let mut run_error: Option<String> = None;
+    let mut participation_error: Option<String> = None;
     for full in &active {
-        runs.extend(gh.runs(full).await);
-        for (i, w) in gh.participation(full).await.iter().enumerate() {
-            activity[i] += w;
+        match gh.runs(full).await {
+            Ok(r) => runs.extend(r),
+            Err(e) => {
+                runs_failed = true;
+                if run_error.is_none() {
+                    run_error = Some(e);
+                }
+            }
+        }
+        match gh.participation(full).await {
+            Ok(part) => {
+                for (i, w) in part.iter().enumerate() {
+                    activity[i] += w;
+                }
+            }
+            Err(e) => {
+                if participation_error.is_none() {
+                    participation_error = Some(e);
+                }
+            }
         }
     }
+    if let Some(e) = run_error {
+        warnings.push(format!("Workflow runs couldn't load: {e}"));
+    }
+    if let Some(e) = participation_error {
+        warnings.push(format!("Commit activity couldn't load: {e}"));
+    }
     runs.truncate(20);
-    Ok(Data { profile, repos, pulls, issues, runs, activity, sample: false })
+    Ok(Data {
+        profile,
+        repos,
+        pulls,
+        issues,
+        runs,
+        activity,
+        warnings,
+        pulls_failed,
+        issues_failed,
+        runs_failed,
+        retry_after: gh.retry_after(),
+        sample: false,
+    })
 }
 
 /// One file of a pull request, as GitHub lists it.
