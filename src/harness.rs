@@ -132,8 +132,7 @@ mod tests {
         // SAFETY: the lock keeps other environment-changing tests out.
         unsafe { std::env::set_var("REPOHUB_DATA_DIR", &dir) };
         assert_eq!(Assistants::load(), Assistants::default());
-        let mut a = Assistants::default();
-        a.claude = false;
+        let mut a = Assistants { claude: false, ..Default::default() };
         a.add("Aider", "aider --model sonnet").unwrap();
         a.save();
         assert_eq!(Assistants::load(), a);

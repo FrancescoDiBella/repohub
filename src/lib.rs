@@ -59,12 +59,7 @@ use config::Config;
 /// Tests that change process environment variables hold this, so they don't race.
 #[cfg(test)]
 pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-use model::{Data, Detail, PullState};
-
-/// `a` and `b` name the same repository (`owner/name`, or only the name).
-fn same_repo(a: &str, b: &str) -> bool {
-    a.eq_ignore_ascii_case(b) || b.rsplit('/').next().is_some_and(|n| a.eq_ignore_ascii_case(n))
-}
+use model::{Data, Detail, PullState, same_repo};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Page {
@@ -223,8 +218,12 @@ pub struct App {
     acct_token: TextEdit,
     acct_error: Option<String>,
     term_error: Option<String>,
-    /// The window is phone-sized: the pages use the layout in `mobile`.
     compact: bool,
+    pub open_pulls_page: usize,
+    pub closed_pulls_page: usize,
+    pub issues_page: usize,
+    pub loading_more_pulls: bool,
+    pub loading_more_issues: bool,
     /// When GitHub's data on screen was loaded, and when the last load started (Unix seconds).
     loaded_at: Option<i64>,
     last_load: Option<i64>,
@@ -714,6 +713,11 @@ impl App {
         self.last_load = None;
         self.load_clock = None;
         self.loaded_clock = None;
+        self.open_pulls_page = 1;
+        self.closed_pulls_page = 1;
+        self.issues_page = 1;
+        self.loading_more_pulls = false;
+        self.loading_more_issues = false;
         // `self.data` is now empty, so `go()` -> `save_place()` skips writing `"place"`.
         prefs::set("place", state::Place { page: "overview".into(), tab: None, repo: None }.to_json());
         self.go(Page::Overview);
@@ -933,6 +937,11 @@ impl App {
                 self.loaded_at = Some(net::now());
                 self.loaded_clock = Some(self.clock);
                 self.now = net::now();
+                self.open_pulls_page = 1;
+                self.closed_pulls_page = 1;
+                self.issues_page = 1;
+                self.loading_more_pulls = false;
+                self.loading_more_issues = false;
                 self.set_status(Status::Ready);
                 if let Page::Repo(full) = &self.page.clone() {
                     if let Some(i) = self.repo_index_of(full) {
@@ -1429,6 +1438,9 @@ impl App {
                 if let Some(r) = self.data.repos.iter_mut().find(|r| r.full_name.eq_ignore_ascii_case(&full_name)) {
                     r.issues += 1;
                 }
+                if let Some(t) = self.data.issues_total.as_mut() {
+                    *t += 1;
+                }
                 self.notify(format!("Opened issue #{} in {full_name}", c.number));
             }
             github::Done::Branch(name) => {
@@ -1450,6 +1462,9 @@ impl App {
                     state: if draft { PullState::Draft } else { PullState::Open },
                     checks: None, updated_at: self.now, comments: 0, url: c.url,
                 });
+                if let Some(t) = self.data.open_pulls_total.as_mut() {
+                    *t += 1;
+                }
                 self.notify(format!("Opened pull request #{}", c.number));
             }
             github::Done::Closed(n) => {
@@ -1457,15 +1472,115 @@ impl App {
                 if let Some(r) = self.data.repos.iter_mut().find(|r| r.full_name.eq_ignore_ascii_case(&full_name)) {
                     r.issues = r.issues.saturating_sub(1);
                 }
+                if let Some(t) = self.data.issues_total.as_mut() {
+                    *t = t.saturating_sub(1);
+                }
                 self.notify(format!("Closed issue #{n}"));
             }
             github::Done::Merged(n) => {
+                let mut changed = false;
                 for p in self.data.pulls.iter_mut().filter(|p| p.number == n && same_repo(&p.repo, &full_name)) {
+                    if matches!(p.state, PullState::Open | PullState::Draft) {
+                        changed = true;
+                    }
                     p.state = PullState::Merged;
+                }
+                if changed {
+                    if let Some(t) = self.data.open_pulls_total.as_mut() {
+                        *t = t.saturating_sub(1);
+                    }
+                    if let Some(t) = self.data.closed_pulls_total.as_mut() {
+                        *t += 1;
+                    }
                 }
                 self.notify(format!("Merged pull request #{n}"));
             }
         }
+    }
+
+    pub fn load_more_pulls(&mut self, open: bool) {
+        if self.loading_more_pulls || self.data.sample {
+            return;
+        }
+        let Some(h) = self.handle.clone() else { return };
+        let cfg = self.cfg.clone();
+        let login = self.data.profile.login.clone();
+        if login.is_empty() {
+            return;
+        }
+        let next_page = if open { self.open_pulls_page + 1 } else { self.closed_pulls_page + 1 };
+        self.loading_more_pulls = true;
+        let epoch = self.load_gen;
+        net::spawn(h, move || async move {
+            github::load_more_pulls(&cfg, &login, open, next_page).await
+        }, move |s: &mut App, r| {
+            if s.load_gen != epoch {
+                return;
+            }
+            s.loading_more_pulls = false;
+            match r {
+                Ok((items, total)) => {
+                    if open {
+                        s.open_pulls_page = next_page;
+                        s.data.open_pulls_total = Some(total);
+                    } else {
+                        s.closed_pulls_page = next_page;
+                        s.data.closed_pulls_total = Some(total);
+                    }
+                    for p in items {
+                        if !s.data.pulls.iter().any(|existing| existing.number == p.number && existing.repo.eq_ignore_ascii_case(&p.repo)) {
+                            s.data.pulls.push(p);
+                        }
+                    }
+                    s.sync_tray();
+                }
+                Err(e) => {
+                    s.notify_problem(format!("Could not load more pull requests: {e}"));
+                }
+            }
+        });
+    }
+
+    pub fn load_more_issues(&mut self) {
+        if self.loading_more_issues || self.data.sample {
+            return;
+        }
+        let Some(h) = self.handle.clone() else { return };
+        let cfg = self.cfg.clone();
+        let login = self.data.profile.login.clone();
+        if login.is_empty() {
+            return;
+        }
+        let mut orgs: Vec<String> = self.data.repos.iter().map(|r| r.owner.clone()).filter(|o| !o.eq_ignore_ascii_case(&login)).collect();
+        orgs.sort_by_key(|o| o.to_lowercase());
+        orgs.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+        let next_page = self.issues_page + 1;
+        self.loading_more_issues = true;
+        let epoch = self.load_gen;
+        net::spawn(h, move || async move {
+            github::load_more_issues(&cfg, &login, &orgs, next_page).await
+        }, move |s: &mut App, r| {
+            if s.load_gen != epoch {
+                return;
+            }
+            s.loading_more_issues = false;
+            match r {
+                Ok((items, total)) => {
+                    s.issues_page = next_page;
+                    s.data.issues_total = Some(total);
+                    for issue in items {
+                        if !s.data.issues.iter().any(|existing| existing.number == issue.number && existing.repo.eq_ignore_ascii_case(&issue.repo)) {
+                            s.data.issues.push(issue);
+                        }
+                    }
+                    s.data.issues.sort_by_key(|i| std::cmp::Reverse(i.created_at));
+                    s.sync_tray();
+                }
+                Err(e) => {
+                    s.notify_problem(format!("Could not load more issues: {e}"));
+                }
+            }
+        });
     }
 
     /// Stars or unstars repository `i`: on GitHub when a token is configured, locally otherwise.
@@ -2151,6 +2266,11 @@ fn init() -> App {
         acct_error: None,
         term_error: None,
         compact: starts_compact(),
+        open_pulls_page: 1,
+        closed_pulls_page: 1,
+        issues_page: 1,
+        loading_more_pulls: false,
+        loading_more_issues: false,
         #[cfg(not(target_arch = "wasm32"))]
         tray: None,
         tray_menu: Vec::new(),
@@ -2352,7 +2472,8 @@ fn pinned(s: &App) -> Vec<usize> {
 }
 
 fn sidebar(s: &App, k: &Kit) -> El {
-    let prs_capped = s.data.pulls.len() >= model::SEARCH_CAP;
+    let prs_capped = s.data.prs_capped();
+    let issues_capped = s.data.issues_capped();
     let open_prs = s.data.pulls.iter().filter(|p| matches!(p.state, PullState::Open | PullState::Draft)).count();
     let brand = row().w_full().h(40.0).px(10.0).gap(10.0).center_y()
         .child(row().size(26.0, 26.0).radius(7.0).center().fill(k.c.text_strong)
@@ -2376,7 +2497,7 @@ fn sidebar(s: &App, k: &Kit) -> El {
         .header(nav(s, k, "Overview", &icons::HOME, Page::Overview, None))
         .header(nav(s, k, "Repositories", &icons::REPO, Page::Repos, (!s.data.repos.is_empty()).then(|| s.data.repos.len().to_string())))
         .header(nav(s, k, "Pull requests", &icons::PULL, Page::Pulls, (open_prs > 0 || prs_capped).then(|| model::capped_if(open_prs, prs_capped))))
-        .header(nav(s, k, "Issues", &icons::ISSUE, Page::Issues, (!s.data.issues.is_empty()).then(|| model::capped(s.data.issues.len()))))
+        .header(nav(s, k, "Issues", &icons::ISSUE, Page::Issues, (!s.data.issues.is_empty() || issues_capped).then(|| model::capped_if(s.data.issues.len(), issues_capped))))
         .header(nav(s, k, "Actions", &icons::PLAY, Page::Actions, None))
         .section(SidebarSection::new("Pinned").count(pinned.len()).collapsed(!s.pinned_open)
             .on_toggle(|s: &mut App, _| s.pinned_open = !s.pinned_open).rows(pinned));
@@ -4685,6 +4806,7 @@ mod fix58_tests {
             remaining: Some("4999".into()),
             reset: None,
             retry_after: None,
+            link: None,
         };
         let msg_403 = gh.explain(&resp_403);
         assert!(msg_403.contains("rate limit"), "must explain rate limit: {msg_403}");
@@ -4697,6 +4819,7 @@ mod fix58_tests {
             remaining: None,
             reset: None,
             retry_after: Some(40),
+            link: None,
         };
         let msg_429 = gh.explain(&resp_429);
         assert!(msg_429.contains("40 s") || msg_429.contains("40"), "must mention retry duration: {msg_429}");
@@ -4710,6 +4833,7 @@ mod fix58_tests {
             remaining: Some("4999".into()),
             reset: None,
             retry_after: None,
+            link: None,
         };
         let msg_generic_403 = gh.explain(&resp_generic_403);
         assert!(msg_generic_403.contains("The token needs write access"), "generic 403 must explain write access: {msg_generic_403}");
@@ -4721,6 +4845,7 @@ mod fix58_tests {
             remaining: Some("0".into()),
             reset: Some(crate::net::now() + 600),
             retry_after: None,
+            link: None,
         };
         let msg_primary_403 = gh.explain(&resp_primary_403);
         assert!(msg_primary_403.contains("API rate limit reached."), "must start with API rate limit reached.: {msg_primary_403}");
@@ -4887,6 +5012,321 @@ mod fix58_tests {
         // branch_of removed for that repo, falling back to default branch ("main")
         assert!(!s.branch_of.contains_key(&repo_full), "deleted branch must be removed from branch_of");
         assert_eq!(s.branch(0), "main", "must fall back to default branch");
+    }
+
+    #[test]
+    fn paged_branches_stars_and_sorted_runs() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let server = MockServer::new(|_method, path| {
+            if path.contains("/repos/alice/repo1/branches?per_page=100") && !path.contains("page=2") {
+                let branches: Vec<serde_json::Value> = (1..=100)
+                    .map(|i| serde_json::json!({ "name": format!("feature-{i:03}") }))
+                    .collect();
+                (200, vec![
+                    ("Content-Type", "application/json"),
+                    ("Link", r#"<https://api.github.com/repos/alice/repo1/branches?per_page=100&page=2>; rel="next""#),
+                ], serde_json::to_string(&branches).unwrap())
+            } else if path.contains("/repos/alice/repo1/branches?per_page=100&page=2") {
+                let branches = serde_json::json!([
+                    { "name": "main" },
+                    { "name": "feature-101" }
+                ]);
+                (200, vec![("Content-Type", "application/json")], branches.to_string())
+            } else if path.contains("/user/starred?per_page=100") && !path.contains("page=2") {
+                let starred: Vec<serde_json::Value> = (1..=100)
+                    .map(|i| serde_json::json!({ "full_name": format!("owner/repo-{i:03}") }))
+                    .collect();
+                (200, vec![
+                    ("Content-Type", "application/json"),
+                    ("Link", r#"<https://api.github.com/user/starred?per_page=100&page=2>; rel="next""#),
+                ], serde_json::to_string(&starred).unwrap())
+            } else if path.contains("/user/starred?per_page=100&page=2") {
+                let starred = serde_json::json!([
+                    { "full_name": "owner/repo-101" },
+                    { "full_name": "alice/repo1" }
+                ]);
+                (200, vec![("Content-Type", "application/json")], starred.to_string())
+            } else if path.contains("/repos/alice/repo1/actions/runs") {
+                let runs = serde_json::json!({
+                    "workflow_runs": [
+                        { "name": "CI", "head_branch": "main", "status": "completed", "conclusion": "success", "run_started_at": "2026-11-09T08:00:00Z", "updated_at": "2026-11-09T08:30:00Z", "html_url": "https://github.com/alice/repo1/actions/runs/1" }
+                    ]
+                });
+                (200, vec![("Content-Type", "application/json")], runs.to_string())
+            } else if path.contains("/repos/alice/repo2/actions/runs") {
+                let runs = serde_json::json!({
+                    "workflow_runs": [
+                        { "name": "Release", "head_branch": "main", "status": "completed", "conclusion": "success", "run_started_at": "2026-11-09T09:00:00Z", "updated_at": "2026-11-09T09:30:00Z", "html_url": "https://github.com/alice/repo2/actions/runs/2" }
+                    ]
+                });
+                (200, vec![("Content-Type", "application/json")], runs.to_string())
+            } else if path.contains("/stats/participation") {
+                (200, vec![("Content-Type", "application/json")], "null".into())
+            } else if path.contains("/user/repos") {
+                let repos = serde_json::json!([
+                    { "name": "repo1", "full_name": "alice/repo1", "owner": { "login": "alice" }, "description": "", "language": "Rust", "stargazers_count": 10, "forks_count": 1, "open_issues_count": 2, "pushed_at": "2026-11-09T09:35:11Z", "private": false, "fork": false, "archived": false, "default_branch": "main", "topics": [], "html_url": "https://github.com/alice/repo1" },
+                    { "name": "repo2", "full_name": "alice/repo2", "owner": { "login": "alice" }, "description": "", "language": "Rust", "stargazers_count": 5, "forks_count": 0, "open_issues_count": 0, "pushed_at": "2026-11-09T09:30:00Z", "private": false, "fork": false, "archived": false, "default_branch": "main", "topics": [], "html_url": "https://github.com/alice/repo2" }
+                ]);
+                (200, vec![("Content-Type", "application/json")], repos.to_string())
+            } else if path.contains("/search/issues") && path.contains("is%3Aopen") && path.contains("is%3Apr") {
+                let pulls = serde_json::json!({
+                    "total_count": 132,
+                    "items": [
+                        { "number": 1, "title": "Add feature", "repository_url": "https://api.github.com/repos/alice/repo1", "user": { "login": "alice" }, "state": "open", "draft": false, "updated_at": "2026-11-09T10:00:00Z", "comments": 2, "html_url": "https://github.com/alice/repo1/pull/1" }
+                    ]
+                });
+                (200, vec![("Content-Type", "application/json")], pulls.to_string())
+            } else if path.contains("/search/issues") && path.contains("is%3Aclosed") && path.contains("is%3Apr") {
+                let pulls = serde_json::json!({
+                    "total_count": 200,
+                    "items": [
+                        { "number": 50, "title": "Old PR", "repository_url": "https://api.github.com/repos/alice/repo1", "user": { "login": "alice" }, "state": "closed", "draft": false, "updated_at": "2026-11-08T10:00:00Z", "comments": 1, "html_url": "https://github.com/alice/repo1/pull/50" }
+                    ]
+                });
+                (200, vec![("Content-Type", "application/json")], pulls.to_string())
+            } else if path.contains("/search/issues") && path.contains("is%3Aissue") {
+                let issues = serde_json::json!({
+                    "total_count": 75,
+                    "items": [
+                        { "number": 2, "title": "Bug report", "repository_url": "https://api.github.com/repos/alice/repo1", "created_at": "2026-11-09T10:00:00Z", "comments": 1, "html_url": "https://github.com/alice/repo1/issues/2" }
+                    ]
+                });
+                (200, vec![("Content-Type", "application/json")], issues.to_string())
+            } else if path.contains("/user") {
+                (200, vec![("Content-Type", "application/json")], r#"{"login":"alice","name":"Alice"}"#.into())
+            } else {
+                (200, vec![("Content-Type", "application/json")], "[]".into())
+            }
+        });
+
+        let mut cfg = Config::from_json("{}").unwrap();
+        cfg.api = server.url();
+        cfg.token = Some("tok_alice".into());
+        cfg.activity_repos = 2;
+
+        let gh = crate::github::Gh::new(&cfg);
+
+        // 1. Branches paged beyond 100 with default branch sorted first
+        let branch_list = pollster::block_on(gh.branches("alice/repo1", "main")).expect("branches load");
+        assert_eq!(branch_list.len(), 102, "paged branches beyond 100 loaded");
+        assert_eq!(branch_list[0], "main", "default branch must be first");
+        assert!(branch_list.contains(&"feature-001".to_string()));
+        assert!(branch_list.contains(&"feature-101".to_string()));
+
+        // 2. Load all: paged stars (beyond 100), sorted runs across repos, totals populated
+        let data = pollster::block_on(crate::github::load_all(&cfg)).expect("load_all succeeds");
+        assert!(data.repos[0].starred, "alice/repo1 was on page 2 of starred and must be starred=true");
+        assert_eq!(data.open_pulls_total, Some(132));
+        assert_eq!(data.closed_pulls_total, Some(200));
+        assert_eq!(data.pulls_total(), Some(332));
+        assert_eq!(data.issues_total, Some(75));
+        assert_eq!(data.runs.len(), 2);
+        // Runs sorted by updated_at descending: repo2 (09:30) before repo1 (08:30)
+        assert_eq!(data.runs[0].workflow, "Release");
+        assert_eq!(data.runs[1].workflow, "CI");
+        assert!(data.prs_capped());
+        assert!(data.issues_capped());
+
+        // Verify UI subtitles and metrics with capped/total counts
+        let mut app = crate::init();
+        app.data = data;
+        app.status = Status::Ready;
+        app.page = crate::Page::Pulls;
+
+        let menu = crate::tray::menu(&app);
+        let pulls_item = menu.iter().find(|e| e.id == "go:pulls").expect("go:pulls");
+        assert_eq!(pulls_item.label, "1+ open pull requests");
+        let issues_item = menu.iter().find(|e| e.id == "go:issues").expect("go:issues");
+        assert_eq!(issues_item.label, "1+ open issues");
+
+        let mut rt = rune::Runtime::new(app, crate::view, (1180.0, 2400.0), rune::Env::new(true, 1.0));
+        rt.frame(0.0);
+        assert!(rt.elements().iter().any(|e| e.text.as_deref().is_some_and(|t| t.contains("Showing 1 of 132 open pull requests"))), "PR subtitle shows 'Showing 1 of 132 open pull requests'");
+        assert!(rt.elements().iter().any(|e| e.key.as_deref() == Some("pulls-load-more")), "Load more button exists on Pulls");
+
+        rt.update(|s, _| s.page = crate::Page::Issues);
+        rt.frame(0.0);
+        assert!(rt.elements().iter().any(|e| e.text.as_deref().is_some_and(|t| t.contains("Showing 1 of 75"))), "Issues subtitle shows 'Showing 1 of 75'");
+        assert!(rt.elements().iter().any(|e| e.key.as_deref() == Some("issues-load-more")), "Load more button exists on Issues");
+    }
+
+    #[test]
+    fn prs_capped_no_zero_plus_regression() {
+        // When there are 0 open PRs, but closed_pulls_total has 200, prs_capped() must be false!
+        let data = Data {
+            pulls: vec![
+                model::Pull {
+                    number: 1,
+                    title: "Closed PR".into(),
+                    repo: "alice/repo1".into(),
+                    author: "alice".into(),
+                    state: model::PullState::Closed,
+                    checks: None,
+                    updated_at: 1000,
+                    comments: 0,
+                    url: String::new(),
+                }
+            ],
+            open_pulls_total: Some(0),
+            closed_pulls_total: Some(200),
+            ..Data::default()
+        };
+        assert!(!data.prs_capped(), "0 open PRs must NOT be capped even if closed_pulls_total is 200");
+    }
+
+    #[test]
+    fn branches_default_branch_guaranteed_when_past_ten_pages() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let server = MockServer::new(|_method, path| {
+            if path.contains("/branches") {
+                let branches: Vec<serde_json::Value> = (1..=100)
+                    .map(|i| serde_json::json!({ "name": format!("feature-{i:03}") }))
+                    .collect();
+                (200, vec![
+                    ("Content-Type", "application/json"),
+                    ("Link", r#"<https://api.github.com/repos/alice/huge/branches?per_page=100&page=2>; rel="next""#),
+                ], serde_json::to_string(&branches).unwrap())
+            } else {
+                (200, vec![("Content-Type", "application/json")], "[]".into())
+            }
+        });
+
+        let mut cfg = Config::from_json("{}").unwrap();
+        cfg.api = server.url();
+        cfg.token = Some("tok".into());
+
+        let gh = crate::github::Gh::new(&cfg);
+        let branches = pollster::block_on(gh.branches("alice/huge", "main")).expect("branches load");
+        assert_eq!(branches[0], "main", "default branch 'main' must be index 0 even if omitted from first 10 pages");
+    }
+
+    #[test]
+    fn issues_chunking_with_more_than_twenty_orgs() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let server = MockServer::new(|_method, path| {
+            if path.contains("/search/issues") {
+                if path.contains("user%3Aalice") {
+                    let res = serde_json::json!({
+                        "total_count": 10,
+                        "items": [
+                            { "number": 1, "title": "Chunk 1 issue", "repository_url": "https://api.github.com/repos/alice/repo1", "created_at": "2026-11-09T10:00:00Z", "comments": 0, "html_url": "https://github.com/alice/repo1/issues/1" }
+                        ]
+                    });
+                    (200, vec![("Content-Type", "application/json")], res.to_string())
+                } else {
+                    let res = serde_json::json!({
+                        "total_count": 5,
+                        "items": [
+                            { "number": 2, "title": "Chunk 2 issue", "repository_url": "https://api.github.com/repos/org25/repo2", "created_at": "2026-11-09T11:00:00Z", "comments": 0, "html_url": "https://github.com/org25/repo2/issues/2" }
+                        ]
+                    });
+                    (200, vec![("Content-Type", "application/json")], res.to_string())
+                }
+            } else {
+                (200, vec![("Content-Type", "application/json")], "[]".into())
+            }
+        });
+
+        let mut cfg = Config::from_json("{}").unwrap();
+        cfg.api = server.url();
+        cfg.token = Some("tok".into());
+
+        let gh = crate::github::Gh::new(&cfg);
+        let orgs: Vec<String> = (1..=25).map(|i| format!("org{i}")).collect();
+        let (issues, total) = pollster::block_on(gh.issues("alice", &orgs)).expect("issues load");
+        assert_eq!(total, 15, "sum of chunk totals: 10 + 5 = 15");
+        assert_eq!(issues.len(), 2, "both chunk issues merged");
+        assert_eq!(issues[0].title, "Chunk 2 issue", "sorted newest first");
+    }
+
+    #[test]
+    fn load_more_pulls_and_issues_pages() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let server = MockServer::new(|_method, path| {
+            if path.contains("/search/issues") && path.contains("is%3Apr") && path.contains("page=2") {
+                let pulls = serde_json::json!({
+                    "total_count": 2,
+                    "items": [
+                        { "number": 1, "title": "Dupe PR", "repository_url": "https://api.github.com/repos/alice/repo1", "user": { "login": "alice" }, "state": "open", "draft": false, "updated_at": "2026-11-09T10:00:00Z", "comments": 2, "html_url": "https://github.com/alice/repo1/pull/1" },
+                        { "number": 2, "title": "Page 2 PR", "repository_url": "https://api.github.com/repos/alice/repo1", "user": { "login": "alice" }, "state": "open", "draft": false, "updated_at": "2026-11-09T09:00:00Z", "comments": 0, "html_url": "https://github.com/alice/repo1/pull/2" }
+                    ]
+                });
+                (200, vec![("Content-Type", "application/json")], pulls.to_string())
+            } else if path.contains("/search/issues") && path.contains("is%3Aissue") && path.contains("page=2") {
+                let issues = serde_json::json!({
+                    "total_count": 2,
+                    "items": [
+                        { "number": 10, "title": "Page 2 Issue", "repository_url": "https://api.github.com/repos/alice/repo1", "created_at": "2026-11-09T12:00:00Z", "comments": 0, "html_url": "https://github.com/alice/repo1/issues/10" }
+                    ]
+                });
+                (200, vec![("Content-Type", "application/json")], issues.to_string())
+            } else {
+                (200, vec![("Content-Type", "application/json")], "[]".into())
+            }
+        });
+
+        let mut cfg = Config::from_json("{}").unwrap();
+        cfg.api = server.url();
+        cfg.token = Some("tok".into());
+
+        let gh = crate::github::Gh::new(&cfg);
+
+        // Load more pulls page 2 deduplicates against page 1
+        let (pulls, total) = pollster::block_on(gh.pulls_page("alice", true, 2)).expect("pulls_page succeeds");
+        assert_eq!(total, 2);
+        assert_eq!(pulls.len(), 2);
+
+        // Load more issues page 2
+        let (issues, total) = pollster::block_on(gh.issues_page("alice", &[], 2)).expect("issues_page succeeds");
+        assert_eq!(total, 2);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].title, "Page 2 Issue");
+    }
+
+    #[test]
+    fn public_orgs_and_repos_pagination_caps() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let server = MockServer::new(|_method, path| {
+            if path.contains("/users/alice/orgs") && !path.contains("page=2") {
+                let orgs: Vec<serde_json::Value> = (1..=100)
+                    .map(|i| serde_json::json!({ "login": format!("org{i:03}") }))
+                    .collect();
+                (200, vec![
+                    ("Content-Type", "application/json"),
+                    ("Link", r#"<https://api.github.com/users/alice/orgs?per_page=100&page=2>; rel="next""#),
+                ], serde_json::to_string(&orgs).unwrap())
+            } else if path.contains("/users/alice/orgs?per_page=100&page=2") {
+                let orgs = serde_json::json!([
+                    { "login": "org101" }
+                ]);
+                (200, vec![("Content-Type", "application/json")], orgs.to_string())
+            } else if path.contains("/users/alice/repos") {
+                (200, vec![("Content-Type", "application/json")], "[]".into())
+            } else if path.contains("/orgs/") && path.contains("/repos") {
+                let repos = serde_json::json!([
+                    { "name": "repo", "full_name": "org/repo", "owner": { "login": "org" }, "description": "", "language": "Rust", "stargazers_count": 0, "forks_count": 0, "open_issues_count": 0, "pushed_at": "2026-11-09T09:30:00Z", "private": false, "fork": false, "archived": false, "default_branch": "main", "topics": [], "html_url": "https://github.com/org/repo" }
+                ]);
+                (200, vec![("Content-Type", "application/json")], repos.to_string())
+            } else {
+                (200, vec![("Content-Type", "application/json")], "[]".into())
+            }
+        });
+
+        let mut cfg = Config::from_json("{}").unwrap();
+        cfg.api = server.url();
+        cfg.token = None; // unauthenticated: calls public orgs flow
+        cfg.max_repos = 500;
+
+        let gh = crate::github::Gh::new(&cfg);
+        let mut warnings = Vec::new();
+        let (repos, repos_capped) = pollster::block_on(gh.repos(&cfg, "alice", false, &mut warnings)).expect("repos load");
+        assert!(repos_capped, "101 orgs > 50 must set repos_capped = true");
+        assert_eq!(repos.len(), 50, "only first 50 orgs queried");
     }
 }
 

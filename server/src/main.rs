@@ -661,7 +661,7 @@ fn proxy(cfg: &Cfg, mut req: Request) {
     };
     let status = resp.status();
     let mut headers = vec![h("Cache-Control", "no-store")];
-    for name in ["Content-Type", "x-ratelimit-remaining", "x-ratelimit-reset", "x-ratelimit-limit", "retry-after"] {
+    for name in ["Content-Type", "x-ratelimit-remaining", "x-ratelimit-reset", "x-ratelimit-limit", "retry-after", "link"] {
         if let Some(v) = resp.header(name) {
             headers.push(h(name, v));
         }
@@ -1082,7 +1082,10 @@ mod tests {
             for req in up.incoming_requests() {
                 let auth = req.headers().iter().find(|h| h.field.as_str().as_str().eq_ignore_ascii_case("Authorization")).map(|h| h.value.as_str().to_owned());
                 let body = format!("{{\"ok\":true,\"auth\":{}}}", json_str(&auth.unwrap_or_default()));
-                let resp = Response::from_string(body).with_status_code(200).with_header(Header::from_bytes("Content-Type", "application/json").unwrap());
+                let resp = Response::from_string(body)
+                    .with_status_code(200)
+                    .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
+                    .with_header(Header::from_bytes("Link", "<https://api.github.com/user/repos?page=2>; rel=\"next\"").unwrap());
                 let _ = req.respond(resp);
             }
         });
@@ -1249,14 +1252,15 @@ mod tests {
         assert_eq!(status, 403);
         assert!(body.contains("Endpoint not allowed"));
 
-        // 6. Allowed endpoint with matching Origin -> 200 and forwards token
-        let (status, body, _) = http_status(
-            client.get(&format!("{base_url}/gh/user"))
-                .set("Cookie", cookie_val)
-                .set("Origin", &matching_origin)
-                .call()
-        );
-        assert_eq!(status, 200);
+        // 6. Allowed endpoint with matching Origin -> 200 and forwards token and link header
+        let r_user = client.get(&format!("{base_url}/gh/user"))
+            .set("Cookie", cookie_val)
+            .set("Origin", &matching_origin)
+            .call()
+            .unwrap();
+        assert_eq!(r_user.status(), 200);
+        assert_eq!(r_user.header("link"), Some("<https://api.github.com/user/repos?page=2>; rel=\"next\""));
+        let body = r_user.into_string().unwrap_or_default();
         assert!(body.contains("gh_token_12345"));
 
         // 7. Allowed endpoint via Authorization: Bearer

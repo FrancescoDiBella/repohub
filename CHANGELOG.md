@@ -68,6 +68,12 @@ The sections are **Added**, **Changed** and **Fixed**.
 - A new look, with a more readable layout.
 
 ### Fixed
+- Lists page through GitHub results with the `Link` header rather than stopping at the first page:
+  branches and starred repositories page beyond 100 with default branches preserved first, public orgs
+  and repositories page via `Link` headers, workflow runs across all active repositories are sorted newest
+  first before truncating, and pull requests are split into open and closed queries so open PRs are never
+  pushed out by closed PRs. Pull requests and Issues pages include a **Load more** button to fetch subsequent
+  pages up to 1,000 items, and UI badges, metrics, and headings display accurate counts and capped indicators.
 - Data loading and caching handles partial failures and rate limits gracefully: failed repository
   details and branch lists are retried rather than permanently cached, errored details are dropped
   on refresh while clean details for unpushed repositories are preserved, and deleted branches fall

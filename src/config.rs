@@ -92,6 +92,23 @@ impl std::fmt::Debug for Config {
     }
 }
 
+impl Config {
+    /// Root URL for opening web pages on GitHub (or GitHub Enterprise).
+    pub fn web_root(&self) -> String {
+        let api = self.api.trim_end_matches('/');
+        if api == "https://api.github.com" {
+            "https://github.com".into()
+        } else if let Some(stripped) = api.strip_suffix("/api/v3") {
+            stripped.into()
+        } else if let Some((scheme, rest)) = api.split_once("://") {
+            let host = rest.split(['/', ':']).next().unwrap_or(rest);
+            format!("{scheme}://{host}")
+        } else {
+            "https://github.com".into()
+        }
+    }
+}
+
 fn flag(v: Option<String>, default: bool) -> bool {
     match v.as_deref().map(str::trim).map(str::to_ascii_lowercase).as_deref() {
         Some("1" | "true" | "yes" | "si" | "on") => true,
