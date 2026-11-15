@@ -68,6 +68,13 @@ The sections are **Added**, **Changed** and **Fixed**.
 - A new look, with a more readable layout.
 
 ### Fixed
+- `repohub-server` is hardened against unauthorized access, CORS bypasses, and directory traversal:
+  a shared secret (`REPOHUB_SECRET`) is required when bound to non-loopback addresses and accepted via
+  an `HttpOnly` cookie or bearer header; writes default to disabled on non-loopback bindings and require
+  `REPOHUB_ALLOW_WRITES=true`, `X-RepoHub: 1` and `Content-Type: application/json`; full `Origin`
+  schemes, hosts and ports are verified against `Host`; encoded directory traversal (`%2e%2e`, `\`,
+  control characters) is blocked; the proxied GET allowlist is narrowed to exact app endpoints; notes
+  storage enforces a configurable total size cap; and static file serving validates canonical paths.
 - `GITHUB_TOKEN` and `GITHUB_USER` are parsed directly into app configuration and never written
   to the process environment. Every child process spawned by RepoHub (terminal shells, Claude Code,
   local git operations, plugin git clones, and updater helper processes) explicitly removes

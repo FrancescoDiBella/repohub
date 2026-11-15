@@ -48,6 +48,8 @@ impl Form {
 pub fn blocked(s: &App) -> Option<&'static str> {
     if s.data.sample || !s.cfg.live() {
         Some("This is sample data. Connect your GitHub account in Settings to make changes.")
+    } else if !s.cfg.allow_writes {
+        Some("Writes are disabled on this server (set REPOHUB_ALLOW_WRITES=true).")
     } else if s.cfg.token.is_none() {
         Some("Changes need a token with write access. Add one in Settings (desktop) or GITHUB_TOKEN in .env (Docker).")
     } else {

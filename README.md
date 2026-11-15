@@ -49,13 +49,21 @@ What this means for the token:
 - The token never leaves the container. The page never receives it: `config.json` only says
   whether a token is set.
 - The port is published on this computer only (`127.0.0.1:8080`).
-- The server forwards only the endpoints RepoHub uses: reads, and writes for starring only.
-- The server refuses requests from other origins or with an unknown `Host` header, which blocks
-  DNS rebinding.
+- The server forwards only the exact endpoints RepoHub uses: reads, starring, creating issues,
+  branches and pull requests, closing issues, and merging pull requests. Nothing that deletes or
+  rewrites repositories.
+- When `REPOHUB_ALLOW_WRITES` is off (the default whenever binding to a non-loopback address),
+  all write methods (`POST`, `PUT`, `PATCH`, `DELETE`) are rejected with `403 Forbidden`.
+- The server compares the full `Origin` (scheme, host and port) against `Host`, requires `X-RepoHub: 1`
+  and `Content-Type: application/json` on writes to trigger browser CORS preflights, and refuses
+  requests with an unknown `Host` header to block DNS rebinding.
+- When bound to a non-loopback address (e.g. `0.0.0.0:8080` in Docker), `REPOHUB_SECRET` is required;
+  the server unlocks via an `HttpOnly` cookie or an `Authorization: Bearer <secret>` header.
 
-To reach RepoHub from another device on your network, change `ports` in `compose.yaml` and add
-the host name to `REPOHUB_ALLOWED_HOSTS`. Do this only on a network you trust: anyone who can
-reach the port uses your token.
+To reach RepoHub from another device on your network, set `REPOHUB_SECRET` in `.env`, change `ports`
+in `compose.yaml` (or run with `-p 8080:8080`), and add the host name to `REPOHUB_ALLOWED_HOSTS`.
+Optionally enable writes with `REPOHUB_ALLOW_WRITES=true`. Do this only on a network you trust:
+anyone with the secret uses your token.
 
 ### On your phone
 
