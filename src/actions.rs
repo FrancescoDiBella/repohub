@@ -91,23 +91,33 @@ pub fn branch_panel(s: &App, k: &Kit, i: usize, slot: BranchSlot, current: &str)
         None | Some(Load::Loading) => list = list.child(text("Loading branches…").font(k.ty.small).color(k.c.text_muted).padding(10.0)),
         Some(Load::Failed(e)) => list = list.child(text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap().padding(10.0)),
         Some(Load::Ready(names)) => {
-            let shown: Vec<&String> = names.iter().filter(|n| q.is_empty() || n.to_lowercase().contains(&q)).take(30).collect();
-            if shown.is_empty() {
+            let matching: Vec<&String> = names.iter().filter(|n| q.is_empty() || n.to_lowercase().contains(&q)).collect();
+            if matching.is_empty() {
                 list = list.child(text(if names.is_empty() { "This repository has no branches yet." } else { "No branch matches." })
                     .font(k.ty.small).color(k.c.text_muted).padding(10.0));
             }
-            for name in shown {
-                let n = name.clone();
-                let on = name == current;
+            for name in matching.iter().take(30) {
+                let n = (*name).clone();
+                let on = *name == current;
                 let mut line = row().w_full().px(10.0).py(7.0).gap(8.0).center_y().radius(k.radius.md).hover(k.c.hover).press(k.c.pressed)
-                    .role("option").label(name.clone()).key(format!("pick-{name}"))
+                    .role("option").label(n.clone()).key(format!("pick-{n}"))
                     .on_press(move |s: &mut App| s.pick_branch_for(i, slot, n.clone()))
                     .child(ui::ico(if on { &icons::CHECK } else { &icons::BRANCH }, 14.0, if on { k.c.success.icon } else { k.c.icon_muted }))
-                    .child(text(name.clone()).font(k.ty.mono).color(k.c.text_base).grow(1.0).shrink().max_lines(1));
-                if *name == r.branch {
+                    .child(text((*name).clone()).font(k.ty.mono).color(k.c.text_base).grow(1.0).shrink().max_lines(1));
+                if **name == r.branch {
                     line = line.child(ui::pill(k, "default", k.c.text_muted));
                 }
                 list = list.child(line);
+            }
+            if matching.len() > 30 {
+                let branches_url = format!("{}/branches", r.url);
+                list = list.child(
+                    row().w_full().px(10.0).py(6.0).gap(6.0).center_y().justify_between().hover(k.c.hover).press(k.c.pressed)
+                        .role("link").label(format!("Showing 30 of {} branches. View all on GitHub", matching.len())).key("branches-more")
+                        .on_press_tx(move |_: &mut App, tx| { let _ = tx.open_url(&branches_url); })
+                        .child(text(format!("Showing 30 of {} matching branches", matching.len())).font(k.ty.small).color(k.c.text_muted))
+                        .child(row().gap(4.0).center_y().child(text("GitHub").font(k.ty.small).color(k.c.text_accent)).child(ui::ico(&icons::EXTERNAL, 12.0, k.c.text_accent))),
+                );
             }
         }
     }

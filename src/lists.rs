@@ -95,15 +95,24 @@ pub const PR_LABELS: [&str; 4] = ["Open", "Drafts", "Merged", "Closed"];
 
 pub fn pulls(s: &App, k: &Kit) -> El {
     let rows: Vec<El> = s.data.pulls.iter().filter(|p| p.state == s.pr_filter).map(|p| crate::actions::pull_line(s, k, p, s.compact)).collect();
-    let sub = if s.data.sample {
-        "Pull requests you opened or that wait for your review."
-    } else if s.data.pulls.len() >= crate::model::SEARCH_CAP {
-        "The 40 most recently updated pull requests you're involved in (author, reviewer, assignee or mentioned). Click one to open it on GitHub."
+    let action = if !s.data.sample && s.data.prs_capped() {
+        let me = &s.data.profile.login;
+        let url = format!("{}/pulls?q=is%3Apr+involves%3A{me}", s.cfg.web_root());
+        Some(open_button(k, "Open on GitHub", &url, "pulls-gh"))
     } else {
-        "Pull requests you're involved in (author, reviewer, assignee or mentioned). Click one to open it on GitHub."
+        None
+    };
+    let sub = if s.data.sample {
+        "Pull requests you opened or that wait for your review.".to_owned()
+    } else if let Some(total) = s.data.pulls_total.filter(|&t| t > s.data.pulls.len()) {
+        format!("Showing {} of {} pull requests you're involved in. Click one to open it on GitHub.", s.data.pulls.len(), total)
+    } else if s.data.pulls.len() >= crate::model::SEARCH_CAP {
+        format!("The {} most recently updated pull requests you're involved in (author, reviewer, assignee or mentioned). Click one to open it on GitHub.", s.data.pulls.len())
+    } else {
+        "Pull requests you're involved in (author, reviewer, assignee or mentioned). Click one to open it on GitHub.".to_owned()
     };
     col().w_full().gap(16.0)
-        .child(heading(k, "Pull requests", sub, None))
+        .child(heading(k, "Pull requests", &sub, action))
         .children(crate::changes_page::pull_panel(s, k))
         .child(SegmentedControl::new(&PR_LABELS, PR_STATES.iter().position(|p| *p == s.pr_filter)).label("State").fit()
             .on_pick(|s: &mut App, i, _| s.pr_filter = PR_STATES[i.min(3)]).build(k).key("pr-filter"))
@@ -111,21 +120,41 @@ pub fn pulls(s: &App, k: &Kit) -> El {
 }
 
 pub fn issues(s: &App, k: &Kit) -> El {
-    let sub = if s.data.issues.len() >= crate::model::SEARCH_CAP {
-        "The 40 most recently updated open issues in your repositories. Click one to open it on GitHub."
+    let action = if !s.data.sample && s.data.issues_capped() {
+        let me = &s.data.profile.login;
+        let url = format!("{}/issues?q=is%3Aissue+is%3Aopen+archived%3Afalse+user%3A{me}", s.cfg.web_root());
+        Some(open_button(k, "Open on GitHub", &url, "issues-gh"))
     } else {
-        "Open issues in your repositories. Click one to open it on GitHub."
+        None
+    };
+    let sub = if let Some(total) = s.data.issues_total.filter(|&t| t > s.data.issues.len()) {
+        format!("Showing {} of {} open issues in your repositories. Click one to open it on GitHub.", s.data.issues.len(), total)
+    } else if s.data.issues.len() >= crate::model::SEARCH_CAP {
+        format!("The {} most recently updated open issues in your repositories. Click one to open it on GitHub.", s.data.issues.len())
+    } else {
+        "Open issues in your repositories. Click one to open it on GitHub.".to_owned()
     };
     col().w_full().gap(16.0)
-        .child(heading(k, "Issues", sub, None))
+        .child(heading(k, "Issues", &sub, action))
         .child(listing(k, s.data.issues.iter().map(|i| crate::actions::issue_line(s, k, i)).collect(), "No open issues"))
 }
 
 pub fn actions(s: &App, k: &Kit) -> El {
     let ok = s.data.runs.iter().filter(|r| r.checks == Checks::Passing).count();
-    let sub = format!("{ok} of {} recent runs succeeded · {} most recently pushed repositories", s.data.runs.len(), s.cfg.activity_repos);
+    let action = if !s.data.sample && s.data.runs_total > s.data.runs.len() {
+        let me = &s.data.profile.login;
+        let url = format!("{}/{me}", s.cfg.web_root());
+        Some(open_button(k, "Open on GitHub", &url, "actions-gh"))
+    } else {
+        None
+    };
+    let sub = if s.data.runs_total > s.data.runs.len() {
+        format!("Showing {} of {} recent runs ({} succeeded) · {} most recently pushed repositories", s.data.runs.len(), s.data.runs_total, ok, s.cfg.activity_repos)
+    } else {
+        format!("{ok} of {} recent runs succeeded · {} most recently pushed repositories", s.data.runs.len(), s.cfg.activity_repos)
+    };
     col().w_full().gap(16.0)
-        .child(heading(k, "Actions", &sub, None))
+        .child(heading(k, "Actions", &sub, action))
         .child(listing(k, s.data.runs.iter().map(|r| run_row(k, r, s.now, s.compact)).collect(), "No recent runs"))
 }
 

@@ -37,7 +37,8 @@ pub fn open_button(k: &Kit, label: &str, url: &str, key: &str) -> El {
 
 pub fn overview(s: &App, k: &Kit) -> El {
     let d = &s.data;
-    let prs_capped = d.pulls.len() >= crate::model::SEARCH_CAP;
+    let prs_capped = d.prs_capped();
+    let issues_capped = d.issues_capped();
     let open_prs = d.pulls.iter().filter(|p| matches!(p.state, PullState::Open | PullState::Draft)).count();
     let issues = d.issues.len();
     let metric = |icon, value: String, caption, tint, page: Page| {
@@ -50,7 +51,7 @@ pub fn overview(s: &App, k: &Kit) -> El {
         .child(metric(&icons::REPO, d.repos.len().to_string(), "Repositories", k.c.info.icon, Page::Repos))
         .child(metric(&icons::STAR, s.starred_count().to_string(), "Stars received", k.c.warning.icon, Page::Repos))
         .child(metric(&icons::PULL, crate::model::capped_if(open_prs, prs_capped), "Open pull requests", k.c.success.icon, Page::Pulls))
-        .child(metric(&icons::ISSUE, crate::model::capped(issues), "Open issues", k.c.danger.icon, Page::Issues));
+        .child(metric(&icons::ISSUE, crate::model::capped_if(issues, issues_capped), "Open issues", k.c.danger.icon, Page::Issues));
     let commits: u32 = d.activity.iter().sum();
     let activity = panel(k)
         .child(panel_head(k, "Activity · last 26 weeks", Some(text(format!("{commits} commits")).font(k.ty.small).color(k.c.text_muted))))
@@ -146,8 +147,13 @@ pub fn repos(s: &App, k: &Kit) -> El {
             .child(ui::ico(&icons::REPO, 24.0, k.c.icon_faint))
             .child(text(msg).font(k.ty.ui).color(k.c.text_muted)));
     }
+    let sub = if s.data.repos_capped {
+        format!("{} of {}+ repositories", shown.len(), all.len())
+    } else {
+        format!("{} of {} repositories", shown.len(), all.len())
+    };
     col().w_full().gap(16.0)
-        .child(heading(k, "Repositories", &format!("{} of {} repositories", shown.len(), all.len()), Some(new_repo_button(k))))
+        .child(heading(k, "Repositories", &sub, Some(new_repo_button(k))))
         .child(owners)
         .child(row().w_full().gap(12.0).center_y().flex_wrap().child(search).child(seg).child(sort))
         .child(list)
@@ -370,6 +376,16 @@ fn code_tab(s: &App, k: &Kit, i: usize, r: &Repo) -> El {
                         .child(ui::ico(if *dir { &icons::FOLDER } else { &icons::FILE }, 16.0, if *dir { k.c.info.icon } else { k.c.icon_muted }))
                         .child(text(name.clone()).font(k.ty.small).color(k.c.text_base).grow(1.0).shrink())
                         .child(ui::ico(&icons::EXTERNAL, 13.0, k.c.icon_faint)),
+                );
+            }
+            if d.files.len() > 40 {
+                let tree_url = format!("{}/tree/{}", r.url, at);
+                files = files.child(rule(k)).child(
+                    row().w_full().px(16.0).py(9.0).gap(8.0).center_y().justify_between().hover(k.c.hover).press(k.c.pressed)
+                        .role("link").label(format!("Showing 40 of {} files. Open all on GitHub", d.files.len())).key("files-more")
+                        .on_press_tx(move |_: &mut App, tx| { let _ = tx.open_url(&tree_url); })
+                        .child(text(format!("Showing 40 of {} files", d.files.len())).font(k.ty.small).color(k.c.text_muted))
+                        .child(row().gap(6.0).center_y().child(text("Open on GitHub").font(k.ty.small).color(k.c.text_accent)).child(ui::ico(&icons::EXTERNAL, 13.0, k.c.text_accent))),
                 );
             }
         }

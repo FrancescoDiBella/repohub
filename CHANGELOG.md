@@ -68,6 +68,12 @@ The sections are **Added**, **Changed** and **Fixed**.
 - A new look, with a more readable layout.
 
 ### Fixed
+- Lists page through GitHub results with the `Link` header rather than stopping at the first page:
+  branches and starred repositories page beyond 100 with default branches preserved first, repositories
+  page up to `REPOHUB_MAX_REPOS` and track when capped, workflow runs across all active repositories are
+  sorted newest first before truncating, and search endpoints capture total issue and pull request counts.
+  UI badges, metrics, and page headings show exact totals ("Showing N of M") or capped indicators ("40+")
+  along with direct links to view the complete list on GitHub when limits are exceeded.
 - Data loading and caching handles partial failures and rate limits gracefully: failed repository
   details and branch lists are retried rather than permanently cached, errored details are dropped
   on refresh while clean details for unpushed repositories are preserved, and deleted branches fall

@@ -76,8 +76,8 @@ fn plural_capped(n: usize, full: bool, one: &str, many: &str) -> String {
 pub fn menu(s: &App) -> Vec<Entry> {
     use crate::model::{Checks, PullState, SEARCH_CAP};
     let d = &s.data;
-    let prs_capped = d.pulls.len() >= SEARCH_CAP;
-    let issues_capped = d.issues.len() >= SEARCH_CAP;
+    let prs_capped = d.prs_capped();
+    let issues_capped = d.issues_capped();
     let prs = d.pulls.iter().filter(|p| matches!(p.state, PullState::Open | PullState::Draft)).count();
     let failed = d.runs.iter().filter(|r| r.checks == Checks::Failing).count();
     let mut m = vec![
@@ -97,7 +97,7 @@ pub fn menu(s: &App) -> Vec<Entry> {
     };
     let issues_label = if d.issues_failed && d.issues.is_empty() {
         "Issues couldn't load".into()
-    } else if d.issues.is_empty() {
+    } else if d.issues.is_empty() && !issues_capped {
         "No open issues".into()
     } else {
         plural_capped(d.issues.len().min(SEARCH_CAP), issues_capped, "open issue", "open issues")
@@ -148,7 +148,7 @@ pub fn menu(s: &App) -> Vec<Entry> {
 
 /// The tooltip: the app's name and what waits for you.
 pub fn tooltip(s: &App) -> String {
-    let prs_capped = s.data.pulls.len() >= crate::model::SEARCH_CAP;
+    let prs_capped = s.data.prs_capped();
     let prs = s.data.pulls.iter().filter(|p| matches!(p.state, crate::model::PullState::Open | crate::model::PullState::Draft)).count();
     format!("{} · {}", s.cfg.title, plural_capped(prs, prs_capped, "open pull request", "open pull requests"))
 }

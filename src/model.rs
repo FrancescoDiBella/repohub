@@ -156,6 +156,10 @@ pub struct Data {
     pub retry_after: Option<u64>,
     /// True for the built-in sample data.
     pub sample: bool,
+    pub pulls_total: Option<usize>,
+    pub issues_total: Option<usize>,
+    pub runs_total: usize,
+    pub repos_capped: bool,
 }
 
 /// A stable hue for a language name, close to GitHub's colours for the common ones.
@@ -246,8 +250,16 @@ pub fn capped_if(n: usize, full: bool) -> String {
 }
 
 /// Formats a count from a search list that is itself filtered to what it counts ("40+" at [`SEARCH_CAP`]).
+#[allow(dead_code)]
 pub fn capped(n: usize) -> String {
     capped_if(n.min(SEARCH_CAP), n >= SEARCH_CAP)
+}
+
+/// `a` and `b` name the same repository (`owner/name`, or only the name).
+pub fn same_repo(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
+        || a.rsplit('/').next().is_some_and(|n| b.eq_ignore_ascii_case(n))
+        || b.rsplit('/').next().is_some_and(|n| a.eq_ignore_ascii_case(n))
 }
 
 /// "41s", "3m 05s", "1h 02m".
@@ -276,6 +288,20 @@ pub fn sample_detail(r: &Repo) -> Detail {
 }
 
 impl Data {
+    pub fn prs_capped(&self) -> bool {
+        match self.pulls_total {
+            Some(total) => total > self.pulls.len(),
+            None => self.pulls.len() >= SEARCH_CAP,
+        }
+    }
+
+    pub fn issues_capped(&self) -> bool {
+        match self.issues_total {
+            Some(total) => total > self.issues.len(),
+            None => self.issues.len() >= SEARCH_CAP,
+        }
+    }
+
     /// Nothing worth remembering a place in: the sample data, or nothing loaded yet.
     pub fn sample_or_empty(&self) -> bool {
         self.sample || self.repos.is_empty()
@@ -367,6 +393,10 @@ impl Data {
             runs_failed: false,
             retry_after: None,
             sample: true,
+            pulls_total: None,
+            issues_total: None,
+            runs_total: 5,
+            repos_capped: false,
         }
     }
 }
