@@ -650,6 +650,19 @@ impl App {
         }
     }
 
+    /// Picks the board's colour, and recolours the selection too, as Excalidraw does.
+    fn pick_board_color(&mut self, ci: usize) {
+        let Some(b) = self.board.as_mut().filter(|b| b.save != Save::Loading) else { return };
+        b.color = ci;
+        if let Some(e) = b.selected.and_then(|i| b.elements.get_mut(i)) {
+            e.stroke = board::STROKES[ci].to_owned();
+            if e.fill.is_some() {
+                e.fill = Some(board::FILLS[ci].to_owned());
+            }
+            self.save_board();
+        }
+    }
+
     /// True when the board editor is on screen (and so takes its keyboard shortcuts).
     fn editing_board(&self) -> bool {
         self.board.is_some() && self.tab == RepoTab::Notes && matches!(self.page, Page::Repo(_))
@@ -2323,6 +2336,21 @@ fn init() -> App {
     if let Some(t) = arg("tab").and_then(|t| RepoTab::parse(&t)) {
         s.tab = t;
     }
+    // `-- board Name` opens a drawing of that section (for headless stills); `zoom 2` zooms it.
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(name) = arg("board")
+        && matches!(s.page, Page::Repo(_))
+        && let Some((full, branch)) = s.notes_branch(0)
+    {
+        let mut b = board::Board::new(&full, &branch, &name);
+        if let Ok(Some(json)) = pollster::block_on(notes::load(&full, &branch, &name)) {
+            let _ = b.load_json(&json);
+        }
+        b.tool = board::Tool::Pen;
+        b.view.zoom = arg("zoom").and_then(|z| z.parse().ok()).unwrap_or(0.0);
+        s.tab = RepoTab::Notes;
+        s.board = Some(b);
+    }
     // The arrangement and the place of last time; a page on the command line (scripts) wins.
     if let Some(l) = prefs::get("layout").as_ref().and_then(state::Layout::from_json) {
         s.sidebar.set_width(l.sidebar_width);
@@ -2684,7 +2712,14 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
     let profile_url = format!("https://github.com/{who}");
     let profile = ui::user(&k, &who, 26.0).ml(6.0).role("button").label("Your profile on GitHub").key("profile")
         .on_press_tx(move |_: &mut App, tx| { let _ = tx.open_url(&profile_url); });
-    let root = if s.compact {
+    // On a phone an open board takes the whole screen.
+    let phone_board = match (&s.page, &s.board) {
+        (Page::Repo(full), Some(b)) if s.compact && s.editing_board() && b.repo == *full => s.repo_index_of(full).map(|i| (i, b)),
+        _ => None,
+    };
+    let root = if let Some((i, b)) = phone_board {
+        notes_page::phone_editor(&k, i, b, cx.safe_area())
+    } else if s.compact {
         let settings = IconButton::new(&icons::GEAR).variant(IconButtonVariant::GhostMuted).label("Settings")
             .expanded(s.page == Page::Settings).on_press(|s: &mut App| s.go(Page::Settings)).build(&k).key("open-settings");
         let name = match &s.page {

@@ -37,6 +37,8 @@ icon!(REFRESH, "rh-refresh", r#"<path d="M12.75 6.5A5 5 0 1 0 13 9.5M12.75 2.75V
 icon!(EXTERNAL, "rh-external", r#"<path d="M9 3H13V7M13 3L7.5 8.5M11.5 9.5V12.5A.75.75 0 0 1 10.75 13.25H3.75A.75.75 0 0 1 3 12.5V5.5A.75.75 0 0 1 3.75 4.75H6.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>"#);
 icon!(PEN, "rh-pen", r#"<path d="M10.5 3L13 5.5L6 12.5L2.75 13.25L3.5 10Z M9 4.5L11.5 7" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" fill="none"/>"#);
 icon!(TRASH, "rh-trash", r#"<path d="M3 4.5H13M6.25 4.5V3H9.75V4.5M4.5 4.5L5.25 13.25H10.75L11.5 4.5" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" stroke-linecap="round" fill="none"/>"#);
+icon!(MOVE, "rh-move", r#"<path d="M8 2.5V13.5M2.5 8H13.5M6.25 4.25L8 2.5L9.75 4.25M6.25 11.75L8 13.5L9.75 11.75M4.25 6.25L2.5 8L4.25 9.75M11.75 6.25L13.5 8L11.75 9.75" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>"#);
+icon!(MINUS, "rh-minus", r#"<path d="M3.5 8H12.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>"#);
 icon!(CURSOR, "rh-cursor", r#"<path d="M4 2.5L12 8.25L8.25 8.75L10.25 13L8.75 13.75L6.75 9.5L4 12Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" fill="none"/>"#);
 icon!(SQUARE, "rh-square", r#"<rect x="3" y="3.5" width="10" height="9" rx="1.5" stroke="currentColor" stroke-width="1.3" fill="none"/>"#);
 icon!(CIRCLE, "rh-circle", r#"<ellipse cx="8" cy="8" rx="5.25" ry="4.75" stroke="currentColor" stroke-width="1.3" fill="none"/>"#);
