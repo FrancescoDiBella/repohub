@@ -28,11 +28,11 @@ macOS).
 ```sh
 git clone https://github.com/FrancescoDiBella/repohub
 cd repohub
-cp .env.example .env        # on Windows: copy .env.example .env — then set GITHUB_USER and/or GITHUB_TOKEN
+cp .env.example .env        # on Windows: copy .env.example .env — set REPOHUB_SECRET and GITHUB_USER/GITHUB_TOKEN
 docker compose up --build   # the first build compiles everything: 10–20 minutes
 ```
 
-Then open **http://localhost:8080** in Chrome or Edge, which support WebGPU. Some useful commands:
+Then open **http://localhost:8080** in Chrome or Edge, which support WebGPU, and enter your `REPOHUB_SECRET` to unlock the app. Some useful commands:
 - `Ctrl+C` stops it.
 - `docker compose up -d` runs it in the background.
 - `docker compose down` removes it.

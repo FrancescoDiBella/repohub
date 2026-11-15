@@ -28,6 +28,7 @@ struct Cfg {
     agent: ureq::Agent,
     secret: Option<String>,
     allow_writes: bool,
+    notes_max_bytes: u64,
 }
 
 fn env(k: &str) -> Option<String> {
@@ -95,6 +96,10 @@ impl Cfg {
             ));
         }
         let allow_writes = flag("REPOHUB_ALLOW_WRITES", loopback);
+        let notes_max_bytes = env("REPOHUB_NOTES_MAX_MB")
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|mb| mb << 20)
+            .unwrap_or(500 << 20);
         let token = env("GITHUB_TOKEN");
         let api = env("GITHUB_API_URL").unwrap_or_else(|| "https://api.github.com".into()).trim_end_matches('/').to_owned();
         let opt = |k: &str| env(k).map(|v| json_str(&v)).unwrap_or_else(|| "null".into());
@@ -136,6 +141,7 @@ impl Cfg {
             agent,
             secret,
             allow_writes,
+            notes_max_bytes,
         })
     }
 }
@@ -205,6 +211,16 @@ fn origin_matches_host(origin: &str, host_header: &str) -> bool {
     o_host == h_host && o_port == h_port
 }
 
+fn referer_origin(referer: &str) -> Option<&str> {
+    let (scheme, rest) = referer.split_once("://")?;
+    if scheme != "http" && scheme != "https" {
+        return None;
+    }
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let end = scheme.len() + 3 + authority.len();
+    Some(&referer[..end])
+}
+
 fn percent_decode_path(s: &str) -> Option<String> {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
@@ -238,7 +254,10 @@ fn validate_and_decode_path(raw_path: &str) -> Option<String> {
     }
 
     let decoded = percent_decode_path(raw_path)?;
-    if decoded.contains('\\') || decoded.chars().any(|c| c.is_control() || c == '\0') {
+    if decoded.contains('\\')
+        || decoded.contains('%')
+        || decoded.chars().any(|c| c.is_control() || c == '\0')
+    {
         return None;
     }
 
@@ -247,10 +266,7 @@ fn validate_and_decode_path(raw_path: &str) -> Option<String> {
         return Some(decoded);
     }
     for seg in stripped.split('/') {
-        if seg.is_empty() {
-            return None;
-        }
-        if seg.bytes().all(|b| b == b'.') {
+        if seg.is_empty() || seg.bytes().all(|b| b == b'.') {
             return None;
         }
     }
@@ -268,12 +284,27 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+fn percent_encode_cookie(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 fn cookie_val(req: &Request, name: &str) -> Option<String> {
     let cookies = header(req, "Cookie")?;
     for part in cookies.split(';') {
-        let (k, v) = part.split_once('=')?;
+        let Some((k, v)) = part.split_once('=') else {
+            continue;
+        };
         if k.trim().eq_ignore_ascii_case(name) {
-            return Some(v.trim().to_owned());
+            let val = v.trim();
+            return percent_decode_path(val);
         }
     }
     None
@@ -315,7 +346,8 @@ fn is_https(req: &Request) -> bool {
 }
 
 fn auth_cookie(secret: &str, https: bool) -> Header {
-    let mut val = format!("repohub_secret={secret}; Path=/; HttpOnly; SameSite=Strict");
+    let encoded = percent_encode_cookie(secret);
+    let mut val = format!("repohub_secret={encoded}; Path=/; HttpOnly; SameSite=Strict");
     if https {
         val.push_str("; Secure");
     }
@@ -345,20 +377,54 @@ fn extract_query_secret(url: &str) -> Option<String> {
     None
 }
 
+fn parse_json_secret(s: &str) -> Option<String> {
+    let (_, after) = s.split_once("\"secret\"")?;
+    let (_, after_colon) = after.split_once(':')?;
+    let after_trim = after_colon.trim_start();
+    if !after_trim.starts_with('"') {
+        return None;
+    }
+    let inner = &after_trim[1..];
+    let mut out = String::new();
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => return Some(out),
+            '\\' => {
+                let next = chars.next()?;
+                match next {
+                    '"' => out.push('"'),
+                    '\\' => out.push('\\'),
+                    '/' => out.push('/'),
+                    'b' => out.push('\x08'),
+                    'f' => out.push('\x0c'),
+                    'n' => out.push('\n'),
+                    'r' => out.push('\r'),
+                    't' => out.push('\t'),
+                    'u' => {
+                        let hex: String = (&mut chars).take(4).collect();
+                        if hex.len() != 4 {
+                            return None;
+                        }
+                        let code = u32::from_str_radix(&hex, 16).ok()?;
+                        let ch = char::from_u32(code)?;
+                        out.push(ch);
+                    }
+                    other => out.push(other),
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    None
+}
+
 fn parse_auth_secret(req: &mut Request) -> Option<String> {
     let mut body = Vec::new();
     let _ = req.as_reader().take(4096).read_to_end(&mut body);
-    let s = String::from_utf8_lossy(&body);
-    let s = s.trim();
+    let s = std::str::from_utf8(&body).ok()?.trim();
     if s.starts_with('{') {
-        for part in s.trim_matches(|c| c == '{' || c == '}').split(',') {
-            let (k, v) = part.split_once(':')?;
-            let k = k.trim().trim_matches('"');
-            if k == "secret" {
-                return Some(v.trim().trim_matches('"').to_owned());
-            }
-        }
-        None
+        parse_json_secret(s)
     } else {
         for pair in s.split('&') {
             let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
@@ -392,12 +458,19 @@ fn check_origin_and_preflight(req: &Request, host_header: &str) -> Result<(), (u
     } else {
         // Critical browser detail: in browsers (WHATWG Fetch spec), Origin is omitted by
         // browsers on same-origin GET/HEAD fetch() while sending Sec-Fetch-Site: same-origin.
-        // We only allow missing Origin for GET/HEAD if Sec-Fetch-Site is same-origin,
-        // Sec-Fetch-Mode != navigate, and X-RepoHub: 1 was added by gh_fetch.
-        let is_browser_same_origin_get = (*req.method() == Method::Get || *req.method() == Method::Head)
-            && header(req, "Sec-Fetch-Site").as_deref() == Some("same-origin")
-            && header(req, "X-RepoHub").as_deref() == Some("1")
+        // Over plain HTTP on a trusted LAN host, browsers omit Sec-Fetch-Site, sending Referer.
+        let is_get = *req.method() == Method::Get || *req.method() == Method::Head;
+        let has_repohub = header(req, "X-RepoHub").as_deref() == Some("1");
+
+        let sec_fetch_ok = header(req, "Sec-Fetch-Site").as_deref() == Some("same-origin")
             && header(req, "Sec-Fetch-Mode").as_deref() != Some("navigate");
+
+        let referer_ok = header(req, "Referer")
+            .as_deref()
+            .and_then(referer_origin)
+            .is_some_and(|ref_orig| origin_matches_host(ref_orig, host_header));
+
+        let is_browser_same_origin_get = is_get && has_repohub && (sec_fetch_ok || referer_ok);
 
         if !is_browser_same_origin_get {
             return Err((403, "Missing Origin header"));
@@ -506,7 +579,11 @@ fn serve_static(cfg: &Cfg, req: Request) {
         let _ = req.respond(text(404, "Not found"));
         return;
     };
-    if decoded.contains(':') || decoded.contains('\\') || decoded.chars().any(|c| c.is_control() || c == '\0') {
+    if decoded.contains(':')
+        || decoded.contains('\\')
+        || decoded.contains('%')
+        || decoded.chars().any(|c| c.is_control() || c == '\0')
+    {
         let _ = req.respond(text(404, "Not found"));
         return;
     }
@@ -610,6 +687,11 @@ fn handle(cfg: &Cfg, mut req: Request) {
     // Secret enforcement if REPOHUB_SECRET is configured
     if let Some(secret) = &cfg.secret {
         if req.url().split('?').next() == Some("/auth") && *req.method() == Method::Post {
+            let origin = header(&req, "Origin").unwrap_or_default();
+            if !origin_matches_host(&origin, &host) {
+                let _ = req.respond(text(403, "Origin not allowed"));
+                return;
+            }
             let candidate = parse_auth_secret(&mut req).unwrap_or_default();
             if constant_time_eq(candidate.as_bytes(), secret.as_bytes()) {
                 let resp = Response::empty(303)
@@ -660,7 +742,7 @@ fn handle(cfg: &Cfg, mut req: Request) {
     if url.starts_with("/gh/") {
         proxy(cfg, req);
     } else if url.starts_with("/api/notes") {
-        notes::handle(&cfg.data_dir, cfg.allow_writes, req);
+        notes::handle(&cfg.data_dir, cfg.allow_writes, cfg.notes_max_bytes, req);
     } else if url.split('?').next() == Some("/config.json") {
         let resp = Response::from_string(cfg.public_json.clone())
             .with_header(h("Content-Type", "application/json"))
@@ -712,6 +794,9 @@ fn main() {
 }
 
 #[cfg(test)]
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -754,6 +839,13 @@ mod tests {
     }
 
     #[test]
+    fn referer_origin_extraction() {
+        assert_eq!(referer_origin("http://nas.local:8080/index.html"), Some("http://nas.local:8080"));
+        assert_eq!(referer_origin("https://nas.local/repo/notes?q=1"), Some("https://nas.local"));
+        assert_eq!(referer_origin("ftp://example.com"), None);
+    }
+
+    #[test]
     fn path_traversal_and_encoding_validation() {
         assert_eq!(validate_and_decode_path("/user/repos"), Some("/user/repos".into()));
         assert_eq!(validate_and_decode_path("/repos/o/r/git/ref/heads/feature/x"), Some("/repos/o/r/git/ref/heads/feature/x".into()));
@@ -770,6 +862,10 @@ mod tests {
         assert_eq!(validate_and_decode_path("/repos/o/r//contents"), None);
         assert_eq!(validate_and_decode_path("/repos/o/r\\readme"), None);
         assert_eq!(validate_and_decode_path("/repos/o/r\0readme"), None);
+
+        // Multi-encoded traversals (%252e%252e) MUST be rejected:
+        assert_eq!(validate_and_decode_path("/repos/o/r/%252e%252e"), None);
+        assert_eq!(validate_and_decode_path("/repos/o/r/git/ref/heads/%252e%252e/%252e%252e/user/emails"), None);
     }
 
     #[test]
@@ -840,6 +936,37 @@ mod tests {
     }
 
     #[test]
+    fn cookie_encoding_and_parsing() {
+        let sec = "p@ss;word=1 2\"3";
+        let encoded = percent_encode_cookie(sec);
+        assert!(!encoded.contains(';') && !encoded.contains('=') && !encoded.contains(' ') && !encoded.contains('"'));
+
+        // Simulating Cookie header with malformed prefix
+        let req_header = format!("malformed_cookie; other=1; repohub_secret={encoded}; final=x");
+        let fake_req = |cookie_hdr: &str| -> Option<String> {
+            for part in cookie_hdr.split(';') {
+                let Some((k, v)) = part.split_once('=') else {
+                    continue;
+                };
+                if k.trim().eq_ignore_ascii_case("repohub_secret") {
+                    return percent_decode_path(v.trim());
+                }
+            }
+            None
+        };
+        assert_eq!(fake_req(&req_header), Some(sec.to_string()));
+    }
+
+    #[test]
+    fn json_secret_parsing() {
+        assert_eq!(parse_json_secret(r#"{"secret": "simple"}"#), Some("simple".into()));
+        assert_eq!(parse_json_secret(r#"{"other": 1, "secret": "foo:bar,baz"}"#), Some("foo:bar,baz".into()));
+        assert_eq!(parse_json_secret(r#"{"secret": "hello \"world\""}"#), Some("hello \"world\"".into()));
+        assert_eq!(parse_json_secret(r#"{"secret": "line1\nline2"}"#), Some("line1\nline2".into()));
+        assert_eq!(parse_json_secret(r#"{"invalid": true}"#), None);
+    }
+
+    #[test]
     fn hosts() {
         assert_eq!(host_only("localhost:8080"), "localhost");
         assert_eq!(host_only("[::1]:8080"), "[::1]");
@@ -848,6 +975,7 @@ mod tests {
 
     #[test]
     fn secret_required_on_non_loopback() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let res = Cfg::load_with_addr("0.0.0.0:8080");
         match res {
             Err(e) => assert!(e.contains("REPOHUB_SECRET must be set")),
@@ -882,13 +1010,14 @@ mod tests {
             agent: ureq::AgentBuilder::new().build(),
             secret: None,
             allow_writes: true,
+            notes_max_bytes: 500 << 20,
         };
 
         let canon_web = std::fs::canonicalize(&cfg.web_dir).unwrap();
 
         // Check relative paths stay within web_dir
         let check_rel = |rel: &str| -> bool {
-            if rel.contains(':') || rel.contains('\\') || rel.chars().any(|c| c.is_control() || c == '\0') {
+            if rel.contains(':') || rel.contains('\\') || rel.contains('%') || rel.chars().any(|c| c.is_control() || c == '\0') {
                 return false;
             }
             if rel.split('/').any(|seg| seg.starts_with('.') || (!seg.is_empty() && seg.bytes().all(|b| b == b'.'))) {
@@ -910,6 +1039,7 @@ mod tests {
         assert!(!check_rel(".hidden"));
         assert!(!check_rel("C:/Windows/System32"));
         assert!(!check_rel("file:test"));
+        assert!(!check_rel("%252e%252e"));
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
@@ -922,5 +1052,326 @@ mod tests {
         assert!(!origin_matches_host("http://localhost:3000", "localhost:8080"));
         assert!(!origin_matches_host("null", "localhost:8080"));
     }
-}
 
+    fn http_status(res: Result<ureq::Response, ureq::Error>) -> (u16, String, Option<String>) {
+        match res {
+            Ok(r) => {
+                let status = r.status();
+                let set_cookie = r.header("Set-Cookie").map(str::to_owned);
+                let body = r.into_string().unwrap_or_default();
+                (status, body, set_cookie)
+            }
+            Err(ureq::Error::Status(code, r)) => {
+                let set_cookie = r.header("Set-Cookie").map(str::to_owned);
+                let body = r.into_string().unwrap_or_default();
+                (code, body, set_cookie)
+            }
+            Err(e) => panic!("Network request failed: {e}"),
+        }
+    }
+
+    #[test]
+    fn end_to_end_http_server_tests() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // 1. Mock upstream GitHub API
+        let mock_upstream = std::sync::Arc::new(Server::http("127.0.0.1:0").unwrap());
+        let upstream_addr = format!("http://{}", mock_upstream.server_addr());
+        let up = mock_upstream.clone();
+        std::thread::spawn(move || {
+            for req in up.incoming_requests() {
+                let auth = req.headers().iter().find(|h| h.field.as_str().as_str().eq_ignore_ascii_case("Authorization")).map(|h| h.value.as_str().to_owned());
+                let body = format!("{{\"ok\":true,\"auth\":{}}}", json_str(&auth.unwrap_or_default()));
+                let resp = Response::from_string(body).with_status_code(200).with_header(Header::from_bytes("Content-Type", "application/json").unwrap());
+                let _ = req.respond(resp);
+            }
+        });
+
+        // 2. Setup web_dir and data_dir
+        let temp_dir = std::env::temp_dir().join(format!("repohub-e2e-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let web_dir = temp_dir.join("web");
+        let data_dir = temp_dir.join("data");
+        std::fs::create_dir_all(&web_dir).unwrap();
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(web_dir.join("index.html"), "<h1>RepoHub App</h1>").unwrap();
+
+        // Symlink pointing outside web_dir
+        let outside_file = temp_dir.join("secret_outside.txt");
+        std::fs::write(&outside_file, "super secret").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside_file, web_dir.join("leak_link.txt")).unwrap();
+
+        // 3. Create RepoHub server with secret authentication
+        let server = std::sync::Arc::new(Server::http("127.0.0.1:0").unwrap());
+        let s_addr = format!("{}", server.server_addr());
+        let cfg = std::sync::Arc::new(Cfg {
+            token: Some("gh_token_12345".into()),
+            api: upstream_addr,
+            web_dir: web_dir.clone(),
+            data_dir: data_dir.clone(),
+            allowed_hosts: vec!["127.0.0.1".into(), "localhost".into()],
+            public_json: "{\"notes\":true}".into(),
+            agent: ureq::AgentBuilder::new().try_proxy_from_env(false).build(),
+            secret: Some("p@ss;word=1 2".into()),
+            allow_writes: true,
+            notes_max_bytes: 100, // Small limit for testing
+        });
+
+        let s_clone = server.clone();
+        let c_clone = cfg.clone();
+        std::thread::spawn(move || {
+            for req in s_clone.incoming_requests() {
+                handle(&c_clone, req);
+            }
+        });
+
+        let client = ureq::AgentBuilder::new()
+            .try_proxy_from_env(false)
+            .redirects(0)
+            .timeout(std::time::Duration::from_secs(5))
+            .build();
+
+        let base_url = format!("http://{s_addr}");
+        let matching_origin = format!("http://{s_addr}");
+
+        // Case A: Unauthenticated requests without secret
+        // GET /gh/user -> 401
+        let (status, _, _) = http_status(client.get(&format!("{base_url}/gh/user")).set("Origin", &matching_origin).call());
+        assert_eq!(status, 401);
+
+        // GET / -> 200 with sign-in HTML
+        let (status, body, _) = http_status(client.get(&format!("{base_url}/")).call());
+        assert_eq!(status, 200);
+        assert!(body.contains("RepoHub · Sign in"));
+
+        // Case B: Cross-origin POST /auth rejected (CSRF)
+        let (status, _, _) = http_status(
+            client.post(&format!("{base_url}/auth"))
+                .set("Origin", "http://evil.com")
+                .set("Content-Type", "application/x-www-form-urlencoded")
+                .send_string("secret=wrong")
+        );
+        assert_eq!(status, 403);
+
+        // Case C: Same-origin POST /auth with wrong secret -> 401
+        let (status, body, _) = http_status(
+            client.post(&format!("{base_url}/auth"))
+                .set("Origin", &matching_origin)
+                .set("Content-Type", "application/x-www-form-urlencoded")
+                .send_string("secret=wrong_pass")
+        );
+        assert_eq!(status, 401);
+        assert!(body.contains("Invalid secret"));
+
+        // Case D: Same-origin POST /auth with correct secret (with ;, =, spaces)
+        // Using form urlencoded
+        let encoded_secret = percent_encode_cookie("p@ss;word=1 2");
+        let (status, _, set_cookie) = http_status(
+            client.post(&format!("{base_url}/auth"))
+                .set("Origin", &matching_origin)
+                .set("Content-Type", "application/x-www-form-urlencoded")
+                .send_string(&format!("secret={encoded_secret}"))
+        );
+        assert_eq!(status, 303);
+        assert!(set_cookie.is_some());
+        let cookie_header = set_cookie.unwrap();
+        assert!(cookie_header.contains("repohub_secret="));
+        assert!(cookie_header.contains("HttpOnly"));
+
+        // Extract cookie value for subsequent authenticated calls
+        let cookie_val = cookie_header.split(';').next().unwrap();
+
+        // Also test JSON POST /auth
+        let (status, _, json_cookie) = http_status(
+            client.post(&format!("{base_url}/auth"))
+                .set("Origin", &matching_origin)
+                .set("Content-Type", "application/json")
+                .send_string("{\"secret\":\"p@ss;word=1 2\"}")
+        );
+        assert_eq!(status, 303);
+        assert!(json_cookie.is_some());
+
+        // Case E: Authenticated requests using Bearer token or Cookie
+        // 1. Missing Origin on /gh/user -> 403
+        let (status, body, _) = http_status(
+            client.get(&format!("{base_url}/gh/user"))
+                .set("Cookie", cookie_val)
+                .call()
+        );
+        assert_eq!(status, 403);
+        assert!(body.contains("Missing Origin header"));
+
+        // 2. Different port Origin on /gh/user -> 403
+        let (status, body, _) = http_status(
+            client.get(&format!("{base_url}/gh/user"))
+                .set("Cookie", cookie_val)
+                .set("Origin", "http://127.0.0.1:3000")
+                .call()
+        );
+        assert_eq!(status, 403);
+        assert!(body.contains("Origin not allowed"));
+
+        // 3. Traversal in path: %2e%2e -> 403 (send raw HTTP bytes so HTTP client doesn't normalize URL)
+        let (status, body) = {
+            use std::io::Write;
+            let mut stream = std::net::TcpStream::connect(&s_addr).unwrap();
+            let raw_req = format!(
+                "GET /gh/repos/o/r/%2e%2e/%2e%2e/user/emails HTTP/1.1\r\nHost: {s_addr}\r\nOrigin: {matching_origin}\r\nCookie: {cookie_val}\r\nConnection: close\r\n\r\n"
+            );
+            stream.write_all(raw_req.as_bytes()).unwrap();
+            let mut resp_bytes = Vec::new();
+            stream.read_to_end(&mut resp_bytes).unwrap();
+            let resp_str = String::from_utf8_lossy(&resp_bytes);
+            let code = resp_str.split_whitespace().nth(1).unwrap().parse::<u16>().unwrap();
+            (code, resp_str.to_string())
+        };
+        assert_eq!(status, 403, "expected 403 on %2e%2e, body was: {body}");
+        assert!(body.contains("Path traversal"), "body was: {body}");
+
+        // 4. Double-encoded traversal: %252e%252e -> 403
+        let (status, body, _) = http_status(
+            client.get(&format!("{base_url}/gh/repos/o/r/git/ref/heads/%252e%252e/%252e%252e/user/emails"))
+                .set("Cookie", cookie_val)
+                .set("Origin", &matching_origin)
+                .call()
+        );
+        assert_eq!(status, 403);
+        assert!(body.contains("Path traversal"));
+
+        // 5. Endpoint outside allowlist -> 403
+        let (status, body, _) = http_status(
+            client.get(&format!("{base_url}/gh/repos/o/r/hooks"))
+                .set("Cookie", cookie_val)
+                .set("Origin", &matching_origin)
+                .call()
+        );
+        assert_eq!(status, 403);
+        assert!(body.contains("Endpoint not allowed"));
+
+        // 6. Allowed endpoint with matching Origin -> 200 and forwards token
+        let (status, body, _) = http_status(
+            client.get(&format!("{base_url}/gh/user"))
+                .set("Cookie", cookie_val)
+                .set("Origin", &matching_origin)
+                .call()
+        );
+        assert_eq!(status, 200);
+        assert!(body.contains("gh_token_12345"));
+
+        // 7. Allowed endpoint via Authorization: Bearer
+        let (status, body, _) = http_status(
+            client.get(&format!("{base_url}/gh/user"))
+                .set("Authorization", "Bearer p@ss;word=1 2")
+                .set("Origin", &matching_origin)
+                .call()
+        );
+        assert_eq!(status, 200);
+        assert!(body.contains("gh_token_12345"));
+
+        // 8. Plain-HTTP LAN browser simulation: no Origin, but X-RepoHub: 1 + Referer matching Host
+        let (status, body, _) = http_status(
+            client.get(&format!("{base_url}/gh/user"))
+                .set("Cookie", cookie_val)
+                .set("X-RepoHub", "1")
+                .set("Referer", &format!("{base_url}/index.html"))
+                .call()
+        );
+        assert_eq!(status, 200);
+        assert!(body.contains("gh_token_12345"));
+
+        // 9. Writes without X-RepoHub: 1 -> 403
+        let (status, body, _) = http_status(
+            client.put(&format!("{base_url}/gh/user/starred/owner/repo"))
+                .set("Cookie", cookie_val)
+                .set("Origin", &matching_origin)
+                .set("Content-Type", "application/json")
+                .call()
+        );
+        assert_eq!(status, 403);
+        assert!(body.contains("Writes require X-RepoHub: 1"));
+
+        // 10. Writes without Content-Type: application/json -> 403
+        let (status, body, _) = http_status(
+            client.put(&format!("{base_url}/gh/user/starred/owner/repo"))
+                .set("Cookie", cookie_val)
+                .set("Origin", &matching_origin)
+                .set("X-RepoHub", "1")
+                .set("Content-Type", "text/plain")
+                .call()
+        );
+        assert_eq!(status, 403);
+        assert!(body.contains("Content-Type: application/json"));
+
+        // 11. Notes total size cap: max_notes_bytes is 100 bytes
+        // Save first note of 60 bytes -> 204
+        let note1_body = "{\"type\":\"excalidraw\",\"tag\":\"60_bytes_payload_data_here\"}";
+        assert!(note1_body.len() <= 100);
+        let (status, _, _) = http_status(
+            client.put(&format!("{base_url}/api/notes/file?repo=o/r&branch=main&name=n1"))
+                .set("Cookie", cookie_val)
+                .set("Origin", &matching_origin)
+                .set("X-RepoHub", "1")
+                .set("Content-Type", "application/json")
+                .send_string(note1_body)
+        );
+        assert_eq!(status, 204);
+
+        // Save second note of 60 bytes (total 120 > 100) -> 413
+        let (status, body, _) = http_status(
+            client.put(&format!("{base_url}/api/notes/file?repo=o/r&branch=main&name=n2"))
+                .set("Cookie", cookie_val)
+                .set("Origin", &matching_origin)
+                .set("X-RepoHub", "1")
+                .set("Content-Type", "application/json")
+                .send_string(note1_body)
+        );
+        assert_eq!(status, 413);
+        assert!(body.contains("Total notes storage limit exceeded"));
+
+        // Overwrite n1 with note of 70 bytes -> (60 - 60) + 70 = 70 <= 100 -> 204
+        let note1_updated = "{\"type\":\"excalidraw\",\"tag\":\"70_bytes_payload_data_longer_update\"}";
+        let (status, _, _) = http_status(
+            client.put(&format!("{base_url}/api/notes/file?repo=o/r&branch=main&name=n1"))
+                .set("Cookie", cookie_val)
+                .set("Origin", &matching_origin)
+                .set("X-RepoHub", "1")
+                .set("Content-Type", "application/json")
+                .send_string(note1_updated)
+        );
+        assert_eq!(status, 204);
+
+        // 12. Static file serving (with authenticated cookie)
+        // Valid file -> 200
+        let (status, body, _) = http_status(
+            client.get(&format!("{base_url}/index.html"))
+                .set("Cookie", cookie_val)
+                .call()
+        );
+        assert_eq!(status, 200);
+        assert!(body.contains("RepoHub App"));
+
+        // Symlink escaping web_dir -> 404
+        #[cfg(unix)]
+        {
+            let (status, _, _) = http_status(
+                client.get(&format!("{base_url}/leak_link.txt"))
+                    .set("Cookie", cookie_val)
+                    .call()
+            );
+            assert_eq!(status, 404);
+        }
+
+        // Multi-encoded path traversal in static file -> 404
+        let (status, _, _) = http_status(
+            client.get(&format!("{base_url}/%252e%252e/secret.txt"))
+                .set("Cookie", cookie_val)
+                .call()
+        );
+        assert_eq!(status, 404);
+
+        server.unblock();
+        mock_upstream.unblock();
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+}

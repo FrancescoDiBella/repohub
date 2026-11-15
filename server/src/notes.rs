@@ -120,15 +120,8 @@ fn dir_size(path: &Path) -> u64 {
     total
 }
 
-pub fn max_notes_bytes() -> u64 {
-    std::env::var("REPOHUB_NOTES_MAX_MB")
-        .ok()
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .map(|mb| mb << 20)
-        .unwrap_or(500 << 20)
-}
 
-pub fn handle(data: &Path, allow_writes: bool, mut req: Request) {
+pub fn handle(data: &Path, allow_writes: bool, max_bytes: u64, mut req: Request) {
     let url = req.url().to_owned();
     let q = query(&url);
     let get = |k: &str| q.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone()).unwrap_or_default();
@@ -183,7 +176,7 @@ pub fn handle(data: &Path, allow_writes: bool, mut req: Request) {
             let notes_root = data.join("notes");
             let cur_total = dir_size(&notes_root);
             let existing_len = file.metadata().map(|m| m.len()).unwrap_or(0);
-            let limit = max_notes_bytes();
+            let limit = max_bytes;
             if cur_total.saturating_sub(existing_len) + (body.len() as u64) > limit {
                 let mb = limit >> 20;
                 let msg = if mb > 0 {

@@ -1415,6 +1415,10 @@ impl App {
 
     /// Stars or unstars repository `i`: on GitHub when a token is configured, locally otherwise.
     fn toggle_star(&mut self, i: usize) {
+        if !self.cfg.allow_writes {
+            self.notify_problem("Writes are disabled on this server (set REPOHUB_ALLOW_WRITES=true).");
+            return;
+        }
         let Some(r) = self.data.repos.get_mut(i) else { return };
         let on = !r.starred;
         r.starred = on;
@@ -4365,5 +4369,22 @@ mod fix83_tests {
         let epoch = s.load_gen;
         s.apply(epoch, Ok(next));
         assert_eq!(s.page, Page::Repo("owner/repo".into()));
+    }
+
+    #[test]
+    fn toggle_star_respects_allow_writes() {
+        let mut s = app();
+        let mut cfg = (*s.cfg).clone();
+        cfg.allow_writes = false;
+        s.cfg = std::sync::Arc::new(cfg);
+
+        let initial_starred = s.data.repos[0].starred;
+        let initial_stars = s.data.repos[0].stars;
+
+        s.toggle_star(0);
+
+        assert_eq!(s.data.repos[0].starred, initial_starred, "starred status must not change");
+        assert_eq!(s.data.repos[0].stars, initial_stars, "star count must not change");
+        assert!(s.toast.as_ref().is_some_and(|t| t.text.contains("Writes are disabled on this server")));
     }
 }
