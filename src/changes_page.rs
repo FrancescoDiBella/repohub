@@ -14,20 +14,39 @@ const DIFF_H: f32 = 620.0;
 
 /// Unified / Split, and the files' totals.
 fn diff_head(s: &App, k: &Kit) -> El {
-    let (add, del) = diffs::totals(s.diff.files());
     let n = s.diff.files().len();
-    row().gap(10.0).center_y()
-        .child(text(format!("{n} file{}", if n == 1 { "" } else { "s" })).font(k.ty.small).color(k.c.text_muted))
-        .child(text(format!("+{add}")).font(k.ty.small_medium).color(k.c.success.icon))
-        .child(text(format!("−{del}")).font(k.ty.small_medium).color(k.c.danger.icon))
-        .child(SegmentedControl::new(&["Unified", "Split"], Some(usize::from(s.diff.mode() == DiffMode::Split))).label("Diff layout").fit()
-            .on_pick(|s: &mut App, i, _| s.diff.set_mode(if i == 1 { DiffMode::Split } else { DiffMode::Unified })).build(k).key("diff-mode"))
+    let loading_empty = n == 0 && (matches!(s.diff_load, None | Some(Load::Loading)) || s.git_job.is_some());
+    let failed_empty = n == 0 && matches!(s.diff_load, Some(Load::Failed(_)));
+    let mut r = row().gap(10.0).center_y();
+    if loading_empty {
+        r = r.child(ui::skeleton_faint(k, 88.0, 12.0));
+    } else if !failed_empty {
+        let (add, del) = diffs::totals(s.diff.files());
+        r = r
+            .child(text(format!("{n} file{}", if n == 1 { "" } else { "s" })).font(k.ty.small).color(k.c.text_muted))
+            .child(text(format!("+{add}")).font(k.ty.small_medium).color(k.c.success.icon))
+            .child(text(format!("−{del}")).font(k.ty.small_medium).color(k.c.danger.icon));
+    }
+    r.child(SegmentedControl::new(&["Unified", "Split"], Some(usize::from(s.diff.mode() == DiffMode::Split))).label("Diff layout").fit()
+        .on_pick(|s: &mut App, i, _| s.diff.set_mode(if i == 1 { DiffMode::Split } else { DiffMode::Unified })).build(k).key("diff-mode"))
 }
 
-fn diff_body(s: &App, k: &Kit, empty: &str) -> El {
+fn diff_body(s: &App, k: &Kit, i: usize, empty: &str) -> El {
+    if matches!(s.diff_load, None | Some(Load::Loading)) || (s.git_job.is_some() && s.diff.files().is_empty()) {
+        return ui::skeleton_diff(k, "skeleton-diff");
+    }
     match &s.diff_load {
-        None | Some(Load::Loading) => col().w_full().padding(24.0).items_center().child(text("Reading the changes…").font(k.ty.ui).color(k.c.text_muted)),
-        Some(Load::Failed(e)) => col().w_full().padding(16.0).child(text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap()),
+        None | Some(Load::Loading) => ui::skeleton_diff(k, "skeleton-diff"),
+        Some(Load::Failed(e)) => {
+            let merge_branch = match &s.diff_of {
+                Some(DiffOf::Merge(_, b)) => Some(b.clone()),
+                _ => None,
+            };
+            ui::error_inline(k, e, "retry-changes", move |s: &mut App| match &merge_branch {
+                Some(b) => s.preview_merge(i, b.clone()),
+                None => s.load_changes(i),
+            })
+        }
         Some(Load::Ready(())) if s.diff.files().is_empty() => col().w_full().padding(24.0).items_center().child(text(empty.to_owned()).font(k.ty.ui).color(k.c.text_muted)),
         Some(Load::Ready(())) => col().w_full().h(DIFF_H).clip_rounded(0.0)
             .child(DiffView::new(|s: &App| &s.diff, |s: &mut App| &mut s.diff).key("diff").build(s, k)),
@@ -38,10 +57,15 @@ fn diff_body(s: &App, k: &Kit, empty: &str) -> El {
 pub fn changes_tab(s: &App, k: &Kit, i: usize) -> El {
     let c = s.changes.as_ref();
     let busy = s.git_job.is_some();
+    let branch_label = match c {
+        Some(c) => text(if c.branch.is_empty() { "detached HEAD".to_owned() } else { c.branch.clone() }).font(k.ty.ui_medium).color(k.c.text_base),
+        None if matches!(s.diff_load, None | Some(Load::Loading)) || busy => ui::skeleton_bar(k, 96.0, 14.0),
+        None => text("—").font(k.ty.ui_medium).color(k.c.text_muted),
+    };
     // Where the branch stands: name, upstream, commits to push and to pull.
     let mut status = row().w_full().px(16.0).py(12.0).gap(10.0).center_y().flex_wrap()
         .child(ui::ico(&icons::BRANCH, 15.0, k.c.icon_muted))
-        .child(text(c.map(|c| if c.branch.is_empty() { "detached HEAD".to_owned() } else { c.branch.clone() }).unwrap_or_else(|| "…".into())).font(k.ty.ui_medium).color(k.c.text_base));
+        .child(branch_label);
     if let Some(c) = c {
         status = status.child(text(match &c.upstream {
             Some(u) => format!("→ {u}"),
@@ -99,7 +123,7 @@ pub fn changes_tab(s: &App, k: &Kit, i: usize) -> El {
     let diff = panel(k).key("changes-diff").clip_rounded(k.radius.lg)
         .child(panel_head(k, &title, Some(head)))
         .child(rule(k))
-        .child(diff_body(s, k, empty));
+        .child(diff_body(s, k, i, empty));
     col().w_full().gap(16.0).child(top).child(diff)
 }
 
@@ -166,20 +190,30 @@ fn picked_is(of: &Option<DiffOf>, branch: &str) -> bool {
 }
 
 fn pull_diff_head(s: &App, k: &Kit) -> El {
-    let (add, del) = diffs::totals(s.pull_diff.files());
     let n = s.pull_diff.files().len();
-    row().gap(10.0).center_y()
-        .child(text(format!("{n} file{}", if n == 1 { "" } else { "s" })).font(k.ty.small).color(k.c.text_muted))
-        .child(text(format!("+{add}")).font(k.ty.small_medium).color(k.c.success.icon))
-        .child(text(format!("−{del}")).font(k.ty.small_medium).color(k.c.danger.icon))
-        .child(SegmentedControl::new(&["Unified", "Split"], Some(usize::from(s.pull_diff.mode() == DiffMode::Split))).label("Diff layout").fit()
-            .on_pick(|s: &mut App, i, _| s.pull_diff.set_mode(if i == 1 { DiffMode::Split } else { DiffMode::Unified })).build(k).key("pull-diff-mode"))
+    let loading_empty = n == 0 && matches!(s.pull_diff_load, None | Some(Load::Loading));
+    let failed_empty = n == 0 && matches!(s.pull_diff_load, Some(Load::Failed(_)));
+    let mut r = row().gap(10.0).center_y();
+    if loading_empty {
+        r = r.child(ui::skeleton_faint(k, 88.0, 12.0));
+    } else if !failed_empty {
+        let (add, del) = diffs::totals(s.pull_diff.files());
+        r = r
+            .child(text(format!("{n} file{}", if n == 1 { "" } else { "s" })).font(k.ty.small).color(k.c.text_muted))
+            .child(text(format!("+{add}")).font(k.ty.small_medium).color(k.c.success.icon))
+            .child(text(format!("−{del}")).font(k.ty.small_medium).color(k.c.danger.icon));
+    }
+    r.child(SegmentedControl::new(&["Unified", "Split"], Some(usize::from(s.pull_diff.mode() == DiffMode::Split))).label("Diff layout").fit()
+        .on_pick(|s: &mut App, i, _| s.pull_diff.set_mode(if i == 1 { DiffMode::Split } else { DiffMode::Unified })).build(k).key("pull-diff-mode"))
 }
 
-fn pull_diff_body(s: &App, k: &Kit, empty: &str) -> El {
+fn pull_diff_body(s: &App, k: &Kit, full: &str, number: u32, empty: &str) -> El {
     match &s.pull_diff_load {
-        None | Some(Load::Loading) => col().w_full().padding(24.0).items_center().child(text("Reading the changes…").font(k.ty.ui).color(k.c.text_muted)),
-        Some(Load::Failed(e)) => col().w_full().padding(16.0).child(text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap()),
+        None | Some(Load::Loading) => ui::skeleton_diff(k, "skeleton-pull-diff"),
+        Some(Load::Failed(e)) => {
+            let repo = full.to_owned();
+            ui::error_inline(k, e, "retry-pull-diff", move |s: &mut App| s.open_pull_diff(repo.clone(), number))
+        }
         Some(Load::Ready(())) if s.pull_diff.files().is_empty() => col().w_full().padding(24.0).items_center().child(text(empty.to_owned()).font(k.ty.ui).color(k.c.text_muted)),
         Some(Load::Ready(())) => col().w_full().h(DIFF_H).clip_rounded(0.0)
             .child(DiffView::new(|s: &App| &s.pull_diff, |s: &mut App| &mut s.pull_diff).key("pull-diff-view").build(s, k)),
@@ -237,7 +271,7 @@ pub fn pull_panel_for(s: &App, k: &Kit, repo_filter: Option<&str>) -> Option<El>
             .child(text(title).font(k.ty.ui_medium).color(k.c.text_base).grow(1.0).shrink().min_w(200.0).max_lines(2))
             .child(tools))
         .child(rule(k))
-        .child(pull_diff_body(s, k, "This pull request changes no files.")))
+        .child(pull_diff_body(s, k, &full, number, "This pull request changes no files.")))
 }
 
 /// `owner/name` from a pull request's page address.

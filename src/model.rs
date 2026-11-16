@@ -314,6 +314,15 @@ impl Data {
         }
     }
 
+    /// Nothing has been loaded into any list yet.
+    pub fn is_empty(&self) -> bool {
+        !self.sample
+            && self.repos.is_empty()
+            && self.pulls.is_empty()
+            && self.issues.is_empty()
+            && self.runs.is_empty()
+    }
+
     /// Nothing worth remembering a place in: the sample data, or nothing loaded yet.
     pub fn sample_or_empty(&self) -> bool {
         self.sample || self.repos.is_empty()

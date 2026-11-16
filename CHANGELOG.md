@@ -75,6 +75,9 @@ The sections are **Added**, **Changed** and **Fixed**.
 - A new look, with a more readable layout.
 
 ### Fixed
+- Lists, the overview, the Code tab and the Changes tab now show loading placeholders while GitHub
+  or `git` is still working, and show the error with **Retry** if a load fails, instead of saying
+  nothing is there.
 - Security (updates): the app downloads updates only from GitHub's release hosts, every
   redirect included. Builds made with a signing key refuse an update whose checksums aren't
   signed by it. macOS checks the new app's code signature before replacing the old one, and on
