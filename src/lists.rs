@@ -36,7 +36,9 @@ pub fn pull_row(k: &Kit, p: &Pull, now: i64, compact: bool) -> El {
     if !compact {
         r = r.child(ui::stat(k, &icons::COMMENT, p.comments.to_string())).child(ui::user(k, &p.author, 22.0));
     }
-    link(r.key(format!("pr-{}-{}", p.repo, p.number)), &p.url)
+    let (repo, number) = (crate::changes_page::pull_repo(&p.url).unwrap_or_else(|| p.repo.clone()), p.number);
+    r.key(format!("pr-{}-{}", p.repo, p.number)).role("button").label(format!("Pull request {}: {}", p.number, p.title))
+        .on_press(move |s: &mut App| s.open_thread(&repo, number, true))
 }
 
 pub fn issue_row(k: &Kit, i: &Issue, now: i64) -> El {
@@ -50,7 +52,9 @@ pub fn issue_row(k: &Kit, i: &Issue, now: i64) -> El {
             .child(title)
             .child(text(format!("#{} · {} · opened {}", i.number, i.repo, i.age_ago(now))).font(k.ty.text_small).color(k.c.text_muted)))
         .child(ui::stat(k, &icons::COMMENT, i.comments.to_string()));
-    link(r.key(format!("issue-{}-{}", i.repo, i.number)), &i.url)
+    let (repo, number) = (i.repo.clone(), i.number);
+    r.key(format!("issue-{}-{}", i.repo, i.number)).role("button").label(format!("Issue {}: {}", i.number, i.title))
+        .on_press(move |s: &mut App| s.open_thread(&repo, number, false))
 }
 
 pub fn run_row(k: &Kit, r: &Run, now: i64, compact: bool) -> El {
@@ -140,13 +144,13 @@ pub fn pulls(s: &App, k: &Kit) -> El {
     let sub = if s.data.sample {
         "Pull requests you opened or that wait for your review.".to_owned()
     } else if let Some(tot) = group_total.filter(|&t| t > group_loaded) {
-        format!("Showing {} of {} {} pull requests you're involved in. Click one to open it on GitHub.", group_loaded, tot, if is_open_group { "open" } else { "closed/merged" })
+        format!("Showing {} of {} {} pull requests you're involved in. Click one to read it and reply.", group_loaded, tot, if is_open_group { "open" } else { "closed/merged" })
     } else if let Some(tot) = group_total {
-        format!("Showing all {} {} pull requests you're involved in. Click one to open it on GitHub.", tot, if is_open_group { "open" } else { "closed/merged" })
+        format!("Showing all {} {} pull requests you're involved in. Click one to read it and reply.", tot, if is_open_group { "open" } else { "closed/merged" })
     } else if s.data.pulls.len() >= crate::model::SEARCH_CAP {
-        format!("The {} most recently updated pull requests you're involved in (author, reviewer, assignee or mentioned). Click one to open it on GitHub.", s.data.pulls.len())
+        format!("The {} most recently updated pull requests you're involved in (author, reviewer, assignee or mentioned). Click one to read it and reply.", s.data.pulls.len())
     } else {
-        "Pull requests you're involved in (author, reviewer, assignee or mentioned). Click one to open it on GitHub.".to_owned()
+        "Pull requests you're involved in (author, reviewer, assignee or mentioned). Click one to read it and reply.".to_owned()
     };
     col().w_full().gap(16.0)
         .child(heading(k, "Pull requests", &sub, action_el))
@@ -185,13 +189,13 @@ pub fn issues(s: &App, k: &Kit) -> El {
     };
 
     let sub = if let Some(total) = s.data.issues_total.filter(|&t| t > loaded) {
-        format!("Showing {} of {} open issues in your repositories. Click one to open it on GitHub.", loaded, total)
+        format!("Showing {} of {} open issues in your repositories. Click one to read it and reply.", loaded, total)
     } else if let Some(total) = s.data.issues_total {
-        format!("Showing all {} open issues in your repositories. Click one to open it on GitHub.", total)
+        format!("Showing all {} open issues in your repositories. Click one to read it and reply.", total)
     } else if loaded >= crate::model::SEARCH_CAP {
-        format!("The {} most recently updated open issues in your repositories. Click one to open it on GitHub.", loaded)
+        format!("The {} most recently updated open issues in your repositories. Click one to read it and reply.", loaded)
     } else {
-        "Open issues in your repositories. Click one to open it on GitHub.".to_owned()
+        "Open issues in your repositories. Click one to read it and reply.".to_owned()
     };
     col().w_full().gap(16.0)
         .child(heading(k, "Issues", &sub, action_el))

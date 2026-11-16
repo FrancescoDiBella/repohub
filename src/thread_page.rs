@@ -1,0 +1,151 @@
+//! The conversation of an issue or a pull request: who wrote what, and a box to reply.
+//!
+//! It takes the page's place (see `App::open_thread`); **Back** returns to the list it came from.
+use rune::{El, col, el, row, text};
+use rune_kit::{Button, ButtonVariant, ControlSize, Kit, TextArea};
+
+use crate::state::Load;
+use crate::thread::{Entry, Open, Standing, Thread, Verdict};
+use crate::ui::{self, panel, rule};
+use crate::{App, actions, github, icons, model, pages};
+
+fn standing_pill(k: &Kit, st: Standing) -> El {
+    let ink = match st {
+        Standing::Open => k.c.success.icon,
+        Standing::Draft => k.c.text_muted,
+        Standing::Closed => k.c.danger.icon,
+        Standing::Merged => k.c.text_accent,
+    };
+    ui::pill(k, st.label(), ink)
+}
+
+/// One description, comment or review.
+fn entry(k: &Kit, e: &Entry, n: usize, now: i64) -> El {
+    let mut head = row().w_full().px(16.0).py(10.0).gap(10.0).center_y().flex_wrap()
+        .child(ui::user(k, &e.author, 22.0))
+        .child(text(e.author.clone()).font(k.ty.small_medium).color(k.c.text_strong));
+    if let Some(v) = e.verdict {
+        let ink = match v {
+            Verdict::Approved => k.c.success.icon,
+            Verdict::ChangesRequested => k.c.danger.icon,
+            Verdict::Commented => k.c.text_muted,
+        };
+        // The words say it; the colour only repeats it.
+        head = head.child(ui::pill(k, v.label(), ink));
+    }
+    head = head.child(el().grow(1.0))
+        .child(text(model::fmt_ago(e.at, now)).font(k.ty.text_small).color(k.c.text_faint));
+    let body = if e.body.trim().is_empty() {
+        text(if n == 0 { "No description." } else { "No comment." }).font(k.ty.small).color(k.c.text_faint)
+    } else {
+        pages::markdown_view(k, &e.body, &format!("thread-code-{n}"))
+    };
+    panel(k).key(format!("thread-entry-{n}"))
+        .child(head)
+        .child(rule(k))
+        .child(col().w_full().padding(16.0).child(body))
+}
+
+/// The box to reply, and what can be done with what's typed.
+fn reply(s: &App, k: &Kit, o: &Open, t: &Thread) -> El {
+    let blocked = actions::blocked(s);
+    let empty = o.reply.text.trim().is_empty();
+    let off = o.sending || blocked.is_some();
+    let key = actions::busy_key(&o.repo, o.number);
+    let busy = s.busy.contains(&key);
+    let mut buttons = row().w_full().gap(8.0).center_y().flex_wrap()
+        .child(Button::new(if o.sending { "Sending…" } else { "Comment" }).variant(ButtonVariant::Submit).control_size(ControlSize::Small)
+            .disabled(off || empty).on_press(|s: &mut App| s.send_reply(None)).build(k).key("thread-comment"));
+    if o.pull && t.standing.is_open() {
+        buttons = buttons
+            .child(Button::new("Approve").icon(&icons::CHECK).control_size(ControlSize::Small)
+                .help("Approve these changes; what you typed goes with it")
+                .disabled(off).on_press(|s: &mut App| s.send_reply(Some(Verdict::Approved))).build(k).key("thread-approve"))
+            .child(Button::new("Request changes").control_size(ControlSize::Small)
+                .help("Say what must change before this is merged (type it first)")
+                .disabled(off || empty).on_press(|s: &mut App| s.send_reply(Some(Verdict::ChangesRequested))).build(k).key("thread-request-changes"));
+    }
+    if !o.pull {
+        let (repo, number) = (o.repo.clone(), o.number);
+        buttons = buttons.child(el().grow(1.0));
+        buttons = buttons.child(if t.standing.is_open() {
+            Button::new(if busy { "Closing…" } else { "Close issue" }).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
+                .disabled(busy || blocked.is_some())
+                .on_press(move |s: &mut App| s.write(&repo, github::Write::CloseIssue(number))).build(k).key("thread-close-issue")
+        } else {
+            Button::new(if busy { "Reopening…" } else { "Reopen issue" }).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
+                .disabled(busy || blocked.is_some())
+                .on_press(move |s: &mut App| s.write(&repo, github::Write::ReopenIssue(number))).build(k).key("thread-reopen-issue")
+        });
+    }
+    let mut p = panel(k).key("thread-reply").padding(16.0).gap(10.0)
+        .child(TextArea::new(&o.reply).placeholder("Write a comment (Markdown)").label("Your comment").auto_grow(3, 12)
+            .on_edit(|s: &mut App| &mut s.thread.as_mut().expect("conversation open").reply).build(k).key("thread-reply-text").w_full())
+        .child(buttons);
+    if let Some(why) = blocked {
+        p = p.child(text(why).font(k.ty.small).color(k.c.warning.icon).wrap().key("thread-blocked"));
+    }
+    p
+}
+
+pub fn view(s: &App, k: &Kit, o: &Open) -> El {
+    let what = if o.pull { "pull request" } else { "issue" };
+    let back = Button::new("Back").icon(&icons::BACK).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
+        .on_press(|s: &mut App| { s.close_pull_diff(); s.thread = None; }).build(k).key("thread-back");
+    let mut top = row().w_full().gap(8.0).center_y().child(back).child(el().grow(1.0));
+    let mut page = col().w_full().gap(16.0).key("thread");
+    let t = match &o.load {
+        Load::Loading => {
+            return page.child(top)
+                .child(text(format!("{} #{}", o.repo, o.number)).font(k.ty.small).color(k.c.text_muted))
+                .child(panel(k).padding(28.0).items_center().role("status").key("thread-loading")
+                    .child(text(format!("Reading the {what}…")).font(k.ty.ui).color(k.c.text_muted)));
+        }
+        Load::Failed(e) => {
+            return page.child(top)
+                .child(panel(k).padding(28.0).items_center().gap(10.0).role("alert").key("thread-failed")
+                    .child(text(e.clone()).font(k.ty.small).color(k.c.text_base).wrap())
+                    .child(Button::new("Retry").icon(&icons::REFRESH).control_size(ControlSize::Small)
+                        .on_press(|s: &mut App| s.load_thread()).build(k).key("thread-retry")));
+        }
+        Load::Ready(t) => t,
+    };
+    top = top.child(Button::new("Refresh").icon(&icons::REFRESH).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
+        .on_press(|s: &mut App| s.load_thread()).build(k).key("thread-refresh"));
+    if !t.url.is_empty() {
+        top = top.child(pages::open_button(k, "Open on GitHub", &t.url, "thread-github"));
+    }
+    let mut meta = row().w_full().gap(10.0).center_y().flex_wrap()
+        .child(standing_pill(k, t.standing))
+        .child(text(format!("{} #{} · opened by {}", o.repo, o.number, t.author)).font(k.ty.small).color(k.c.text_muted));
+    if let Some((head, base)) = &t.branches {
+        meta = meta.child(ui::stat(k, &icons::BRANCH, format!("{head} → {base}")));
+    }
+    for (name, hue) in &t.labels {
+        meta = meta.child(ui::label_chip(k, name, *hue));
+    }
+    page = page.child(top)
+        .child(col().w_full().gap(8.0)
+            .child(text(t.title.clone()).font(ui::H2).color(k.c.text_strong).wrap())
+            .child(meta));
+    // A pull request's changes: the diff panel the lists use, opened here.
+    if o.pull {
+        let active = s.pull_diff_of.as_ref().is_some_and(|(full, n)| *n == o.number && model::same_repo(full, &o.repo));
+        let (repo, number) = (o.repo.clone(), o.number);
+        let files = Button::new(if active { "Hide the changes" } else { "See the changes" }).icon(&icons::FILE)
+            .variant(if active { ButtonVariant::Contrast } else { ButtonVariant::Ghost }).control_size(ControlSize::Small)
+            .on_press(move |s: &mut App| if active { s.close_pull_diff() } else { s.open_pull_diff(repo.clone(), number) })
+            .build(k).key("thread-files");
+        page = page.child(row().w_full().child(files));
+        if active {
+            page = page.children(crate::changes_page::pull_panel_for(s, k, None));
+        }
+    }
+    for (n, e) in t.entries.iter().enumerate() {
+        page = page.child(entry(k, e, n, s.now));
+    }
+    if t.more {
+        page = page.child(text("This conversation is longer than what's shown here: the rest is on GitHub.").font(k.ty.small).color(k.c.text_muted).wrap().key("thread-more"));
+    }
+    page.child(reply(s, k, o, t))
+}

@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 
 use crate::config::Config;
 use crate::net::{self, Resp, Transport};
+use crate::thread::{Entry, Standing, Thread, Verdict};
 use crate::model::{Checks, Commit, Data, Detail, Issue, Profile, Pull, PullState, Repo, Run, duration, hex_hue, lang_hue, parse_iso};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -244,6 +245,57 @@ pub fn parse_pull(v: &Value) -> Pull {
         updated_at: parse_iso(&updated_at).unwrap_or(0),
         comments: n(v, "comments"),
         url: s(v, "html_url"),
+    }
+}
+
+/// Builds a conversation from GitHub's answers: the issue, its comments and, for a pull
+/// request, its detail and reviews.
+pub fn parse_thread(issue: &Value, comments: &Value, pull: Option<(&Value, &Value)>) -> Thread {
+    let who = |v: &Value| v.get("user").map(|u| s(u, "login")).filter(|l| !l.is_empty()).unwrap_or_else(|| "ghost".into());
+    let when = |v: &Value, k: &str| parse_iso(&s(v, k)).unwrap_or(0);
+    let mut entries: Vec<Entry> = comments.as_array().into_iter().flatten()
+        .map(|c| Entry { author: who(c), at: when(c, "created_at"), body: s(c, "body"), verdict: None })
+        .collect();
+    let mut more = n(issue, "comments") as usize > entries.len();
+    let mut standing = if s(issue, "state") == "closed" { Standing::Closed } else { Standing::Open };
+    let mut branches = None;
+    if let Some((detail, reviews)) = pull {
+        if b(detail, "merged") {
+            standing = Standing::Merged;
+        } else if standing == Standing::Open && b(detail, "draft") {
+            standing = Standing::Draft;
+        }
+        let branch = |k: &str| detail.get(k).map(|x| s(x, "ref")).unwrap_or_default();
+        branches = Some((branch("head"), branch("base"))).filter(|(h, b)| !h.is_empty() && !b.is_empty());
+        let list: Vec<&Value> = reviews.as_array().into_iter().flatten().collect();
+        more |= list.len() >= 100;
+        for r in list {
+            let verdict = match s(r, "state").as_str() {
+                "APPROVED" => Verdict::Approved,
+                "CHANGES_REQUESTED" => Verdict::ChangesRequested,
+                // A review not sent yet is only its author's; a dismissed one no longer counts.
+                "PENDING" | "DISMISSED" => continue,
+                _ => Verdict::Commented,
+            };
+            let body = s(r, "body");
+            // A "commented" review with no text only carries comments on lines, shown on GitHub.
+            if verdict == Verdict::Commented && body.trim().is_empty() {
+                continue;
+            }
+            entries.push(Entry { author: who(r), at: when(r, "submitted_at"), body, verdict: Some(verdict) });
+        }
+    }
+    entries.sort_by_key(|e| e.at);
+    entries.insert(0, Entry { author: who(issue), at: when(issue, "created_at"), body: s(issue, "body"), verdict: None });
+    Thread {
+        title: s(issue, "title"),
+        author: who(issue),
+        standing,
+        url: s(issue, "html_url"),
+        labels: issue.get("labels").and_then(Value::as_array).into_iter().flatten().map(|l| (s(l, "name"), hex_hue(&s(l, "color")))).collect(),
+        branches,
+        entries,
+        more,
     }
 }
 
@@ -653,6 +705,38 @@ impl Gh {
         Ok(Created { number: n(&v, "number"), url: s(&v, "html_url") })
     }
 
+    /// The conversation of issue or pull request `number`: its description, comments and, for a
+    /// pull request, reviews (the first 100 of each).
+    pub async fn thread(&self, full: &str, number: u32) -> Result<Thread, String> {
+        let issue = self.get(&format!("/repos/{full}/issues/{number}")).await?;
+        let comments = self.get(&format!("/repos/{full}/issues/{number}/comments?per_page=100")).await?;
+        let pull = if issue.get("pull_request").is_some_and(|p| !p.is_null()) {
+            let detail = self.get(&format!("/repos/{full}/pulls/{number}")).await?;
+            let reviews = self.get(&format!("/repos/{full}/pulls/{number}/reviews?per_page=100")).await?;
+            Some((detail, reviews))
+        } else {
+            None
+        };
+        Ok(parse_thread(&issue, &comments, pull.as_ref().map(|(d, r)| (d, r))))
+    }
+
+    pub async fn comment(&self, full: &str, number: u32, body: &str) -> Result<(), String> {
+        self.write("POST", &format!("/repos/{full}/issues/{number}/comments"), json!({ "body": body })).await.map(|_| ())
+    }
+
+    /// Sends a review of pull request `number`: `event` is APPROVE, REQUEST_CHANGES or COMMENT.
+    pub async fn review(&self, full: &str, number: u32, event: &str, body: &str) -> Result<(), String> {
+        let mut v = json!({ "event": event });
+        if !body.is_empty() {
+            v["body"] = json!(body);
+        }
+        self.write("POST", &format!("/repos/{full}/pulls/{number}/reviews"), v).await.map(|_| ())
+    }
+
+    pub async fn reopen_issue(&self, full: &str, number: u32) -> Result<(), String> {
+        self.write("PATCH", &format!("/repos/{full}/issues/{number}"), json!({ "state": "open" })).await.map(|_| ())
+    }
+
     pub async fn close_issue(&self, full: &str, number: u32) -> Result<(), String> {
         self.write("PATCH", &format!("/repos/{full}/issues/{number}"), json!({ "state": "closed", "state_reason": "completed" })).await.map(|_| ())
     }
@@ -813,6 +897,10 @@ pub struct PullFile {
     pub patch: Option<String>,
 }
 
+pub async fn load_thread(cfg: &Config, full: &str, number: u32) -> Result<Thread, String> {
+    Gh::new(cfg).thread(full, number).await
+}
+
 pub async fn load_pull_files(cfg: &Config, full: &str, number: u32) -> Result<Vec<PullFile>, String> {
     Gh::new(cfg).pull_files(full, number).await
 }
@@ -845,7 +933,22 @@ pub enum Write {
     Branch { name: String, from: String },
     Pull(NewPull),
     CloseIssue(u32),
+    ReopenIssue(u32),
     Merge { number: u32, method: &'static str },
+    /// A comment on an issue or a pull request.
+    Comment { number: u32, body: String },
+    /// A review of a pull request; `body` may be empty for an approval.
+    Review { number: u32, verdict: Verdict, body: String },
+}
+
+impl Write {
+    /// The issue or pull request the write is about, when there is one.
+    pub fn number(&self) -> Option<u32> {
+        match self {
+            Write::CloseIssue(n) | Write::ReopenIssue(n) | Write::Merge { number: n, .. } | Write::Comment { number: n, .. } | Write::Review { number: n, .. } => Some(*n),
+            Write::Issue { .. } | Write::Branch { .. } | Write::Pull(_) => None,
+        }
+    }
 }
 
 /// What a finished write changed, for updating the screen without waiting for a reload.
@@ -855,7 +958,10 @@ pub enum Done {
     Branch(String),
     Pull(Created),
     Closed(u32),
+    Reopened(u32),
     Merged(u32),
+    Commented(u32),
+    Reviewed(u32, Verdict),
 }
 
 pub async fn run(cfg: &Config, full: &str, w: Write) -> Result<Done, String> {
@@ -865,6 +971,9 @@ pub async fn run(cfg: &Config, full: &str, w: Write) -> Result<Done, String> {
         Write::Branch { name, from } => gh.create_branch(full, &name, &from).await.map(|_| Done::Branch(name)),
         Write::Pull(p) => gh.create_pull(full, &p).await.map(Done::Pull),
         Write::CloseIssue(n) => gh.close_issue(full, n).await.map(|_| Done::Closed(n)),
+        Write::ReopenIssue(n) => gh.reopen_issue(full, n).await.map(|_| Done::Reopened(n)),
+        Write::Comment { number, body } => gh.comment(full, number, &body).await.map(|_| Done::Commented(number)),
+        Write::Review { number, verdict, body } => gh.review(full, number, verdict.event(), &body).await.map(|_| Done::Reviewed(number, verdict)),
         Write::Merge { number, method } => gh.merge_pull(full, number, method).await.map(|_| Done::Merged(number)),
     }
 }

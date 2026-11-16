@@ -282,6 +282,7 @@ With a token that has write access, the everyday changes happen in RepoHub:
 | Code tab | **Branch picker** (the branch button): files, last commit and README follow the branch you pick, and so does the Notes tab. **New branch** starts one from the branch on screen. |
 | Code or Pull requests tab | **New pull request**: pick its branch and the one it goes into, title, description, draft. |
 | Issues tab | **New issue**: title and Markdown description. |
+| Issue and pull request rows | Click one to **read its conversation**: the description, comments and reviews, as formatted text. Write a **comment** there. On a pull request, **Approve** or **Request changes** and **See the changes** (the diff). On an issue, **Close issue** or **Reopen issue**. **Open on GitHub** is still there. |
 | Issue rows | **Close**. |
 | Pull request rows | **Files** shows what it changes as a diff, unified or side by side, with syntax colours and word changes. From there **Merge** with a merge commit, **Squash** or **Rebase**. **Merge** on the row asks first. |
 | Changes tab (desktop, with a local clone) | What changed since the last commit, as a diff, new files included. **Commit** or **Commit and push** everything with a message. **Push**, **Pull** (fast-forward only), and **New pull request** from the branch. |

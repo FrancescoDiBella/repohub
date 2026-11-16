@@ -528,7 +528,14 @@ fn allowed(method: &Method, path: &str) -> bool {
                 if rest.len() >= 4 && rest[0] == "git" && rest[1] == "ref" && rest[2] == "heads" && rest[3..].iter().all(|s| !s.is_empty()) {
                     return true;
                 }
-                if rest.len() == 3 && rest[0] == "pulls" && number(rest[1]) && rest[2] == "files" {
+                if rest.len() == 3 && rest[0] == "pulls" && number(rest[1]) && (rest[2] == "files" || rest[2] == "reviews") {
+                    return true;
+                }
+                // One issue or pull request and its conversation.
+                if rest.len() == 2 && (rest[0] == "issues" || rest[0] == "pulls") && number(rest[1]) {
+                    return true;
+                }
+                if rest.len() == 3 && rest[0] == "issues" && number(rest[1]) && rest[2] == "comments" {
                     return true;
                 }
             }
@@ -536,7 +543,9 @@ fn allowed(method: &Method, path: &str) -> bool {
         }
         Method::Put if repo && rest.len() == 3 && rest[0] == "pulls" && number(rest[1]) && rest[2] == "merge" => true,
         Method::Put | Method::Delete => seg.len() == 4 && seg[0] == "user" && seg[1] == "starred" && !seg[2].is_empty() && !seg[3].is_empty(),
-        Method::Post => repo && matches!(rest, ["issues"] | ["pulls"] | ["git", "refs"]),
+        // Creating an issue, a pull request or a branch; commenting; reviewing a pull request.
+        Method::Post => repo && (matches!(rest, ["issues"] | ["pulls"] | ["git", "refs"])
+            || (rest.len() == 3 && number(rest[1]) && matches!((rest[0], rest[2]), ("issues", "comments") | ("pulls", "reviews")))),
         Method::Patch => repo && rest.len() == 2 && rest[0] == "issues" && number(rest[1]),
         _ => false,
     }
@@ -902,6 +911,15 @@ mod tests {
         assert!(!allowed(&Method::Get, "/user/emails"));
         assert!(!allowed(&Method::Get, "/orgs/acme/members"));
         assert!(!allowed(&Method::Get, "/repos/owner/repo/pulls/notanumber/files"));
+        // One issue or pull request and its conversation, and nothing next to them.
+        assert!(allowed(&Method::Get, "/repos/owner/repo/issues/12"));
+        assert!(allowed(&Method::Get, "/repos/owner/repo/issues/12/comments"));
+        assert!(allowed(&Method::Get, "/repos/owner/repo/pulls/7"));
+        assert!(allowed(&Method::Get, "/repos/owner/repo/pulls/7/reviews"));
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/issues/bad"));
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/issues/12/events"));
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/pulls/7/commits"));
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/pulls/7/reviews/3"));
         assert!(!allowed(&Method::Get, "/gists"));
         assert!(!allowed(&Method::Get, "/notifications"));
     }
@@ -920,7 +938,13 @@ mod tests {
         assert!(!allowed(&Method::Delete, "/repos/owner/repo"));
         assert!(!allowed(&Method::Post, "/user/repos"));
         assert!(!allowed(&Method::Put, "/repos/owner/repo/contents/README.md"));
-        assert!(!allowed(&Method::Post, "/repos/owner/repo/issues/12/comments"));
+        // Commenting and reviewing are writes the app makes; nothing else under them is.
+        assert!(allowed(&Method::Post, "/repos/owner/repo/issues/12/comments"));
+        assert!(allowed(&Method::Post, "/repos/owner/repo/pulls/7/reviews"));
+        assert!(!allowed(&Method::Post, "/repos/owner/repo/issues/bad/comments"));
+        assert!(!allowed(&Method::Post, "/repos/owner/repo/pulls/7/merge"));
+        assert!(!allowed(&Method::Post, "/repos/owner/repo/pulls/7/reviews/3/dismissals"));
+        assert!(!allowed(&Method::Delete, "/repos/owner/repo/issues/comments/9"));
         assert!(!allowed(&Method::Patch, "/repos/owner/repo"));
         assert!(!allowed(&Method::Patch, "/repos/owner/repo/issues/bad"));
         assert!(!allowed(&Method::Delete, "/repos/owner/repo/git/refs/heads/main"));
