@@ -501,7 +501,7 @@ fn allowed(method: &Method, path: &str) -> bool {
 
     match method {
         Method::Get => {
-            if p == "/user" || p == "/user/repos" || p == "/user/starred" || p == "/user/orgs" || p == "/search/issues" {
+            if p == "/user" || p == "/user/repos" || p == "/user/starred" || p == "/user/orgs" || p == "/search/issues" || p == "/notifications" {
                 return true;
             }
             if seg.len() == 2 && seg[0] == "users" && !seg[1].is_empty() {
@@ -546,7 +546,9 @@ fn allowed(method: &Method, path: &str) -> bool {
         // Creating an issue, a pull request or a branch; commenting; reviewing a pull request.
         Method::Post => repo && (matches!(rest, ["issues"] | ["pulls"] | ["git", "refs"])
             || (rest.len() == 3 && number(rest[1]) && matches!((rest[0], rest[2]), ("issues", "comments") | ("pulls", "reviews")))),
-        Method::Patch => repo && rest.len() == 2 && rest[0] == "issues" && number(rest[1]),
+        // Closing or reopening an issue; marking one notification as read.
+        Method::Patch => (repo && rest.len() == 2 && rest[0] == "issues" && number(rest[1]))
+            || (seg.len() == 3 && seg[0] == "notifications" && seg[1] == "threads" && number(seg[2])),
         _ => false,
     }
 }
@@ -921,7 +923,10 @@ mod tests {
         assert!(!allowed(&Method::Get, "/repos/owner/repo/pulls/7/commits"));
         assert!(!allowed(&Method::Get, "/repos/owner/repo/pulls/7/reviews/3"));
         assert!(!allowed(&Method::Get, "/gists"));
-        assert!(!allowed(&Method::Get, "/notifications"));
+        // Your notifications, and nothing under them to read.
+        assert!(allowed(&Method::Get, "/notifications"));
+        assert!(!allowed(&Method::Get, "/notifications/threads/12"));
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/notifications"));
     }
 
     #[test]
@@ -933,6 +938,12 @@ mod tests {
         assert!(allowed(&Method::Post, "/repos/owner/repo/git/refs"));
         assert!(allowed(&Method::Patch, "/repos/owner/repo/issues/12"));
         assert!(allowed(&Method::Put, "/repos/owner/repo/pulls/7/merge"));
+        // Marking one notification as read, not all of them, and no unsubscribing.
+        assert!(allowed(&Method::Patch, "/notifications/threads/12"));
+        assert!(!allowed(&Method::Patch, "/notifications/threads/abc"));
+        assert!(!allowed(&Method::Put, "/notifications"));
+        assert!(!allowed(&Method::Delete, "/notifications/threads/12"));
+        assert!(!allowed(&Method::Put, "/notifications/threads/12/subscription"));
 
         // Disallowed writes:
         assert!(!allowed(&Method::Delete, "/repos/owner/repo"));
