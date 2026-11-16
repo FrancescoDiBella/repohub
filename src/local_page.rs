@@ -39,9 +39,9 @@ pub fn files_panel(s: &App, k: &Kit, i: usize, r: &Repo) -> El {
     let mut p = panel(k).key("local-files");
     let t = match s.local.get(&r.full_name) {
         None | Some(Load::Loading) => return p.child(panel_head(k, "Files", Some(head))).child(rule(k))
-            .child(col().w_full().padding(24.0).items_center().child(text("Reading the local clone…").font(k.ty.ui).color(k.c.text_muted))),
+            .child(ui::skeleton_files(k, false, "skeleton-local-files")),
         Some(Load::Failed(e)) => return p.child(panel_head(k, "Files", Some(head))).child(rule(k))
-            .child(col().w_full().padding(16.0).child(text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap())),
+            .child(ui::error_inline(k, e, "retry-local-files", move |s: &mut App| s.load_local(i, true))),
         Some(Load::Ready(t)) => t,
     };
     let title = match (t.branch.is_empty(), t.changed()) {
@@ -129,8 +129,14 @@ pub fn viewer(s: &App, k: &Kit, i: usize, r: &Repo) -> Option<El> {
         .child(rune_kit::IconButton::new(&icons::CROSS).variant(rune_kit::IconButtonVariant::GhostMuted).label("Close the file")
             .on_press(|s: &mut App| s.local_file = None).build(k).key("file-close"));
     let body = match load {
-        Load::Loading => text("Reading…").font(k.ty.ui).color(k.c.text_muted),
-        Load::Failed(e) => text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap(),
+        Load::Loading => ui::skeleton_readme(k, "skeleton-local-file"),
+        Load::Failed(e) => {
+            let retry_path = path.clone();
+            row().w_full().center_y().gap(12.0).role("alert")
+                .child(text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap().grow(1.0).shrink())
+                .child(Button::new("Retry").control_size(ControlSize::Small)
+                    .on_press(move |s: &mut App| s.open_local(i, retry_path.clone(), false)).build(k).key("retry-local-file"))
+        }
         Load::Ready(Content::Missing) => text("This file was deleted here and the deletion isn't committed yet.").font(k.ty.small).color(k.c.text_muted).wrap(),
         Load::Ready(Content::Binary(size)) => text(format!("A binary file ({}): it can't be shown as text.", size_label(*size))).font(k.ty.small).color(k.c.text_muted).wrap(),
         Load::Ready(Content::Text { text: body, lines, cut }) => {

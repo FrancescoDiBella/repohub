@@ -82,8 +82,16 @@ pub fn run_row(k: &Kit, r: &Run, now: i64, compact: bool) -> El {
     link(e, &r.url)
 }
 
-fn listing(k: &Kit, rows: Vec<El>, empty: &str) -> El {
+fn listing(s: &App, k: &Kit, rows: Vec<El>, empty: &str, retry_key: &str) -> El {
     if rows.is_empty() {
+        if s.data.is_empty() {
+            if s.status.is_busy() {
+                return ui::skeleton_list(k, 5, "skeleton-list");
+            }
+            if let Status::Failed(e) = &s.status {
+                return ui::error_panel(k, e, retry_key, |s: &mut App| s.refresh());
+            }
+        }
         return panel(k).padding(28.0).items_center().child(text(empty.to_owned()).font(k.ty.ui).color(k.c.text_muted));
     }
     rows.into_iter().enumerate().fold(panel(k), |p, (i, r)| if i == 0 { p.child(r) } else { p.child(rule(k)).child(r) })
@@ -145,7 +153,7 @@ pub fn pulls(s: &App, k: &Kit) -> El {
         .children(crate::changes_page::pull_panel(s, k))
         .child(SegmentedControl::new(&PR_LABELS, PR_STATES.iter().position(|p| *p == s.pr_filter)).label("State").fit()
             .on_pick(|s: &mut App, i, _| s.pr_filter = PR_STATES[i.min(3)]).build(k).key("pr-filter"))
-        .child(listing(k, rows, "No pull requests in this state"))
+        .child(listing(s, k, rows, "No pull requests in this state", "retry-pulls"))
 }
 
 pub fn issues(s: &App, k: &Kit) -> El {
@@ -187,7 +195,7 @@ pub fn issues(s: &App, k: &Kit) -> El {
     };
     col().w_full().gap(16.0)
         .child(heading(k, "Issues", &sub, action_el))
-        .child(listing(k, s.data.issues.iter().map(|i| crate::actions::issue_line(s, k, i)).collect(), "No open issues"))
+        .child(listing(s, k, s.data.issues.iter().map(|i| crate::actions::issue_line(s, k, i)).collect(), "No open issues", "retry-issues"))
 }
 
 pub fn actions(s: &App, k: &Kit) -> El {
@@ -199,14 +207,18 @@ pub fn actions(s: &App, k: &Kit) -> El {
     } else {
         None
     };
-    let sub = if s.data.runs_total > s.data.runs.len() {
+    let sub = if s.data.is_empty() && s.status.is_busy() {
+        "Loading recent workflow runs…".to_owned()
+    } else if s.data.is_empty() && matches!(s.status, Status::Failed(_)) {
+        "Recent workflow runs across your most recently pushed repositories.".to_owned()
+    } else if s.data.runs_total > s.data.runs.len() {
         format!("Showing {} of {} recent runs ({} succeeded) · {} most recently pushed repositories", s.data.runs.len(), s.data.runs_total, ok, s.cfg.activity_repos)
     } else {
         format!("{ok} of {} recent runs succeeded · {} most recently pushed repositories", s.data.runs.len(), s.cfg.activity_repos)
     };
     col().w_full().gap(16.0)
         .child(heading(k, "Actions", &sub, action))
-        .child(listing(k, s.data.runs.iter().map(|r| run_row(k, r, s.now, s.compact)).collect(), "No recent runs"))
+        .child(listing(s, k, s.data.runs.iter().map(|r| run_row(k, r, s.now, s.compact)).collect(), "No recent runs", "retry-actions"))
 }
 
 fn info(k: &Kit, label: &str, value: String) -> El {

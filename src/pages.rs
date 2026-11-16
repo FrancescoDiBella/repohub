@@ -6,7 +6,7 @@ use crate::lists::{pull_row, run_row};
 use crate::model::{PullState, Repo, lang_hue};
 use crate::ui::{self, panel, panel_head, rule};
 use crate::state::{BranchSlot, Compose, Load, OwnerFilter, RepoFilter, RepoSort, RepoTab};
-use crate::{App, Page, actions, icons};
+use crate::{App, Page, Status, actions, icons};
 
 pub fn heading(k: &Kit, title: &str, subtitle: &str, action: Option<El>) -> El {
     let mut r = row().w_full().center_y().justify_between().gap(12.0).flex_wrap()
@@ -37,40 +37,97 @@ pub fn open_button(k: &Kit, label: &str, url: &str, key: &str) -> El {
 
 pub fn overview(s: &App, k: &Kit) -> El {
     let d = &s.data;
+    let empty_loading = d.is_empty() && s.status.is_busy();
+    let empty_failed = if d.is_empty() {
+        if let Status::Failed(e) = &s.status { Some(e.as_str()) } else { None }
+    } else {
+        None
+    };
     let prs_capped = d.prs_capped();
     let issues_capped = d.issues_capped();
     let open_prs = d.pulls.iter().filter(|p| matches!(p.state, PullState::Open | PullState::Draft)).count();
     let issues = d.issues.len();
     let metric = |icon, value: String, caption, tint, page: Page| {
         let target = page.clone();
+        let a11y = if value == "—" { format!("{caption}, not loaded") } else { format!("{value} {caption}") };
         ui::metric(k, icon, &value, caption, tint).hover(k.c.hover).press(k.c.pressed)
-            .role("button").label(format!("{value} {caption}")).key(format!("metric-{caption}"))
+            .role("button").label(a11y).key(format!("metric-{caption}"))
             .on_press(move |s: &mut App| s.go(target.clone()))
     };
-    let metrics = row().w_full().gap(12.0).flex_wrap()
-        .child(metric(&icons::REPO, crate::model::capped_if(d.repos.len(), d.repos_capped), "Repositories", k.c.info.icon, Page::Repos))
-        .child(metric(&icons::STAR, s.starred_count().to_string(), "Stars received", k.c.warning.icon, Page::Repos))
-        .child(metric(&icons::PULL, crate::model::capped_if(open_prs, prs_capped), "Open pull requests", k.c.success.icon, Page::Pulls))
-        .child(metric(&icons::ISSUE, crate::model::capped_if(issues, issues_capped), "Open issues", k.c.danger.icon, Page::Issues));
-    let commits: u32 = d.activity.iter().sum();
-    let activity = panel(k)
-        .child(panel_head(k, "Activity · last 26 weeks", Some(text(format!("{commits} commits")).font(k.ty.small).color(k.c.text_muted))))
-        .child(col().w_full().px(16.0).pb(16.0).child(ui::sparkline(k, &d.activity, 72.0)));
-    let recent = d.repos.iter().enumerate().take(4).fold(
-        panel(k).child(panel_head(k, "Recent repositories", Some(see_all(k, "See all", Page::Repos)))),
-        |p, (i, r)| p.child(rule(k)).child(compact_repo(k, i, r, &d.profile.login, s.now)),
-    );
-    let review = d.pulls.iter().filter(|p| matches!(p.state, PullState::Open | PullState::Draft)).take(4).fold(
-        panel(k).child(panel_head(k, "Open pull requests", Some(see_all(k, "All pull requests", Page::Pulls)))),
-        |p, pr| p.child(rule(k)).child(pull_row(k, pr, s.now, true)),
-    );
+    let metric_loading = |icon, caption, tint, page: Page| {
+        let target = page.clone();
+        ui::metric_skeleton(k, icon, caption, tint).hover(k.c.hover).press(k.c.pressed)
+            .role("button").label(format!("Loading {caption}")).key(format!("metric-{caption}"))
+            .on_press(move |s: &mut App| s.go(target.clone()))
+    };
+    let metrics = if empty_loading {
+        row().w_full().gap(12.0).flex_wrap()
+            .child(metric_loading(&icons::REPO, "Repositories", k.c.info.icon, Page::Repos))
+            .child(metric_loading(&icons::STAR, "Stars received", k.c.warning.icon, Page::Repos))
+            .child(metric_loading(&icons::PULL, "Open pull requests", k.c.success.icon, Page::Pulls))
+            .child(metric_loading(&icons::ISSUE, "Open issues", k.c.danger.icon, Page::Issues))
+    } else if empty_failed.is_some() {
+        row().w_full().gap(12.0).flex_wrap()
+            .child(metric(&icons::REPO, "—".into(), "Repositories", k.c.info.icon, Page::Repos))
+            .child(metric(&icons::STAR, "—".into(), "Stars received", k.c.warning.icon, Page::Repos))
+            .child(metric(&icons::PULL, "—".into(), "Open pull requests", k.c.success.icon, Page::Pulls))
+            .child(metric(&icons::ISSUE, "—".into(), "Open issues", k.c.danger.icon, Page::Issues))
+    } else {
+        row().w_full().gap(12.0).flex_wrap()
+            .child(metric(&icons::REPO, crate::model::capped_if(d.repos.len(), d.repos_capped), "Repositories", k.c.info.icon, Page::Repos))
+            .child(metric(&icons::STAR, s.starred_count().to_string(), "Stars received", k.c.warning.icon, Page::Repos))
+            .child(metric(&icons::PULL, crate::model::capped_if(open_prs, prs_capped), "Open pull requests", k.c.success.icon, Page::Pulls))
+            .child(metric(&icons::ISSUE, crate::model::capped_if(issues, issues_capped), "Open issues", k.c.danger.icon, Page::Issues))
+    };
     let first = d.profile.name.split_whitespace().next().unwrap_or("").to_owned();
     let hello = if first.is_empty() { "Welcome back".to_owned() } else { format!("Welcome back, {first}") };
+    let head = heading(k, &hello, &match s.freshness() {
+        Some(f) => format!("Here's what's happening in your repositories. {f}."),
+        None => "Here's what's happening in your repositories today.".into(),
+    }, Some(new_repo_button(k)));
+    if let Some(err) = empty_failed {
+        return col().w_full().gap(16.0)
+            .child(head)
+            .child(metrics)
+            .child(ui::error_panel(k, err, "retry-overview", |s: &mut App| s.refresh()));
+    }
+    let commits: u32 = d.activity.iter().sum();
+    let activity = if empty_loading {
+        panel(k).key("skeleton-activity").role("status").label("Loading activity…")
+            .child(panel_head(k, "Activity · last 26 weeks", Some(ui::skeleton_faint(k, 72.0, 12.0))))
+            .child(col().w_full().px(16.0).pb(16.0).child(ui::sparkline_skeleton(k, 72.0)))
+    } else {
+        panel(k)
+            .child(panel_head(k, "Activity · last 26 weeks", Some(text(format!("{commits} commits")).font(k.ty.small).color(k.c.text_muted))))
+            .child(col().w_full().px(16.0).pb(16.0).child(ui::sparkline(k, &d.activity, 72.0)))
+    };
+    let recent_head = panel(k).child(panel_head(k, "Recent repositories", Some(see_all(k, "See all", Page::Repos))));
+    let recent = if empty_loading {
+        ui::skeleton_rows_in_panel(k, recent_head.key("skeleton-recent").role("status").label("Loading recent repositories…"), 4, false)
+    } else if d.repos.is_empty() {
+        recent_head.child(rule(k)).child(col().w_full().padding(24.0).items_center()
+            .child(text("No repositories to show").font(k.ty.ui).color(k.c.text_muted)))
+    } else {
+        d.repos.iter().enumerate().take(4).fold(
+            recent_head,
+            |p, (i, r)| p.child(rule(k)).child(compact_repo(k, i, r, &d.profile.login, s.now)),
+        )
+    };
+    let review_head = panel(k).child(panel_head(k, "Open pull requests", Some(see_all(k, "All pull requests", Page::Pulls))));
+    let open_list: Vec<_> = d.pulls.iter().filter(|p| matches!(p.state, PullState::Open | PullState::Draft)).take(4).collect();
+    let review = if empty_loading {
+        ui::skeleton_rows_in_panel(k, review_head.key("skeleton-pulls").role("status").label("Loading open pull requests…"), 4, true)
+    } else if open_list.is_empty() {
+        review_head.child(rule(k)).child(col().w_full().padding(24.0).items_center()
+            .child(text("No open pull requests").font(k.ty.ui).color(k.c.text_muted)))
+    } else {
+        open_list.into_iter().fold(
+            review_head,
+            |p, pr| p.child(rule(k)).child(pull_row(k, pr, s.now, true)),
+        )
+    };
     col().w_full().gap(16.0)
-        .child(heading(k, &hello, &match s.freshness() {
-            Some(f) => format!("Here's what's happening in your repositories. {f}."),
-            None => "Here's what's happening in your repositories today.".into(),
-        }, Some(new_repo_button(k))))
+        .child(head)
         .child(metrics)
         .child(activity)
         .child(row().w_full().gap(16.0).flex_wrap()
@@ -142,12 +199,27 @@ pub fn repos(s: &App, k: &Kit) -> El {
         list = list.child(repo_card(k, i, &all[i], !all[i].owner.eq_ignore_ascii_case(&me), s.is_pinned(i), s.now));
     }
     if shown.is_empty() {
-        let msg = if all.is_empty() { "No repositories to show" } else { "No repositories match your search" };
-        list = list.child(panel(k).padding(32.0).items_center().gap(6.0)
-            .child(ui::ico(&icons::REPO, 24.0, k.c.icon_faint))
-            .child(text(msg).font(k.ty.ui).color(k.c.text_muted)));
+        if s.data.is_empty() && s.status.is_busy() {
+            list = list.key("skeleton-repos").role("status").label("Loading repositories…");
+            for n in 0..4 {
+                list = list.child(ui::skeleton_repo_card(k, n));
+            }
+        } else if s.data.is_empty() && matches!(s.status, Status::Failed(_)) {
+            if let Status::Failed(e) = &s.status {
+                list = list.child(ui::error_panel(k, e, "retry-repos", |s: &mut App| s.refresh()));
+            }
+        } else {
+            let msg = if all.is_empty() { "No repositories to show" } else { "No repositories match your search" };
+            list = list.child(panel(k).padding(32.0).items_center().gap(6.0)
+                .child(ui::ico(&icons::REPO, 24.0, k.c.icon_faint))
+                .child(text(msg).font(k.ty.ui).color(k.c.text_muted)));
+        }
     }
-    let sub = if s.data.repos_capped {
+    let sub = if s.data.is_empty() && s.status.is_busy() {
+        "Loading repositories…".to_owned()
+    } else if s.data.is_empty() && matches!(s.status, Status::Failed(_)) {
+        "Couldn't load repositories.".to_owned()
+    } else if s.data.repos_capped {
         format!("Showing {} of {}+ repositories", shown.len(), all.len())
     } else {
         format!("{} of {} repositories", shown.len(), all.len())
@@ -357,10 +429,8 @@ fn code_tab(s: &App, k: &Kit, i: usize, r: &Repo) -> El {
     }
     match load {
         None => files = files.child(col().w_full().padding(24.0).items_center().child(text("Open the repository to load its files").font(k.ty.ui).color(k.c.text_muted))),
-        Some(Load::Loading) => files = files.child(col().w_full().padding(24.0).items_center().child(text("Loading files…").font(k.ty.ui).color(k.c.text_muted))),
-        Some(Load::Failed(e)) => files = files.child(row().w_full().padding(16.0).center_y().gap(12.0)
-            .child(text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap().grow(1.0).shrink())
-            .child(Button::new("Retry").control_size(ControlSize::Small).on_press(move |s: &mut App| s.load_detail(i)).build(k).key("retry-files"))),
+        Some(Load::Loading) => files = files.child(ui::skeleton_files(k, true, "skeleton-files")),
+        Some(Load::Failed(e)) => files = files.child(ui::error_inline(k, e, "retry-files", move |s: &mut App| s.load_detail(i))),
         Some(Load::Ready(d)) => {
             if let Some(c) = &d.commit {
                 let age = c.age_ago(s.now);
@@ -371,7 +441,10 @@ fn code_tab(s: &App, k: &Kit, i: usize, r: &Repo) -> El {
                     .child(text(if s.compact { age } else { format!("{} · {}", c.sha, age) }).font(k.ty.mono).color(k.c.text_faint)));
             }
             if let Some(e) = &d.error {
-                files = files.child(col().w_full().padding(16.0).child(text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap()));
+                if d.commit.is_some() {
+                    files = files.child(rule(k));
+                }
+                files = files.child(ui::error_inline(k, e, "retry-files", move |s: &mut App| s.load_detail(i)));
             }
             for (name, dir) in d.files.iter().take(40) {
                 // A file or folder opens on GitHub.
@@ -384,6 +457,13 @@ fn code_tab(s: &App, k: &Kit, i: usize, r: &Repo) -> El {
                         .child(text(name.clone()).font(k.ty.small).color(k.c.text_base).grow(1.0).shrink())
                         .child(ui::ico(&icons::EXTERNAL, 13.0, k.c.icon_faint)),
                 );
+            }
+            if d.files.is_empty() && d.error.is_none() {
+                if d.commit.is_some() {
+                    files = files.child(rule(k));
+                }
+                files = files.child(col().w_full().padding(24.0).items_center()
+                    .child(text("No files in this branch").font(k.ty.ui).color(k.c.text_muted)));
             }
             if d.files.len() > 40 {
                 let tree_url = format!("{}/tree/{}", r.url, at);
@@ -401,7 +481,7 @@ fn code_tab(s: &App, k: &Kit, i: usize, r: &Repo) -> El {
     let readme_err = detail.and_then(|d| d.readme_error.as_deref());
     let readme_body = match load {
         Some(Load::Failed(e)) => text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap(),
-        Some(Load::Loading) => text("Loading…").font(k.ty.ui).color(k.c.text_muted),
+        Some(Load::Loading) => ui::skeleton_readme(k, "skeleton-readme"),
         None => text("Open the repository to load its README").font(k.ty.ui).color(k.c.text_muted),
         Some(Load::Ready(_)) => match (&readme, readme_err) {
             (Some(src), _) => readme_view(k, &crate::markdown::prepare(src, &r.full_name, &at)),
@@ -412,6 +492,10 @@ fn code_tab(s: &App, k: &Kit, i: usize, r: &Repo) -> El {
     // The README panel's head: copy the whole file as Markdown, or read it on GitHub, or retry if failed.
     let readme_tools = match load {
         Some(Load::Failed(_)) => row().gap(4.0).center_y()
+            .child(Button::new("Retry").control_size(ControlSize::Small)
+                .on_press(move |s: &mut App| s.load_detail(i))
+                .build(k).key("readme-retry")),
+        _ if readme.is_none() && readme_err.is_some() => row().gap(4.0).center_y()
             .child(Button::new("Retry").control_size(ControlSize::Small)
                 .on_press(move |s: &mut App| s.load_detail(i))
                 .build(k).key("readme-retry")),
@@ -435,6 +519,15 @@ fn code_tab(s: &App, k: &Kit, i: usize, r: &Repo) -> El {
         .children(shown.iter().map(|(l, b)| el().grow(*b as f32).h_full().fill(rune::oklch(0.68, 0.15, lang_hue(l)))));
     let legend = row().gap(12.0).flex_wrap().children(shown.iter().map(|(l, b)| ui::language(k, &format!("{l} {:.0}%", *b as f64 * 100.0 / total as f64), lang_hue(l))));
     let desc = if r.description.is_empty() { "No description".to_owned() } else { r.description.clone() };
+    let lang_el = if matches!(load, Some(Load::Loading)) && langs.is_empty() {
+        col().w_full().gap(8.0).key("skeleton-languages")
+            .child(ui::skeleton_faint(k, 200.0, 8.0).w_full())
+            .child(row().gap(12.0).child(ui::skeleton_faint(k, 64.0, 11.0)).child(ui::skeleton_faint(k, 52.0, 11.0)))
+    } else if langs.is_empty() {
+        text("—").font(k.ty.small).color(k.c.text_faint)
+    } else {
+        col().w_full().gap(8.0).child(bar).child(legend)
+    };
     let about = panel(k).padding(16.0).gap(12.0)
         .child(text("About").font(k.ty.ui_medium).color(k.c.text_base))
         .child(text(desc).font(k.ty.small).color(k.c.text_muted).wrap())
@@ -446,7 +539,7 @@ fn code_tab(s: &App, k: &Kit, i: usize, r: &Repo) -> El {
             .child(ui::stat(k, &icons::BRANCH, format!("default branch: {}", r.branch))))
         .child(rule(k))
         .child(text("Languages").font(k.ty.ui_medium).color(k.c.text_base))
-        .child(if langs.is_empty() { text("—").font(k.ty.small).color(k.c.text_faint) } else { col().w_full().gap(8.0).child(bar).child(legend) });
+        .child(lang_el);
     row().w_full().gap(16.0).flex_wrap()
         .child(col().grow(3.0).min_w(if s.compact { 260.0 } else { 380.0 }).gap(12.0)
             .child(row().w_full().justify_between().gap(8.0).flex_wrap()
