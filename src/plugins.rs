@@ -15,6 +15,9 @@
 //! - `@repohub` gives it what's on screen (`context()`: the repository, its issues and pull
 //!   requests, your repositories and profile, the theme) and a few actions: `open(url)`,
 //!   `notify(text)`, `copy(text)`, `openRepo(fullName)`. `changed` fires when the context changes.
+//! - `open` and `copy` reach outside the app (a link can carry what the plugin read; copied
+//!   text gets pasted somewhere), so they only ask: the app shows the request ([`Ask`]) and the
+//!   user allows it or not.
 //! - Colours follow the app's theme: `accent`, `page`, `panel`, `text`, `muted`, `border`,
 //!   `success`, `warning`, `danger`, and rune-luau's own names (`card`, `text-secondary`…).
 //! - Installed from a folder or a Git address (copied or cloned into the plugins folder), turned
@@ -66,6 +69,49 @@ impl Manifest {
         }
         Ok(m)
     }
+}
+
+/// Something a plugin wants that reaches outside the app. It never happens by itself: the app
+/// shows it and the user allows it or not.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Ask {
+    /// Open this `https://` address in the browser.
+    Open(String),
+    /// Put this text on the clipboard.
+    Copy(String),
+}
+
+/// An [`Ask`] and the plugin (its name) it comes from.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Request {
+    pub plugin: String,
+    pub ask: Ask,
+}
+
+impl Ask {
+    /// A link a plugin may ask to open: `https://`, of a sane length, with no spaces or
+    /// control characters.
+    pub fn open(url: &str) -> Option<Ask> {
+        let ok = url.starts_with("https://") && url.len() <= 2000 && host(url).is_some_and(|h| !h.is_empty())
+            && !url.chars().any(|c| c.is_control() || c.is_whitespace());
+        ok.then(|| Ask::Open(url.to_owned()))
+    }
+
+    /// Text a plugin may ask to copy: without control characters (they could run commands
+    /// when pasted into a terminal), up to 100,000 characters.
+    pub fn copy(text: &str) -> Option<Ask> {
+        let clean: String = text.chars().filter(|c| !c.is_control() || matches!(c, '\n' | '\t')).take(100_000).collect();
+        (!clean.trim().is_empty()).then_some(Ask::Copy(clean))
+    }
+}
+
+/// The host of an `https://` address ("example.com"), which is what the user is shown first.
+pub fn host(url: &str) -> Option<&str> {
+    let rest = url.strip_prefix("https://")?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    // What follows an `@` is the real host; what precedes it only looks like one.
+    let host = authority.rsplit('@').next()?;
+    Some(host.split(':').next().unwrap_or(host))
 }
 
 /// One installed plugin.
@@ -160,7 +206,12 @@ impl Plugins {
         }
     }
 
-    fn make(&self, handle: &AppHandle<App>, i: usize) -> Option<Script> {
+    fn make(&mut self, handle: &AppHandle<App>, i: usize) -> Option<Script> {
+        // A folder put there by hand gets the same check as an installed one.
+        if let Err(e) = check_tree(&self.list[i].dir) {
+            self.list[i].problem = Some(e);
+            return None;
+        }
         let p = &self.list[i];
         let sources = match Sources::from_dir(&p.dir) {
             Ok(s) => s,
@@ -176,6 +227,7 @@ impl Plugins {
         let context = self.context.clone();
         let h = handle.clone();
         let id = p.id.clone();
+        let name = p.manifest.name.clone();
         let log_id = p.id.clone();
         let options = ScriptOptions::new()
             .palette(palette)
@@ -187,9 +239,11 @@ impl Plugins {
                 api.set("context", lua.create_function(move |_, ()| Ok(ctx.borrow().clone()))?)?;
                 api.set("changed", host.signal("changed")?)?;
                 let hh = h.clone();
+                let asks = name.clone();
                 api.set("open", lua.create_function(move |_, url: String| {
-                    if url.starts_with("https://") || url.starts_with("http://") {
-                        hh.update(move |_: &mut App, tx| { let _ = tx.open_url(&url); });
+                    if let Some(ask) = Ask::open(&url) {
+                        let request = Request { plugin: asks.clone(), ask };
+                        hh.update(move |s: &mut App, _| s.plugin_asks(request));
                     }
                     Ok(())
                 })?)?;
@@ -202,8 +256,12 @@ impl Plugins {
                     Ok(())
                 })?)?;
                 let hh = h.clone();
+                let asks = name.clone();
                 api.set("copy", lua.create_function(move |_, text: String| {
-                    hh.update(move |s: &mut App, tx| { tx.copy(text); s.notify("Copied"); });
+                    if let Some(ask) = Ask::copy(&text) {
+                        let request = Request { plugin: asks.clone(), ask };
+                        hh.update(move |s: &mut App, _| s.plugin_asks(request));
+                    }
                     Ok(())
                 })?)?;
                 let hh = h.clone();
@@ -316,15 +374,94 @@ impl Plugins {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+/// A plugin is a few small text files.
+const MAX_FILES: usize = 500;
+const MAX_BYTES: u64 = 10 << 20;
+/// How long a clone may take.
+const CLONE_SECONDS: u64 = 60;
+
+/// Checks a plugin's folder: no symbolic links (the loader would follow them out of the
+/// folder, to any file or the whole disk), and not more or bigger files than a plugin needs.
+pub(crate) fn check_tree(dir: &Path) -> Result<(), String> {
+    fn walk(dir: &Path, files: &mut usize, bytes: &mut u64) -> Result<(), String> {
+        let entries = std::fs::read_dir(dir).map_err(|e| format!("Can't read {}: {e}", dir.display()))?;
+        for e in entries.flatten() {
+            let path = e.path();
+            // Not `metadata`: that follows links.
+            let meta = std::fs::symlink_metadata(&path).map_err(|e| format!("Can't read {}: {e}", path.display()))?;
+            if meta.file_type().is_symlink() {
+                return Err(format!("This plugin has a link to somewhere else ({}): RepoHub doesn't run plugins with links.", e.file_name().to_string_lossy()));
+            }
+            if meta.is_dir() {
+                walk(&path, files, bytes)?;
+            } else {
+                *files += 1;
+                *bytes += meta.len();
+            }
+            if *files > MAX_FILES || *bytes > MAX_BYTES {
+                return Err(format!("This is too big to be a plugin (more than {MAX_FILES} files or {} MB).", MAX_BYTES >> 20));
+            }
+        }
+        Ok(())
+    }
+    walk(dir, &mut 0, &mut 0)
+}
+
+/// `git clone` for a plugin: the newest commit only, and it never stops to ask (a password, a
+/// host key), because nobody could answer.
 pub(crate) fn clone_command(source: &str, dest: &Path) -> std::process::Command {
     let mut cmd = std::process::Command::new("git");
     crate::config::scrub_child_env(&mut cmd);
-    cmd.args(["clone", "--depth", "1", "--", source]).arg(dest);
+    cmd.env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "")
+        .env("SSH_ASKPASS", "")
+        .env("GIT_SSH_COMMAND", "ssh -oBatchMode=yes")
+        .args(["-c", "credential.interactive=never", "-c", "protocol.ext.allow=never", "-c", "protocol.file.allow=never"])
+        .args(["clone", "--depth", "1", "--single-branch", "--no-tags", "--no-recurse-submodules", "--", source])
+        .arg(dest)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // no console window flashing up
+    }
     cmd
 }
 
+/// Runs `cmd` for at most `seconds`; an error says what git said, or that it took too long.
+fn run_limited(mut cmd: std::process::Command, seconds: u64) -> Result<(), String> {
+    use std::io::Read;
+    let mut child = cmd.spawn().map_err(|e| format!("Couldn't run git: {e}"))?;
+    // Read what git says while it runs, so a chatty failure can't fill the pipe and hang.
+    let said = child.stderr.take().map(|mut e| std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = e.read_to_string(&mut s);
+        s
+    }));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(50)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    let said = said.and_then(|t| t.join().ok()).unwrap_or_default();
+    match status {
+        Some(s) if s.success() => Ok(()),
+        Some(_) => Err(format!("git clone failed: {}", said.trim())),
+        None => Err(format!("Stopped after {seconds} seconds: the address didn't answer, or it's too big to be a plugin.")),
+    }
+}
+
 /// Installs a plugin from a folder (copied) or a Git address (cloned); returns its id.
+/// Cloning can take a while: call it off the UI thread.
 pub fn install(source: &str) -> Result<String, String> {
     let source = source.trim();
     if source.is_empty() {
@@ -344,12 +481,12 @@ pub fn install(source: &str) -> Result<String, String> {
         return Err(format!("A plugin called {id} is already installed: remove it first."));
     }
     if remote {
-        let mut cmd = clone_command(source, &dest);
-        let out = cmd.output().map_err(|e| format!("Couldn't run git: {e}"))?;
-        if !out.status.success() {
+        if let Err(e) = run_limited(clone_command(source, &dest), CLONE_SECONDS) {
             let _ = std::fs::remove_dir_all(&dest);
-            return Err(format!("git clone failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
+            return Err(e);
         }
+        // The plugin is its files, not their history.
+        let _ = std::fs::remove_dir_all(dest.join(".git"));
     } else {
         let src = crate::clones::expand(source);
         if !src.join("plugin.json").is_file() {
@@ -360,7 +497,10 @@ pub fn install(source: &str) -> Result<String, String> {
             format!("Couldn't copy {}: {e}", src.display())
         })?;
     }
-    if let Err(e) = std::fs::read_to_string(dest.join("plugin.json")).map_err(|e| e.to_string()).and_then(|j| Manifest::parse(&j)) {
+    let checked = check_tree(&dest).and_then(|()| {
+        std::fs::read_to_string(dest.join("plugin.json")).map_err(|_| "This isn't a plugin: it has no plugin.json.".to_owned()).and_then(|j| Manifest::parse(&j)).map(|_| ())
+    });
+    if let Err(e) = checked {
         let _ = std::fs::remove_dir_all(&dest);
         return Err(e);
     }
@@ -482,6 +622,77 @@ mod tests {
         assert!(Manifest::parse("nope").is_err());
         assert!(Manifest::parse(EXAMPLE[0].1).is_ok(), "the example's manifest");
         assert!(valid_id("my-plugin_2") && !valid_id("../x") && !valid_id(""));
+    }
+
+    #[test]
+    fn what_a_plugin_may_ask_for() {
+        assert_eq!(Ask::open("https://example.com/a?b=1"), Some(Ask::Open("https://example.com/a?b=1".into())));
+        for bad in ["http://example.com", "file:///etc/passwd", "javascript:alert(1)", "https://", "https:///x", "https://example.com/a b", "https://example.com/\n", &format!("https://example.com/{}", "a".repeat(2000))] {
+            assert_eq!(Ask::open(bad), None, "{bad}");
+        }
+        // The user is shown where the link really goes.
+        assert_eq!(host("https://github.com@evil.example/x"), Some("evil.example"));
+        assert_eq!(host("https://example.com:8443/x?y#z"), Some("example.com"));
+        // Copied text can't carry what a terminal would run.
+        assert_eq!(Ask::copy("ls\x1b[201~rm -rf ~\r\nnext\tx"), Some(Ask::Copy("ls[201~rm -rf ~\nnext\tx".into())));
+        assert_eq!(Ask::copy(" \x1b\x07 "), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_plugin_with_a_link_or_too_much_in_it_is_refused() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("repohub-plugin-tree-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // SAFETY: the lock keeps other environment-changing tests out.
+        unsafe { std::env::set_var("REPOHUB_DATA_DIR", &dir) };
+        create_example().unwrap();
+        let plugin = folder().join("checklist");
+        assert_eq!(check_tree(&plugin), Ok(()));
+        // A link to the home folder, as a cloned repository could carry.
+        std::fs::create_dir_all(plugin.join("lib")).unwrap();
+        std::os::unix::fs::symlink("/", plugin.join("lib").join("everything")).unwrap();
+        assert!(check_tree(&plugin).unwrap_err().contains("link"));
+        // Found in the plugins folder, it's listed with the reason and never started.
+        let mut p = Plugins::scan();
+        assert_eq!(p.list.len(), 1);
+        let i = 0;
+        assert!(check_tree(&p.list[i].dir).is_err());
+        p.list[i].problem = check_tree(&p.list[i].dir).err();
+        assert!(p.list[i].trouble().unwrap().contains("link") && !p.list[i].running());
+        std::fs::remove_file(plugin.join("lib").join("everything")).unwrap();
+        // Too many files, then one file that is too big.
+        for n in 0..=MAX_FILES {
+            std::fs::write(plugin.join("lib").join(format!("f{n}.luau")), "").unwrap();
+        }
+        assert!(check_tree(&plugin).unwrap_err().contains("too big"));
+        std::fs::remove_dir_all(plugin.join("lib")).unwrap();
+        assert_eq!(check_tree(&plugin), Ok(()));
+        std::fs::write(plugin.join("big.bin"), vec![0u8; MAX_BYTES as usize + 1]).unwrap();
+        assert!(check_tree(&plugin).unwrap_err().contains("too big"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_clone_never_waits_for_an_answer_and_is_stopped_in_time() {
+        let cmd = clone_command("https://example.com/p.git", Path::new("/tmp/p"));
+        let env: Vec<(String, String)> = cmd.get_envs().filter_map(|(k, v)| Some((k.to_str()?.to_owned(), v?.to_str()?.to_owned()))).collect();
+        assert!(env.contains(&("GIT_TERMINAL_PROMPT".into(), "0".into())));
+        assert!(env.contains(&("GIT_SSH_COMMAND".into(), "ssh -oBatchMode=yes".into())));
+        let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert!(args.windows(2).any(|w| w == ["--depth", "1"]) && args.contains(&"protocol.ext.allow=never".to_owned()));
+        assert_eq!(&args[args.len() - 3..], ["--", "https://example.com/p.git", "/tmp/p"]);
+        // A command that would hang is stopped, and the wait is about the limit, not its length.
+        let mut hang = std::process::Command::new("sleep");
+        hang.arg("30").stderr(std::process::Stdio::piped());
+        let started = std::time::Instant::now();
+        assert!(run_limited(hang, 1).unwrap_err().contains("Stopped after 1 seconds"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        // A failure reports what the program said.
+        let mut fails = std::process::Command::new("sh");
+        fails.args(["-c", "echo nope >&2; exit 3"]).stderr(std::process::Stdio::piped());
+        assert_eq!(run_limited(fails, 5).unwrap_err(), "git clone failed: nope");
     }
 
     #[test]

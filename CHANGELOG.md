@@ -75,6 +75,11 @@ The sections are **Added**, **Changed** and **Fixed**.
 - A new look, with a more readable layout.
 
 ### Fixed
+- Security (plugins): a plugin can no longer open a link or copy text by itself. It asks, and
+  RepoHub shows the address or the text with **Open**/**Copy** and **Don't**. Only `https://`
+  links, and copied text has no control characters. Installing from a Git address runs in the
+  background, never waits for a password, and stops after a minute. A plugin with links to
+  other folders, or more than 500 files or 10 MB, is refused.
 - Security: text pasted into the Terminal can no longer end the paste early and run as typed
   commands (control characters are removed). The **Clone into …** command is refused when the
   repository's address or name has characters a shell could read as a command.
