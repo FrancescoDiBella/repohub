@@ -200,6 +200,8 @@ pub struct App {
     settings_section: state::SettingsSection,
     /// The connection's details (environment variables, files) are shown in Settings.
     connection_details: bool,
+    /// Issues being reopened with Undo, to put back in the list when GitHub confirms.
+    reopening: Vec<model::Issue>,
     /// What the Pull requests and the Issues pages are narrowed to.
     pull_filter: filters::ListFilter,
     issue_filter: filters::ListFilter,
@@ -1106,11 +1108,13 @@ impl App {
     }
 
     fn delete_look(&mut self, id: &str) {
-        let name = self.looks.get(id).map(|t| t.name.clone()).unwrap_or_default();
+        let Some(at) = self.looks.all.iter().position(|t| t.id == id && !t.builtin) else { return };
+        let look = self.looks.all[at].clone();
+        let (light, dark) = (self.looks.light == id, self.looks.dark == id);
         if self.looks.delete(id) {
             self.looks.save();
             self.look_edit = LookEditor::default();
-            self.notify(format!("Deleted {name}"));
+            self.notify_undo(format!("Deleted {}", look.name), state::Undo::Look { look, at, light, dark });
         }
     }
 
@@ -1146,6 +1150,41 @@ impl App {
         self.show_toast(msg.into(), ToastKind::Done, 4500);
     }
 
+    /// Like `notify`, with **Undo**; shown longer, so there's time to press it.
+    fn notify_undo(&mut self, msg: impl Into<String>, undo: state::Undo) {
+        self.show_toast(msg.into(), ToastKind::Done, 9000);
+        if let Some(t) = self.toast.as_mut() {
+            t.undo = Some(undo);
+        }
+    }
+
+    /// Puts back what the toast's **Undo** offers.
+    fn undo(&mut self) {
+        let Some(undo) = self.toast.take().and_then(|t| t.undo) else { return };
+        match undo {
+            state::Undo::Look { look, at, light, dark } => {
+                let name = look.name.clone();
+                let id = look.id.clone();
+                let at = at.min(self.looks.all.len());
+                self.looks.all.insert(at, look);
+                if light {
+                    self.looks.light = id.clone();
+                }
+                if dark {
+                    self.looks.dark = id;
+                }
+                self.looks.save();
+                self.notify(format!("Restored {name}"));
+            }
+            state::Undo::Reopen { repo, issue } => {
+                let number = issue.number;
+                // It comes back to the list once GitHub has reopened it.
+                self.reopening.push(issue);
+                self.write(&repo, github::Write::ReopenIssue(number));
+            }
+        }
+    }
+
     /// Like `notify`, for something that went wrong: marked as a problem and shown longer.
     fn notify_problem(&mut self, msg: impl Into<String>) {
         self.show_toast(msg.into(), ToastKind::Problem, 8000);
@@ -1154,7 +1193,7 @@ impl App {
     fn show_toast(&mut self, text: String, kind: ToastKind, ms: u32) {
         self.toast_id += 1;
         let id = self.toast_id;
-        self.toast = Some(Toast { id, text, kind });
+        self.toast = Some(Toast { id, text, kind, undo: None });
         if let Some(h) = self.handle.clone() {
             net::spawn(h, move || net::sleep(ms), move |s: &mut App, _| {
                 if s.toast.as_ref().is_some_and(|t| t.id == id) {
@@ -1371,7 +1410,11 @@ impl App {
         }
         let Some(r) = self.data.repos.get(i) else { return };
         let full = r.full_name.clone();
-        let Some(root) = clones_shim::find(&full) else { return };
+        let Some(root) = clones_shim::find(&full) else {
+            // Say why nothing happens rather than doing nothing.
+            self.notify_problem(format!("There's no local copy of {full} on this computer: pick its folder in the Terminal tab, or clone it there."));
+            return;
+        };
         let Some(h) = self.handle.clone() else { return };
         self.git_job = Some(job);
         self.git_error = None;
@@ -1764,6 +1807,7 @@ impl App {
                 self.notify(format!("Opened pull request #{}", c.number));
             }
             github::Done::Closed(n) => {
+                let closed = self.data.issues.iter().find(|x| x.number == n && same_repo(&x.repo, &full_name)).cloned();
                 self.data.issues.retain(|x| !(x.number == n && same_repo(&x.repo, &full_name)));
                 if let Some(r) = self.data.repos.iter_mut().find(|r| r.full_name.eq_ignore_ascii_case(&full_name)) {
                     r.issues = r.issues.saturating_sub(1);
@@ -1771,9 +1815,27 @@ impl App {
                 if let Some(t) = self.data.issues_total.as_mut() {
                     *t = t.saturating_sub(1);
                 }
-                self.notify(format!("Closed issue #{n}"));
+                match closed {
+                    Some(issue) => self.notify_undo(format!("Closed issue #{n}"), state::Undo::Reopen { repo: full_name.clone(), issue }),
+                    None => self.notify(format!("Closed issue #{n}")),
+                }
             }
-            github::Done::Reopened(n) => self.notify(format!("Reopened issue #{n}")),
+            github::Done::Reopened(n) => {
+                // An issue closed from the list and reopened with Undo goes back where it was.
+                if let Some(at) = self.reopening.iter().position(|x| x.number == n && same_repo(&x.repo, &full_name)) {
+                    let issue = self.reopening.remove(at);
+                    if !self.data.issues.iter().any(|x| x.number == n && same_repo(&x.repo, &full_name)) {
+                        self.data.issues.insert(0, issue);
+                        if let Some(r) = self.data.repos.iter_mut().find(|r| r.full_name.eq_ignore_ascii_case(&full_name)) {
+                            r.issues += 1;
+                        }
+                        if let Some(t) = self.data.issues_total.as_mut() {
+                            *t += 1;
+                        }
+                    }
+                }
+                self.notify(format!("Reopened issue #{n}"));
+            }
             github::Done::Commented(n) => {
                 for x in self.data.issues.iter_mut().filter(|x| x.number == n && same_repo(&x.repo, &full_name)) {
                     x.comments += 1;
@@ -2627,6 +2689,7 @@ fn init() -> App {
         confirm_merge: None,
         settings_section: state::SettingsSection::Account,
         connection_details: false,
+        reopening: Vec::new(),
         inbox: None,
         inbox_busy: std::collections::HashSet::new(),
         pull_filter: filters::ListFilter::default(),
@@ -3128,6 +3191,8 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
                 .role(if toast.kind == ToastKind::Problem { "alert" } else { "status" })
                 .child(ui::ico(icon, 14.0, tint))
                 .child(text(toast.text.clone()).font(k.ty.small).color(k.c.text_base).wrap().shrink())
+                .children(toast.undo.is_some().then(|| rune_kit::Button::new("Undo").variant(rune_kit::ButtonVariant::Ghost).control_size(ControlSize::Small)
+                    .on_press(|s: &mut App| s.undo()).build(&k).key("toast-undo")))
                 .child(close)));
     }
     let (theme_icon, theme_help) = if dark { (&icons::SUN, "Switch to the light theme") } else { (&icons::MOON, "Switch to the dark theme") };
@@ -4307,6 +4372,84 @@ mod fix69_tests {
         rt.frame(2.0);
         key(&mut rt, Key::Command('['), cmd, &mut t);
         assert!(rt.state.thread.is_none() && rt.state.page == Page::Repos, "and out of a conversation");
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod fix66_tests {
+    use crate::{App, Page, github, state};
+
+    fn app() -> App {
+        let mut s = crate::init();
+        s.data = crate::model::Data::sample();
+        s.pending_place = None;
+        s.page = Page::Issues;
+        s
+    }
+
+    #[test]
+    fn a_deleted_theme_comes_back_with_undo() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("repohub-undo-{}", std::process::id()));
+        // SAFETY: the lock keeps other environment-changing tests out.
+        unsafe { std::env::set_var("REPOHUB_DATA_DIR", &dir) };
+        let mut s = app();
+        let first = s.looks.all.iter().find(|t| t.builtin).unwrap().id.clone();
+        let id = s.looks.duplicate(&first).unwrap();
+        s.looks.dark = id.clone();
+        let at = s.looks.all.iter().position(|t| t.id == id).unwrap();
+        let before = s.looks.all.len();
+        s.delete_look(&id);
+        assert_eq!(s.looks.all.len(), before - 1);
+        assert_ne!(s.looks.dark, id, "the dark theme fell back to a ready-made one");
+        assert!(s.toast.as_ref().is_some_and(|t| t.undo.is_some()), "the toast offers Undo");
+        s.undo();
+        assert_eq!(s.looks.all.len(), before);
+        assert_eq!(s.looks.all[at].id, id, "back where it was");
+        assert_eq!(s.looks.dark, id, "and the dark theme again");
+        assert!(s.toast.as_ref().is_some_and(|t| t.text.starts_with("Restored") && t.undo.is_none()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_closed_issue_offers_undo_and_comes_back_when_reopened() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = app();
+        let issue = s.data.issues[0].clone();
+        let count = s.data.issues.len();
+        s.apply_done(&issue.repo, github::Done::Closed(issue.number));
+        assert_eq!(s.data.issues.len(), count - 1);
+        let undo = s.toast.as_ref().and_then(|t| t.undo.clone());
+        assert!(matches!(&undo, Some(state::Undo::Reopen { issue: i, .. }) if i.number == issue.number));
+        // The toast's button is on screen.
+        let mut rt = rune::Runtime::new(s, crate::view, (1180.0, 760.0), rune::Env::new(true, 1.0));
+        rt.frame(0.0);
+        assert!(rt.find("toast-undo").is_some());
+        let mut s = rt.state;
+        // Pressing Undo asks GitHub to reopen it (the sample data can't, so it waits); once
+        // GitHub says it's reopened, it's back in the list, once.
+        s.reopening.push(issue.clone());
+        s.apply_done(&issue.repo, github::Done::Reopened(issue.number));
+        s.apply_done(&issue.repo, github::Done::Reopened(issue.number));
+        assert_eq!(s.data.issues.len(), count);
+        assert_eq!(s.data.issues[0].number, issue.number);
+        assert!(s.reopening.is_empty());
+    }
+
+    #[test]
+    fn a_change_with_no_local_copy_says_so() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("repohub-noclone-{}", std::process::id()));
+        // SAFETY: the lock keeps other environment-changing tests out.
+        unsafe {
+            std::env::set_var("REPOHUB_DATA_DIR", &dir);
+            std::env::set_var("REPOHUB_REPOS_DIR", &dir);
+        }
+        let mut s = app();
+        s.git_run(0, "Pushing", "Pushed", |_| Ok(String::new()));
+        assert!(s.toast.as_ref().is_some_and(|t| t.text.contains("no local copy")), "it doesn't return silently");
+        assert!(s.git_job.is_none());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 

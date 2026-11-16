@@ -112,6 +112,13 @@ the same; the clients bypass HTTP proxies for `localhost` and `NO_PROXY` hosts.
   nothing more: deleting repositories or branches and rewriting history stay on GitHub. A new
   write goes through `github::Write`, the proxy allowlist (`server/src/main.rs`) and its test.
 - Text in the UI is plain and specific: say what happened and how to fix it.
+- Every action gives feedback when it finishes or fails: a toast (`notify`, `notify_problem`) or
+  a message where it happened. Nothing returns silently.
+- An action that changes something on GitHub or deletes local data either asks first (merging,
+  removing a plugin, deleting a drawing) or offers **Undo** in its toast (`notify_undo`, with a
+  `state::Undo` that knows how to put it back: closing an issue, deleting a theme).
+- The Android app forwards the same writes: add a new one to `android/.../GitHubPaths.java` too,
+  with its test.
 - Plugins see the app only through `@repohub` (`plugins::context` and the actions in
   `Plugins::make`). Give them more only on purpose: no files, processes or network.
 - A pull request that changes the app adds a line to [`CHANGELOG.md`](CHANGELOG.md) under
