@@ -380,13 +380,19 @@ the repository's local copy, much like the Claude Code extension for VS Code.
 Plugins add a section to repository pages, a page of their own in the sidebar, or both. Anyone
 can write one. A plugin is a folder with a `plugin.json` and a small [Luau](https://luau.org)
 script that draws with Rune's UI. It runs sandboxed: no files, programs or network, only what
-RepoHub shows it and a few actions (open a link, copy, notify, open a repository).
+RepoHub shows it and a few actions (notify, open a repository).
+
+A plugin is code from whoever wrote it, and it can read what RepoHub shows, private repositories
+included. To open a link or copy text it must ask you each time, and RepoHub shows the address or
+the text first: a link could carry what the plugin read. Install only plugins you trust.
 
 - **Settings → Plugins → Create a plugin** writes the example, *Checklist*: a release checklist
   on each repository and a page with everyone's progress. Edit its files and it reloads as you
   save.
-- **Install** takes a folder or a Git address (it's cloned). Each plugin can be turned off,
-  reloaded or removed. Errors show in place of the plugin, never crashing the app.
+- **Install** takes a folder or a Git address (it's cloned in the background, for a minute at
+  most). A plugin with links to other folders, or too big to be one (500 files, 10 MB), is
+  refused. Each plugin can be turned off, reloaded or removed. Errors show in place of the
+  plugin, never crashing the app.
 - ⌘K lists plugin sections and pages too.
 
 The guide is [`docs/PLUGINS.md`](docs/PLUGINS.md), and the example is

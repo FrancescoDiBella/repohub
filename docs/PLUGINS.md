@@ -78,9 +78,9 @@ changes your variables, RepoHub draws the plugin again.
 | --- | --- |
 | `repohub.context()` | What's on screen, as a table (below). |
 | `repohub.changed` | A signal that fires with the new context when it changes: a repository opens, data refreshes, the theme switches. `changed:Connect(fn)`. |
-| `repohub.open(url)` | Opens an `https://` link in the browser. |
+| `repohub.open(url)` | Asks the user to open an `https://` link in the browser. RepoHub shows the address and opens it only if they agree. |
 | `repohub.notify(text)` | Shows a short message at the bottom of the window. |
-| `repohub.copy(text)` | Copies text to the clipboard. |
+| `repohub.copy(text)` | Asks the user to copy text to the clipboard. RepoHub shows the text (control characters removed) and copies it only if they agree. |
 | `repohub.openRepo(fullName)` | Opens a repository's page (`"owner/name"`). |
 
 The context:

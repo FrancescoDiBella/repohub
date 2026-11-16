@@ -17,7 +17,9 @@ pub fn plugins_panel(s: &App, k: &Kit) -> El {
             .font(k.ty.small).color(k.c.text_muted).wrap()));
     }
     let mut body = col().w_full().padding(16.0).gap(12.0)
-        .child(text("Plugins add a section to repository pages or a page of their own. They are small Luau scripts that run sandboxed: no files, programs or network, only what RepoHub shows and a few actions (open a link, copy, notify).")
+        .child(text("Plugins add a section to repository pages or a page of their own. They are small Luau scripts, written by whoever made them, and they run sandboxed: no files, no programs, no network.")
+            .font(k.ty.text_small).color(k.c.text_muted).wrap())
+        .child(text("A plugin can read what RepoHub shows (your repositories, issues and pull requests, private ones too) and show notifications. To open a link or copy text it has to ask you each time: a link could carry what it read. Install only plugins you trust.")
             .font(k.ty.text_small).color(k.c.text_muted).wrap());
     if s.plugins.list.is_empty() {
         body = body.child(text("No plugins yet.").font(k.ty.small).color(k.c.text_faint));
@@ -89,7 +91,8 @@ fn install_row(s: &App, k: &Kit) -> El {
         out = out
             .child(row().w_full().gap(8.0).pt(8.0).center_y().flex_wrap()
                 .child(input)
-                .child(Button::new("Install").icon(&icons::PLUS).control_size(ControlSize::Small)
+                .child(Button::new(if s.plugin_installing { "Installing…" } else { "Install" }).icon(&icons::PLUS).control_size(ControlSize::Small)
+                    .disabled(s.plugin_installing || s.plugin_src.text.trim().is_empty())
                     .on_press(|s: &mut App| s.install_plugin(false)).build(k).key("plugin-install")))
             .child(row().w_full().gap(8.0).center_y().flex_wrap()
                 .child(Button::new("Create a plugin").icon(&icons::SPARK).variant(ButtonVariant::Submit).control_size(ControlSize::Small)
