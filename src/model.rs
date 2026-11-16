@@ -55,6 +55,8 @@ pub struct Pull {
     pub updated_at: i64,
     pub comments: u32,
     pub url: String,
+    /// Label names and hues.
+    pub labels: Vec<(String, f32)>,
 }
 
 impl Pull {
@@ -73,6 +75,10 @@ pub struct Issue {
     pub created_at: i64,
     pub comments: u32,
     pub url: String,
+    /// Every label, with its hue.
+    pub labels: Vec<(String, f32)>,
+    /// Who it's assigned to (logins).
+    pub assignees: Vec<String>,
 }
 
 impl Issue {
@@ -369,7 +375,7 @@ impl Data {
             repo("iot-sensor-gateway", "MQTT to NGSI-LD bridge for low-power environmental sensors.", "Python", 18, 4, 2, 30 * DAY, true, false, "main", &["mqtt", "iot", "fiware"], false),
             repo("university-notes", "Lecture notes in Markdown, compiled to a searchable static site.", "Markdown", 25, 6, 1, 60 * DAY, false, false, "main", &["notes", "mkdocs"], false),
         ];
-        let pull = |number, title: &str, repo: &str, author: &str, state, checks, age_secs: i64, comments| Pull {
+        let pull = |number, title: &str, repo: &str, author: &str, state, checks, age_secs: i64, comments| Pull { labels: Vec::new(),
             number, title: title.into(), repo: repo.into(), author: author.into(), state, checks: Some(checks), updated_at: now - age_secs, comments,
             url: format!("https://github.com/francescodibella/{repo}/pull/{number}"),
         };
@@ -380,7 +386,7 @@ impl Data {
             pull(3, "Repo manager example on the web target", "rune", "francescodibella", PullState::Open, Checks::Passing, 14 * DAY, 0),
             pull(21, "Chapter 4: latency measurements", "xr-digital-twin-thesis", "francescodibella", PullState::Merged, Checks::Passing, 21 * DAY, 12),
         ];
-        let issue = |number, title: &str, repo: &str, label: &str, hue, age_secs: i64| Issue {
+        let issue = |number, title: &str, repo: &str, label: &str, hue, age_secs: i64| Issue { labels: vec![(label.into(), hue)], assignees: Vec::new(),
             number, title: title.into(), repo: repo.into(), label: Some((label.into(), hue)), created_at: now - age_secs, comments: 0,
             url: format!("https://github.com/francescodibella/{repo}/issues/{number}"),
         };
@@ -447,14 +453,14 @@ mod tests {
         assert_eq!(repo.updated_ago(t + 30 * 60), "30 minutes ago");
         assert_eq!(repo.updated_ago(t + 2 * 3600), "2 hours ago");
 
-        let issue = Issue {
+        let issue = Issue { labels: Vec::new(), assignees: Vec::new(),
             number: 1, title: "Bug".into(), repo: "a/b".into(), label: None,
             created_at: t, comments: 0, url: String::new(),
         };
         assert_eq!(issue.age_ago(t), "just now");
         assert_eq!(issue.age_ago(t + 5 * 60), "5 minutes ago");
 
-        let pull = Pull {
+        let pull = Pull { labels: Vec::new(),
             number: 2, title: "Fix".into(), repo: "a/b".into(), author: "u".into(),
             state: PullState::Open, checks: None,
             updated_at: t, comments: 0, url: String::new(),

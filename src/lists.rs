@@ -43,8 +43,12 @@ pub fn pull_row(k: &Kit, p: &Pull, now: i64, compact: bool) -> El {
 
 pub fn issue_row(k: &Kit, i: &Issue, now: i64) -> El {
     let mut title = row().gap(8.0).center_y().flex_wrap().child(text(i.title.clone()).font(k.ty.ui_medium).color(k.c.text_base));
-    if let Some((name, hue)) = &i.label {
+    // The first few labels; the conversation shows them all.
+    for (name, hue) in i.labels.iter().take(3) {
         title = title.child(ui::label_chip(k, name, *hue));
+    }
+    if i.labels.len() > 3 {
+        title = title.child(text(format!("+{}", i.labels.len() - 3)).font(k.ty.text_small).color(k.c.text_faint));
     }
     let r = row().w_full().px(16.0).py(11.0).gap(12.0).center_y().hover(k.c.hover).press(k.c.pressed)
         .child(ui::ico(&icons::ISSUE, 16.0, k.c.success.icon))
@@ -106,7 +110,11 @@ pub const PR_STATES: [PullState; 4] = [PullState::Open, PullState::Draft, PullSt
 pub const PR_LABELS: [&str; 4] = ["Open", "Drafts", "Merged", "Closed"];
 
 pub fn pulls(s: &App, k: &Kit) -> El {
-    let rows: Vec<El> = s.data.pulls.iter().filter(|p| p.state == s.pr_filter).map(|p| crate::actions::pull_line(s, k, p, s.compact)).collect();
+    let me = s.data.profile.login.as_str();
+    let in_state: Vec<&Pull> = s.data.pulls.iter().filter(|p| p.state == s.pr_filter).collect();
+    let (filter_repos, filter_labels) = crate::filters::pull_choices(in_state.iter().copied());
+    let rows: Vec<El> = in_state.iter().filter(|p| s.pull_filter.pull(p, me)).map(|p| crate::actions::pull_line(s, k, p, s.compact)).collect();
+    let empty = if s.pull_filter.is_empty() || in_state.is_empty() { "No pull requests in this state" } else { "No pull requests match these filters" };
     let is_open_group = matches!(s.pr_filter, PullState::Open | PullState::Draft);
     let (group_loaded, group_total) = if is_open_group {
         let count = s.data.pulls.iter().filter(|p| matches!(p.state, PullState::Open | PullState::Draft)).count();
@@ -157,10 +165,15 @@ pub fn pulls(s: &App, k: &Kit) -> El {
         .children(crate::changes_page::pull_panel(s, k))
         .child(SegmentedControl::new(&PR_LABELS, PR_STATES.iter().position(|p| *p == s.pr_filter)).label("State").fit()
             .on_pick(|s: &mut App, i, _| s.pr_filter = PR_STATES[i.min(3)]).build(k).key("pr-filter"))
-        .child(listing(s, k, rows, "No pull requests in this state", "retry-pulls"))
+        .child(crate::filters::bar(s, k, crate::filters::Which::Pulls, filter_repos, filter_labels))
+        .child(listing(s, k, rows, empty, "retry-pulls"))
 }
 
 pub fn issues(s: &App, k: &Kit) -> El {
+    let me = s.data.profile.login.as_str();
+    let (filter_repos, filter_labels) = crate::filters::issue_choices(s.data.issues.iter());
+    let rows: Vec<El> = s.data.issues.iter().filter(|x| s.issue_filter.issue(x, me)).map(|i| crate::actions::issue_line(s, k, i)).collect();
+    let empty = if s.issue_filter.is_empty() || s.data.issues.is_empty() { "No open issues" } else { "No issues match these filters" };
     let loaded = s.data.issues.len();
     let can_load_more = !s.data.sample && s.data.issues_total.is_some_and(|tot| loaded < tot && loaded < 1000);
     let is_capped = can_load_more || s.data.issues_capped();
@@ -199,7 +212,8 @@ pub fn issues(s: &App, k: &Kit) -> El {
     };
     col().w_full().gap(16.0)
         .child(heading(k, "Issues", &sub, action_el))
-        .child(listing(s, k, s.data.issues.iter().map(|i| crate::actions::issue_line(s, k, i)).collect(), "No open issues", "retry-issues"))
+        .child(crate::filters::bar(s, k, crate::filters::Which::Issues, filter_repos, filter_labels))
+        .child(listing(s, k, rows, empty, "retry-issues"))
 }
 
 pub fn actions(s: &App, k: &Kit) -> El {
