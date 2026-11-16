@@ -88,6 +88,15 @@ pub(crate) fn pick_folder(s: &App, k: &Kit, i: usize, found: bool) -> El {
         p = p.child(text("No local copy found").font(k.ty.body_medium).color(k.c.text_strong))
             .child(text("RepoHub looks for a checkout named after the repository in REPOHUB_REPOS_DIR, or in ~/Developer, ~/Projects, ~/code, ~/src, ~/GitHub and ~/repos. Pick the folder, or clone the repository.")
                 .font(k.ty.small).color(k.c.text_muted).wrap());
+        // A folder with the repository's name that is another repository: say so, and let the
+        // user decide (it may be a fork, or the repository was renamed).
+        if let Some(dir) = clones_shim::lookalike(&r.full_name) {
+            p = p.child(col().w_full().padding(12.0).gap(8.0).radius(k.radius.md).fill(k.c.warning.icon.alpha(0.10)).border(1.0, k.c.warning.icon.alpha(0.45)).key("lookalike")
+                .child(text(format!("Found {}, but it looks like another repository: none of its remotes is {}. RepoHub won't commit, merge or run commands there unless you say it's the one.", dir.display(), r.full_name))
+                    .font(k.ty.small).color(k.c.text_base).wrap())
+                .child(row().child(Button::new("Use it anyway").control_size(ControlSize::Small)
+                    .on_press(move |s: &mut App| s.use_lookalike(i)).build(k).key("use-lookalike"))));
+        }
     } else {
         p = p.child(text("Use a different folder").font(k.ty.ui_medium).color(k.c.text_base));
     }

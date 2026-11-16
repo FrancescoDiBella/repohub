@@ -1,11 +1,14 @@
 //! The local-clone lookup on the desktop; the web build has no file system to look in.
 #[cfg(not(target_arch = "wasm32"))]
-pub use crate::clones::{default_parent, expand, find, remember};
+pub use crate::clones::{default_parent, expand, find, lookalike, remember};
 
 #[cfg(target_arch = "wasm32")]
 mod web {
     use std::path::{Path, PathBuf};
     pub fn find(_: &str) -> Option<PathBuf> {
+        None
+    }
+    pub fn lookalike(_: &str) -> Option<PathBuf> {
         None
     }
     pub fn expand(p: &str) -> PathBuf {
@@ -20,4 +23,4 @@ mod web {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub use web::{default_parent, expand, find, remember};
+pub use web::{default_parent, expand, find, lookalike, remember};
