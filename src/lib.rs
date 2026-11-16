@@ -27,6 +27,7 @@ mod harness;
 mod icons;
 mod lists;
 mod diffs;
+mod filters;
 mod local;
 mod local_page;
 mod changes_page;
@@ -188,6 +189,9 @@ pub struct App {
     form: Option<actions::Form>,
     /// The pull request whose Merge is waiting for a yes (`owner/repo#12`).
     confirm_merge: Option<String>,
+    /// What the Pull requests and the Issues pages are narrowed to.
+    pull_filter: filters::ListFilter,
+    issue_filter: filters::ListFilter,
     /// The issue or pull request whose conversation is on screen, in place of the page.
     thread: Option<thread::Open>,
     /// Counts conversation loads (see [`thread::Open::epoch`]).
@@ -789,6 +793,9 @@ impl App {
         // Drawings are files on this computer (or the server's notes folder), not account data:
         // writes in flight and queued ones still finish, so no edit is lost on an account switch.
         self.leave_tab();
+        // Another account has other repositories and labels.
+        self.pull_filter.clear();
+        self.issue_filter.clear();
         self.data = Data::default();
         self.tab = RepoTab::Code;
         self.plugin_tab = None;
@@ -1634,7 +1641,7 @@ impl App {
         match done {
             github::Done::Issue(c) => {
                 let title = self.form_title.take().unwrap_or_default();
-                self.data.issues.insert(0, model::Issue { number: c.number, title, repo: full_name.clone(), label: None, created_at: self.now, comments: 0, url: c.url });
+                self.data.issues.insert(0, model::Issue { labels: Vec::new(), assignees: Vec::new(), number: c.number, title, repo: full_name.clone(), label: None, created_at: self.now, comments: 0, url: c.url });
                 if let Some(r) = self.data.repos.iter_mut().find(|r| r.full_name.eq_ignore_ascii_case(&full_name)) {
                     r.issues += 1;
                 }
@@ -1657,7 +1664,7 @@ impl App {
             github::Done::Pull(c) => {
                 let (title, draft) = self.pull_meta.take().unwrap_or_default();
                 let author = self.data.profile.login.clone();
-                self.data.pulls.insert(0, model::Pull {
+                self.data.pulls.insert(0, model::Pull { labels: Vec::new(),
                     number: c.number, title, repo: full_name.clone(), author,
                     state: if draft { PullState::Draft } else { PullState::Open },
                     checks: None, updated_at: self.now, comments: 0, url: c.url,
@@ -2528,6 +2535,8 @@ fn init() -> App {
         branch_filter: TextEdit::new(""),
         form: None,
         confirm_merge: None,
+        pull_filter: filters::ListFilter::default(),
+        issue_filter: filters::ListFilter::default(),
         thread: None,
         thread_epoch: 0,
         busy: std::collections::HashSet::new(),
@@ -3845,6 +3854,55 @@ mod fix63_tests {
     }
 }
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod fix64_tests {
+    use crate::{App, Page};
+
+    fn press(rt: &mut rune::Runtime<App>, key: &str) {
+        let (x, y) = rt.find(key).unwrap_or_else(|| panic!("{key} is on screen"));
+        rt.pointer_move(x, y);
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(0.1);
+    }
+
+    #[test]
+    fn the_issues_page_narrows_by_label_search_and_clear() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = crate::init();
+        s.data = crate::model::Data::sample();
+        s.pending_place = None;
+        s.page = Page::Issues;
+        let all: Vec<String> = s.data.issues.iter().map(|x| format!("issue-{}-{}", x.repo, x.number)).collect();
+        let bugs: Vec<String> = s.data.issues.iter().filter(|x| x.labels.iter().any(|l| l.0 == "bug")).map(|x| format!("issue-{}-{}", x.repo, x.number)).collect();
+        assert!(bugs.len() >= 2 && bugs.len() < all.len(), "the sample data has bugs and other issues");
+        let mut rt = rune::Runtime::new(s, crate::view, (1180.0, 2400.0), rune::Env::new(true, 1.0));
+        rt.frame(0.0);
+        let shown = |rt: &rune::Runtime<App>| all.iter().filter(|k| rt.find(k).is_some()).cloned().collect::<Vec<_>>();
+        assert_eq!(shown(&rt), all);
+        assert!(rt.find("issues-clear").is_none(), "nothing to clear yet");
+
+        press(&mut rt, "issues-label-bug");
+        assert_eq!(shown(&rt), bugs, "only the bugs stay");
+        // Searching inside them, by a word of one title.
+        let word = rt.state.data.issues.iter().find(|x| x.labels.iter().any(|l| l.0 == "bug")).unwrap().title.split_whitespace().next().unwrap().to_owned();
+        rt.update(|s, _| s.issue_filter.search = rune::TextEdit::new(word.clone()));
+        rt.frame(0.3);
+        let narrowed = shown(&rt);
+        assert!(!narrowed.is_empty() && narrowed.len() < bugs.len() && narrowed.iter().all(|k| bugs.contains(k)));
+        // Nothing matches: the page says so, and not that there are no issues.
+        rt.update(|s, _| s.issue_filter.search = rune::TextEdit::new("zzz-no-such-title"));
+        rt.frame(0.4);
+        assert!(shown(&rt).is_empty());
+        assert!(rt.elements().iter().any(|e| e.text.as_deref() == Some("No issues match these filters")));
+        press(&mut rt, "issues-clear");
+        assert_eq!(shown(&rt), all);
+        assert!(rt.state.issue_filter.is_empty());
+        // The Pull requests page has its own filter.
+        assert!(rt.state.pull_filter.is_empty());
+    }
+}
+
 #[cfg(test)]
 mod fix60_tests {
     use crate::Page;
@@ -3938,7 +3996,7 @@ mod fix60_tests {
         // 40 mixed PRs (12 open + 28 merged) shows "12+" on Overview and Sidebar; 39 shows "12".
         rt.update(|s, _| {
             s.page = crate::Page::Overview;
-            s.data.pulls = (0..crate::model::SEARCH_CAP).map(|i| crate::model::Pull {
+            s.data.pulls = (0..crate::model::SEARCH_CAP).map(|i| crate::model::Pull { labels: Vec::new(),
                 number: i as u32 + 1,
                 title: format!("PR #{i}"),
                 repo: "a/b".into(),
@@ -4092,7 +4150,7 @@ mod fix60_tests {
         s.data.repos[0].issues = 5;
 
         // Add a pull request and an issue belonging to external repo other-org/app
-        s.data.pulls.insert(0, crate::model::Pull {
+        s.data.pulls.insert(0, crate::model::Pull { labels: Vec::new(),
             number: 42,
             title: "External PR".into(),
             repo: "other-org/app".into(),
@@ -4103,7 +4161,7 @@ mod fix60_tests {
             comments: 0,
             url: "https://github.com/other-org/app/pull/42".into(),
         });
-        s.data.issues.insert(0, crate::model::Issue {
+        s.data.issues.insert(0, crate::model::Issue { labels: Vec::new(), assignees: Vec::new(),
             number: 77,
             title: "External Issue".into(),
             repo: "other-org/app".into(),
@@ -4340,7 +4398,7 @@ mod fix60_tests {
         // Generate enough PRs so the list extends well beyond a 720px viewport
         let mut prs = Vec::new();
         for i in 1..=20 {
-            prs.push(crate::model::Pull {
+            prs.push(crate::model::Pull { labels: Vec::new(),
                 number: i,
                 title: format!("Pull request #{i} with long description to take space"),
                 repo: "francescodibella.github.io".into(),
@@ -5728,7 +5786,7 @@ mod fix58_tests {
         // When there are 0 open PRs, but closed_pulls_total has 200, prs_capped() must be false!
         let data = Data {
             pulls: vec![
-                model::Pull {
+                model::Pull { labels: Vec::new(),
                     number: 1,
                     title: "Closed PR".into(),
                     repo: "alice/repo1".into(),

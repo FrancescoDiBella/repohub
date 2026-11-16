@@ -231,11 +231,19 @@ impl Gh {
     }
 }
 
+fn labels_of(v: &Value) -> Vec<(String, f32)> {
+    v.get("labels").and_then(Value::as_array).into_iter().flatten().map(|l| (s(l, "name"), hex_hue(&s(l, "color")))).filter(|(n, _)| !n.is_empty()).collect()
+}
+
+fn logins_of(v: &Value, key: &str) -> Vec<String> {
+    v.get(key).and_then(Value::as_array).into_iter().flatten().map(|u| s(u, "login")).filter(|l| !l.is_empty()).collect()
+}
+
 pub fn parse_pull(v: &Value) -> Pull {
     let merged = v.get("pull_request").and_then(|p| p.get("merged_at")).is_some_and(|m| !m.is_null());
     let state = if merged { PullState::Merged } else if s(v, "state") == "closed" { PullState::Closed } else if b(v, "draft") { PullState::Draft } else { PullState::Open };
     let updated_at = s(v, "updated_at");
-    Pull {
+    Pull { labels: labels_of(v),
         number: n(v, "number"),
         title: s(v, "title"),
         repo: repo_from_url(&s(v, "repository_url")),
@@ -301,7 +309,7 @@ pub fn parse_thread(issue: &Value, comments: &Value, pull: Option<(&Value, &Valu
 
 pub fn parse_issue(v: &Value) -> Issue {
     let created_at = s(v, "created_at");
-    Issue {
+    Issue { labels: labels_of(v), assignees: logins_of(v, "assignees"),
         number: n(v, "number"),
         title: s(v, "title"),
         repo: repo_from_url(&s(v, "repository_url")),

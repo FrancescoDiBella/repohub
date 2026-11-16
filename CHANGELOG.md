@@ -10,6 +10,9 @@ The sections are **Added**, **Changed** and **Fixed**.
 ## Unreleased
 
 ### Added
+- Filters on the Pull requests and Issues pages: search by title or number, pick a repository
+  or a label, and show only the pull requests you opened or the issues assigned to you.
+  Issues show all their labels, not only the first.
 - Conversations in the app: click an issue or a pull request to read its description, comments
   and reviews, and reply with a comment. Approve a pull request or request changes, see its
   changes from the same page, and close or reopen an issue. The lists no longer send you to

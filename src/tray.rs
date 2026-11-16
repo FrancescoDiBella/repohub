@@ -312,7 +312,7 @@ mod tests {
         let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut s = crate::init();
         s.data = crate::model::Data::sample_at(1_700_000_000);
-        s.data.pulls = (0..crate::model::SEARCH_CAP).map(|i| crate::model::Pull {
+        s.data.pulls = (0..crate::model::SEARCH_CAP).map(|i| crate::model::Pull { labels: Vec::new(),
             number: i as u32 + 1,
             title: format!("PR #{i}"),
             repo: "a/b".into(),
