@@ -74,6 +74,10 @@ The sections are **Added**, **Changed** and **Fixed**.
 - Docker image for amd64 and arm64.
 
 ### Changed
+- The phone layout fits the newer features: a pull request's or an issue's buttons sit under
+  its title instead of squeezing it, diffs are always unified and no taller than the screen
+  allows, pinned repositories are at the top of the Repositories page, and the theme editor's
+  colour rows wrap.
 - A lighter desktop app: 31 MB instead of 50 MB (no debug symbols, optimized for size and at
   link time), with the same speed.
 - A refresh keeps the details already loaded for repositories nobody pushed to since, so opening
