@@ -32,8 +32,8 @@ pub fn shell(s: &App, k: &Kit, safe: [f32; 4], title: String, bar_trailing: El, 
         .child(bar_trailing);
     let tabs = row().w_full().px(6.0).pt(4.0).gap(2.0)
         .child(tab(s, k, "Overview", &icons::HOME, Page::Overview))
-        .child(tab(s, k, "Repos", &icons::REPO, Page::Repos))
-        .child(tab(s, k, "Pulls", &icons::PULL, Page::Pulls))
+        .child(tab(s, k, "Repositories", &icons::REPO, Page::Repos))
+        .child(tab(s, k, "Pull requests", &icons::PULL, Page::Pulls))
         .child(tab(s, k, "Issues", &icons::ISSUE, Page::Issues))
         .child(tab(s, k, "Actions", &icons::PLAY, Page::Actions));
     col().w_full().h_full().fill(k.c.bg_base)

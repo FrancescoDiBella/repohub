@@ -78,6 +78,10 @@ The sections are **Added**, **Changed** and **Fixed**.
 - Docker image for amd64 and arm64.
 
 ### Changed
+- Settings is split into sections, one on screen at a time: **Account**, **Appearance**,
+  **Assistants**, **Plugins** and **About** (version, updates, keyboard shortcuts). The
+  connection's environment variables and files are under **Show details**. The phone's tabs say
+  Repositories and Pull requests.
 - The phone layout fits the newer features: a pull request's or an issue's buttons sit under
   its title instead of squeezing it, diffs are always unified and no taller than the screen
   allows, pinned repositories are at the top of the Repositories page, and the theme editor's

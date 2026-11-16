@@ -196,6 +196,10 @@ pub struct App {
     inbox: Option<Load<Vec<inbox::Notification>>>,
     /// The notifications being marked as read.
     inbox_busy: std::collections::HashSet<String>,
+    /// The Settings section on screen.
+    settings_section: state::SettingsSection,
+    /// The connection's details (environment variables, files) are shown in Settings.
+    connection_details: bool,
     /// What the Pull requests and the Issues pages are narrowed to.
     pull_filter: filters::ListFilter,
     issue_filter: filters::ListFilter,
@@ -2376,6 +2380,7 @@ impl App {
             self.plugin_tab = None;
         }
         if matches!(&self.page, Page::Plugin(pid) if pid == id) {
+            self.settings_section = state::SettingsSection::Plugins;
             self.go(Page::Settings);
         }
         match plugins::remove(id) {
@@ -2620,6 +2625,8 @@ fn init() -> App {
         branch_filter: TextEdit::new(""),
         form: None,
         confirm_merge: None,
+        settings_section: state::SettingsSection::Account,
+        connection_details: false,
         inbox: None,
         inbox_busy: std::collections::HashSet::new(),
         pull_filter: filters::ListFilter::default(),
@@ -3044,7 +3051,7 @@ fn banner(s: &App, k: &Kit) -> Option<El> {
     }
     if connect {
         r = r.child(rune_kit::Button::new("Connect").variant(rune_kit::ButtonVariant::Submit).control_size(ControlSize::Small)
-            .on_press(|s: &mut App| s.go(Page::Settings)).build(k).key("connect"));
+            .on_press(|s: &mut App| { s.settings_section = state::SettingsSection::Account; s.go(Page::Settings); }).build(k).key("connect"));
     }
     Some(r.key("banner"))
 }
@@ -4189,6 +4196,45 @@ mod fix64_inbox_tests {
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
+mod fix71_tests {
+    use crate::state::SettingsSection;
+    use crate::{App, Page};
+
+    #[test]
+    fn settings_show_one_section_at_a_time_and_details_on_request() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = crate::init();
+        s.data = crate::model::Data::sample();
+        s.pending_place = None;
+        s.page = Page::Settings;
+        let mut rt = rune::Runtime::new(s, crate::view, (1180.0, 760.0), rune::Env::new(true, 1.0));
+        rt.frame(0.0);
+        let shown = |rt: &rune::Runtime<App>, key: &str| rt.find(key).is_some();
+        // Account first: the account and the connection, not the themes or the plugins.
+        assert_eq!(rt.state.settings_section, SettingsSection::Account);
+        assert!(shown(&rt, "connection") && !shown(&rt, "appearance") && !shown(&rt, "plugins"));
+        // The connection's details wait to be asked for.
+        let texts = |rt: &rune::Runtime<App>| rt.elements().iter().filter_map(|e| e.text.clone()).collect::<Vec<_>>();
+        assert!(!texts(&rt).iter().any(|t| t == "Settings file"));
+        let (x, y) = rt.find("connection-details").unwrap();
+        rt.pointer_move(x, y);
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(0.1);
+        assert!(texts(&rt).iter().any(|t| t == "Settings file"));
+        for (section, key) in [(SettingsSection::Appearance, "appearance"), (SettingsSection::Plugins, "plugins")] {
+            rt.update(move |s, _| s.settings_section = section);
+            rt.frame(0.3);
+            assert!(shown(&rt, key) && !shown(&rt, "connection"), "{key}");
+        }
+        rt.update(|s, _| s.settings_section = SettingsSection::About);
+        rt.frame(0.5);
+        assert!(texts(&rt).iter().any(|t| t == "Keyboard shortcuts"));
+        assert_eq!(SettingsSection::ALL.len(), SettingsSection::LABELS.len());
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod fix69_tests {
     use rune::{Key, KeyEvent, Mods};
     use crate::{App, Page};
@@ -4330,6 +4376,8 @@ mod fix60_tests {
         s.data = crate::model::Data::sample_at(s.now);
         let rel = sample_release();
         s.page = crate::Page::Settings;
+        // The version and its updates are in Settings → About.
+        s.settings_section = crate::state::SettingsSection::About;
         s.update = crate::update::Update::Downloading { release: rel.clone(), percent: 40 };
 
         let mut rt = rune::Runtime::new(s, crate::view, (1180.0, 2400.0), rune::Env::new(true, 1.0));

@@ -263,10 +263,15 @@ pub fn settings(s: &App, k: &Kit) -> El {
         (Status::Failed(e), _) => format!("Error: {e}"),
         (Status::Ready, _) => "GitHub, up to date".to_owned(),
     };
-    let mut conn = panel(k).child(panel_head(k, "GitHub connection", if cfg.live() {
-        Some(Button::new("Refresh").icon(&icons::REFRESH).control_size(ControlSize::Small).disabled(s.status.is_busy())
-            .on_press(|s: &mut App| s.refresh()).build(k).key("refresh-settings"))
-    } else { None }));
+    // The state of the connection; its details (variables, files, sources) on request.
+    let mut conn_tools = row().gap(6.0).center_y()
+        .child(Button::new(if s.connection_details { "Hide details" } else { "Show details" }).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
+            .on_press(|s: &mut App| s.connection_details = !s.connection_details).build(k).key("connection-details"));
+    if cfg.live() {
+        conn_tools = conn_tools.child(Button::new("Refresh").icon(&icons::REFRESH).control_size(ControlSize::Small).disabled(s.status.is_busy())
+            .on_press(|s: &mut App| s.refresh()).build(k).key("refresh-settings"));
+    }
+    let mut conn = panel(k).key("connection").child(panel_head(k, "GitHub connection", Some(conn_tools)));
     for (label, value) in [
         ("State", source),
         ("Last update", match (s.freshness(), s.refresh_in(), cfg.refresh_every()) {
@@ -320,6 +325,9 @@ pub fn settings(s: &App, k: &Kit) -> El {
         if label.starts_with("Ignored") && value.is_empty() {
             continue;
         }
+        if !s.connection_details && !matches!(label, "State" | "Last update") {
+            continue;
+        }
         conn = conn.child(rule(k)).child(info(k, label, value));
     }
     let account = account_panel(s, k);
@@ -338,16 +346,23 @@ pub fn settings(s: &App, k: &Kit) -> El {
         ("Ctrl + Shift + Tab", "Leave the terminal, so the keyboard reaches the rest of the app"),
         ("↑ ↓ in ⌘K", "Move through the results; Enter runs the one highlighted"),
     ].iter().fold(keys, |p, (key, what)| p.child(rule(k)).child(info(k, key, (*what).to_owned())));
+    use crate::state::SettingsSection as Section;
+    let section = s.settings_section;
+    let picker = SegmentedControl::new(&Section::LABELS, Some(section.index())).label("Settings section").fit()
+        .on_pick(|s: &mut App, i, _| s.settings_section = Section::ALL[i.min(Section::ALL.len() - 1)]).build(k).key("settings-section");
+    // Five segments don't fit a phone: the row scrolls sideways there.
+    let picker = if s.compact { row().w_full().scroll_x().child(picker) } else { row().w_full().child(picker) };
+    let (subtitle, body): (&str, Vec<El>) = match section {
+        Section::Account => ("Your profile, the GitHub account and the connection.", vec![profile, account, conn]),
+        Section::Appearance => ("Light, dark or the system's, and the themes.", vec![appearance]),
+        Section::Assistants => ("Claude and the other coding assistants the Terminal starts.", vec![assistants]),
+        Section::Plugins => ("Sections and pages others wrote for RepoHub.", vec![plugins]),
+        Section::About => ("This version of RepoHub, its updates and the keyboard shortcuts.", vec![version, keys]),
+    };
     col().w_full().gap(16.0).max_w(760.0)
-        .child(heading(k, "Settings", "Profile, appearance and the GitHub connection.", None))
-        .child(profile)
-        .child(account)
-        .child(appearance)
-        .child(assistants)
-        .child(plugins)
-        .child(conn)
-        .child(version)
-        .child(keys)
+        .child(heading(k, "Settings", subtitle, None))
+        .child(picker)
+        .children(body)
 }
 
 /// Coding assistants: the Claude switch and the harnesses (name and command) the Terminal offers.
@@ -412,10 +427,13 @@ fn account_panel(s: &App, k: &Kit) -> El {
     let head = panel(k).child(panel_head(k, "GitHub account", Some(open_button(k, "Create a token", "https://github.com/settings/personal-access-tokens/new", "new-token")))).child(rule(k));
     let account = s.account();
     if account == Account::Locked {
-        let from = cfg.env_file.clone().unwrap_or_else(|| "the environment".into());
+        let from = match &cfg.env_file {
+            Some(file) => format!("{file} or from the environment"),
+            None => "the environment".into(),
+        };
         return head.child(col().w_full().padding(16.0).gap(4.0)
             .child(text("Set outside the app").font(k.ty.ui_medium).color(k.c.text_base))
-            .child(text(format!("GITHUB_USER or GITHUB_TOKEN comes from {from} or from the environment, and that wins. Change it there, or remove it to manage the account here."))
+            .child(text(format!("GITHUB_USER or GITHUB_TOKEN comes from {from}, and that wins. Change it there, or remove it to manage the account here."))
                 .font(k.ty.text_small).color(k.c.text_muted).wrap()));
     }
     let label = |t: &str| text(t.to_owned()).font(k.ty.small).color(k.c.text_muted).w(110.0);
