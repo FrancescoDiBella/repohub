@@ -89,7 +89,7 @@ pub fn overview(s: &App, k: &Kit) -> El {
         return col().w_full().gap(16.0)
             .child(head)
             .child(metrics)
-            .child(ui::error_panel(k, err, "retry-list", |s: &mut App| s.refresh()));
+            .child(ui::error_panel(k, err, "retry-overview", |s: &mut App| s.refresh()));
     }
     let commits: u32 = d.activity.iter().sum();
     let activity = if empty_loading {
@@ -206,7 +206,7 @@ pub fn repos(s: &App, k: &Kit) -> El {
             }
         } else if s.data.is_empty() && matches!(s.status, Status::Failed(_)) {
             if let Status::Failed(e) = &s.status {
-                list = list.child(ui::error_panel(k, e, "retry-list", |s: &mut App| s.refresh()));
+                list = list.child(ui::error_panel(k, e, "retry-repos", |s: &mut App| s.refresh()));
             }
         } else {
             let msg = if all.is_empty() { "No repositories to show" } else { "No repositories match your search" };
@@ -428,7 +428,8 @@ fn code_tab(s: &App, k: &Kit, i: usize, r: &Repo) -> El {
         files = files.child(panel_head(k, "Files on GitHub", Some(crate::local_page::source_switch(s, k)))).child(rule(k));
     }
     match load {
-        None | Some(Load::Loading) => files = files.child(ui::skeleton_files(k, true, "skeleton-files")),
+        None => files = files.child(col().w_full().padding(24.0).items_center().child(text("Open the repository to load its files").font(k.ty.ui).color(k.c.text_muted))),
+        Some(Load::Loading) => files = files.child(ui::skeleton_files(k, true, "skeleton-files")),
         Some(Load::Failed(e)) => files = files.child(ui::error_inline(k, e, "retry-files", move |s: &mut App| s.load_detail(i))),
         Some(Load::Ready(d)) => {
             if let Some(c) = &d.commit {
@@ -480,7 +481,8 @@ fn code_tab(s: &App, k: &Kit, i: usize, r: &Repo) -> El {
     let readme_err = detail.and_then(|d| d.readme_error.as_deref());
     let readme_body = match load {
         Some(Load::Failed(e)) => text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap(),
-        None | Some(Load::Loading) => ui::skeleton_readme(k, "skeleton-readme"),
+        Some(Load::Loading) => ui::skeleton_readme(k, "skeleton-readme"),
+        None => text("Open the repository to load its README").font(k.ty.ui).color(k.c.text_muted),
         Some(Load::Ready(_)) => match (&readme, readme_err) {
             (Some(src), _) => readme_view(k, &crate::markdown::prepare(src, &r.full_name, &at)),
             (None, Some(err)) => text(err).font(k.ty.small).color(k.c.danger.icon).wrap(),
@@ -517,7 +519,7 @@ fn code_tab(s: &App, k: &Kit, i: usize, r: &Repo) -> El {
         .children(shown.iter().map(|(l, b)| el().grow(*b as f32).h_full().fill(rune::oklch(0.68, 0.15, lang_hue(l)))));
     let legend = row().gap(12.0).flex_wrap().children(shown.iter().map(|(l, b)| ui::language(k, &format!("{l} {:.0}%", *b as f64 * 100.0 / total as f64), lang_hue(l))));
     let desc = if r.description.is_empty() { "No description".to_owned() } else { r.description.clone() };
-    let lang_el = if matches!(load, None | Some(Load::Loading)) && langs.is_empty() {
+    let lang_el = if matches!(load, Some(Load::Loading)) && langs.is_empty() {
         col().w_full().gap(8.0).key("skeleton-languages")
             .child(ui::skeleton_faint(k, 200.0, 8.0).w_full())
             .child(row().gap(12.0).child(ui::skeleton_faint(k, 64.0, 11.0)).child(ui::skeleton_faint(k, 52.0, 11.0)))

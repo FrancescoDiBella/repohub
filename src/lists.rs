@@ -82,14 +82,14 @@ pub fn run_row(k: &Kit, r: &Run, now: i64, compact: bool) -> El {
     link(e, &r.url)
 }
 
-fn listing(s: &App, k: &Kit, rows: Vec<El>, empty: &str) -> El {
+fn listing(s: &App, k: &Kit, rows: Vec<El>, empty: &str, retry_key: &str) -> El {
     if rows.is_empty() {
         if s.data.is_empty() {
             if s.status.is_busy() {
                 return ui::skeleton_list(k, 5, "skeleton-list");
             }
             if let Status::Failed(e) = &s.status {
-                return ui::error_panel(k, e, "retry-list", |s: &mut App| s.refresh());
+                return ui::error_panel(k, e, retry_key, |s: &mut App| s.refresh());
             }
         }
         return panel(k).padding(28.0).items_center().child(text(empty.to_owned()).font(k.ty.ui).color(k.c.text_muted));
@@ -153,7 +153,7 @@ pub fn pulls(s: &App, k: &Kit) -> El {
         .children(crate::changes_page::pull_panel(s, k))
         .child(SegmentedControl::new(&PR_LABELS, PR_STATES.iter().position(|p| *p == s.pr_filter)).label("State").fit()
             .on_pick(|s: &mut App, i, _| s.pr_filter = PR_STATES[i.min(3)]).build(k).key("pr-filter"))
-        .child(listing(s, k, rows, "No pull requests in this state"))
+        .child(listing(s, k, rows, "No pull requests in this state", "retry-pulls"))
 }
 
 pub fn issues(s: &App, k: &Kit) -> El {
@@ -195,7 +195,7 @@ pub fn issues(s: &App, k: &Kit) -> El {
     };
     col().w_full().gap(16.0)
         .child(heading(k, "Issues", &sub, action_el))
-        .child(listing(s, k, s.data.issues.iter().map(|i| crate::actions::issue_line(s, k, i)).collect(), "No open issues"))
+        .child(listing(s, k, s.data.issues.iter().map(|i| crate::actions::issue_line(s, k, i)).collect(), "No open issues", "retry-issues"))
 }
 
 pub fn actions(s: &App, k: &Kit) -> El {
@@ -218,7 +218,7 @@ pub fn actions(s: &App, k: &Kit) -> El {
     };
     col().w_full().gap(16.0)
         .child(heading(k, "Actions", &sub, action))
-        .child(listing(s, k, s.data.runs.iter().map(|r| run_row(k, r, s.now, s.compact)).collect(), "No recent runs"))
+        .child(listing(s, k, s.data.runs.iter().map(|r| run_row(k, r, s.now, s.compact)).collect(), "No recent runs", "retry-actions"))
 }
 
 fn info(k: &Kit, label: &str, value: String) -> El {

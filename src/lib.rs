@@ -2776,10 +2776,20 @@ fn update_banner(s: &App, k: &Kit) -> Option<El> {
     }
 }
 
+/// Whether the current page already shows `Status::Failed` in place of its empty list.
+fn list_shows_failed(s: &App) -> bool {
+    s.data.is_empty() && match &s.page {
+        Page::Overview | Page::Repos | Page::Repo(_) | Page::Pulls | Page::Issues | Page::Actions => true,
+        Page::Plugin(id) => !s.plugins.list.iter().any(|p| p.id == *id && p.running()),
+        Page::Settings => false,
+    }
+}
+
 /// A banner above the page for loading, errors and sample data.
 fn banner(s: &App, k: &Kit) -> Option<El> {
     let (msg, tint, action) = match &s.status {
         Status::Starting | Status::Loading => ("Loading data from GitHub…".to_owned(), k.c.info.icon, false),
+        Status::Failed(_) if list_shows_failed(s) => return None,
         Status::Failed(e) => (e.clone(), k.c.danger.icon, true),
         Status::Ready if !s.data.warnings.is_empty() => (s.data.warnings.join(" · "), k.c.warning.icon, true),
         Status::Sample if !s.cfg.demo && !s.cfg.account_locked => ("This is sample data. Connect your GitHub account to see your repositories.".to_owned(), k.c.warning.icon, false),
@@ -5694,6 +5704,10 @@ mod fix62_tests {
         rt.elements().iter().any(|e| e.text.as_deref() == Some(needle))
     }
 
+    fn count_text(rt: &rune::Runtime<App>, needle: &str) -> usize {
+        rt.elements().iter().filter(|e| e.text.as_deref() == Some(needle)).count()
+    }
+
     fn contains_text(rt: &rune::Runtime<App>, needle: &str) -> bool {
         rt.elements().iter().any(|e| e.text.as_deref().is_some_and(|t| t.contains(needle)))
     }
@@ -5805,27 +5819,31 @@ mod fix62_tests {
     }
 
     #[test]
-    fn failed_first_load_shows_error_and_retry_in_place_of_list_and_retries() {
+    fn failed_first_load_shows_error_and_retry_once_and_retries() {
         let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _iso = IsolatedEnv::new("failed");
 
         let mut rt = new_rt(live_app());
+        let err = "Could not reach GitHub (offline).";
 
-        for (page, forbidden_empty) in [
-            (Page::Overview, "No repositories to show"),
-            (Page::Repos, "No repositories to show"),
-            (Page::Pulls, "No pull requests in this state"),
-            (Page::Issues, "No open issues"),
-            (Page::Actions, "No recent runs"),
+        for (page, retry_key, forbidden_empty) in [
+            (Page::Overview, "retry-overview", "No repositories to show"),
+            (Page::Repos, "retry-repos", "No repositories to show"),
+            (Page::Pulls, "retry-pulls", "No pull requests in this state"),
+            (Page::Issues, "retry-issues", "No open issues"),
+            (Page::Actions, "retry-actions", "No recent runs"),
         ] {
             rt.update(|s, _| {
-                s.status = Status::Failed("Could not reach GitHub (offline).".into());
+                s.status = Status::Failed(err.into());
                 s.page = page.clone();
             });
             rt.frame(1.0);
-            assert!(rt.find("retry-list-panel").is_some(), "{page:?} shows error panel in place of list");
-            assert!(rt.find("retry-list").is_some(), "{page:?} shows Retry button in list area");
-            assert!(has_text(&rt, "Could not reach GitHub (offline)."));
+            let panel_key = format!("{retry_key}-panel");
+            assert!(rt.find(&panel_key).is_some(), "{page:?} shows error panel in place of list");
+            assert!(rt.find(retry_key).is_some(), "{page:?} shows Retry button in list area");
+            assert!(rt.find("banner").is_none(), "{page:?} omits duplicate top banner when list shows error");
+            assert_eq!(count_text(&rt, err), 1, "{page:?} shows the error message exactly once");
+            assert_eq!(count_text(&rt, "Retry"), 1, "{page:?} shows Retry exactly once");
             assert!(!has_text(&rt, forbidden_empty), "{page:?} must not claim `{forbidden_empty}` on failed load");
             if page == Page::Overview {
                 assert_eq!(label_of(&rt, "metric-Repositories").as_deref(), Some("Repositories, not loaded"));
@@ -5833,10 +5851,33 @@ mod fix62_tests {
             }
 
             // Clicking Retry starts a fresh load and swaps the error panel for skeletons.
-            click(&mut rt, "retry-list");
+            click(&mut rt, retry_key);
             assert_eq!(rt.state.status, Status::Loading, "{page:?} Retry must start loading");
-            assert!(rt.find("retry-list-panel").is_none());
+            assert!(rt.find(&panel_key).is_none());
         }
+
+        // When data is already on screen, the banner remains the single place showing the error and Retry.
+        rt.update(|s, _| {
+            s.data.repos.push(sample_repo("alice/app"));
+            s.status = Status::Failed(err.into());
+            s.page = Page::Repos;
+        });
+        rt.frame(1.0);
+        assert!(rt.find("banner").is_some(), "banner is kept when data is on screen");
+        assert!(rt.find("retry").is_some());
+        assert!(rt.find("retry-repos-panel").is_none());
+        assert_eq!(count_text(&rt, err), 1);
+        assert_eq!(count_text(&rt, "Retry"), 1);
+
+        // Settings has no empty-list error panel, so the top banner still carries Retry there.
+        rt.update(|s, _| {
+            s.data = Data::default();
+            s.status = Status::Failed(err.into());
+            s.page = Page::Settings;
+        });
+        rt.frame(1.0);
+        assert!(rt.find("banner").is_some(), "Settings keeps top banner on failed first load");
+        assert!(rt.find("retry").is_some());
     }
 
     #[test]
@@ -5853,20 +5894,26 @@ mod fix62_tests {
         let mut rt = new_rt(s);
         rt.frame(1.0);
 
-        // Absent / Loading detail -> skeletons for files, README, and languages; no "no README" text.
-        assert!(rt.find("skeleton-files").is_some());
-        assert!(rt.find("skeleton-readme").is_some());
-        assert!(rt.find("skeleton-languages").is_some());
-        assert!(!has_text(&rt, "Open the repository to load its files"));
-        assert!(!has_text(&rt, "Loading files…"));
+        // With no load started (`None`), show static prompts rather than an endless skeleton.
+        assert!(rt.find("skeleton-files").is_none());
+        assert!(rt.find("skeleton-readme").is_none());
+        assert!(rt.find("skeleton-languages").is_none());
+        assert!(has_text(&rt, "Open the repository to load its files"));
+        assert!(has_text(&rt, "Open the repository to load its README"));
         assert!(!has_text(&rt, "This repository has no README."));
 
+        // Once loading starts (`Some(Load::Loading)`), show skeletons for files, README, and languages.
         rt.update(|s, _| {
             s.details.insert(("alice/app".into(), "main".into()), Load::Loading);
         });
         rt.frame(1.0);
         assert!(rt.find("skeleton-files").is_some());
         assert!(rt.find("skeleton-readme").is_some());
+        assert!(rt.find("skeleton-languages").is_some());
+        assert!(!has_text(&rt, "Open the repository to load its files"));
+        assert!(!has_text(&rt, "Open the repository to load its README"));
+        assert!(!has_text(&rt, "Loading files…"));
+        assert!(!has_text(&rt, "This repository has no README."));
 
         // Ready with an empty branch and no README -> real empty messages appear.
         rt.update(|s, _| {
@@ -6037,7 +6084,7 @@ mod fix62_tests {
         let _ = slow_srv.join();
         let _ = load_thread.join();
 
-        // 2. Failing mock server (503): failed load shows the error and Retry in the list.
+        // 2. Failing mock server (503): failed load shows the error and Retry once in the list.
         let fail_listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let fail_port = fail_listener.local_addr().unwrap().port();
         let fail_srv = std::thread::spawn(move || {
@@ -6059,8 +6106,10 @@ mod fix62_tests {
         let epoch = rt.state.load_gen;
         rt.update(move |app, _| app.apply(epoch, fail_res));
         rt.frame(1.0);
-        assert!(rt.find("retry-list-panel").is_some(), "error panel shown in list after failed load");
-        assert!(rt.find("retry-list").is_some(), "Retry button shown in list after failed load");
+        assert!(rt.find("retry-repos-panel").is_some(), "error panel shown in list after failed load");
+        assert!(rt.find("retry-repos").is_some(), "Retry button shown in list after failed load");
+        assert!(rt.find("banner").is_none());
+        assert_eq!(count_text(&rt, "Retry"), 1);
         assert!(contains_text(&rt, "Service offline."));
         assert!(!has_text(&rt, "No repositories to show"));
     }
