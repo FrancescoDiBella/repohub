@@ -352,11 +352,22 @@ pub enum ToastKind {
 }
 
 /// The message floating at the bottom of the window. `id` lets its timer hide only itself.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct Toast {
     pub id: u64,
     pub text: String,
     pub kind: ToastKind,
+    /// What its **Undo** button puts back, for an action that can be taken back.
+    pub undo: Option<Undo>,
+}
+
+/// What an **Undo** in a toast puts back.
+#[derive(Clone, Debug)]
+pub enum Undo {
+    /// A theme you deleted: where it was in the list, and whether it was the light or dark one.
+    Look { look: crate::themes::Look, at: usize, light: bool, dark: bool },
+    /// An issue you closed: it's reopened on GitHub and comes back to the list.
+    Reopen { repo: String, issue: crate::model::Issue },
 }
 
 /// A form that sends something to GitHub.

@@ -10,6 +10,8 @@ The sections are **Added**, **Changed** and **Fixed**.
 ## Unreleased
 
 ### Added
+- **Undo** after closing an issue (it's reopened and comes back to the list) and after deleting
+  a theme (it comes back where it was, as your light or dark theme if it was one).
 - Keyboard: Esc closes what's open on top of the page (a merge confirmation, a form, a diff, a
   conversation, a file, a message), ⌘/Ctrl+[ goes back, and Ctrl+Shift+Tab leaves the
   terminal. ⌘/Ctrl+K and the page shortcuts work while the terminal has the keyboard.
@@ -98,6 +100,8 @@ The sections are **Added**, **Changed** and **Fixed**.
 - A new look, with a more readable layout.
 
 ### Fixed
+- Every action now says how it went: **Copy screen** in the Terminal confirms the copy, and
+  Commit, Push or Pull on a repository with no local copy says so instead of doing nothing.
 - The command palette keeps the highlighted result in sight when you move past the first
   rows with the arrow keys, and screen readers hear which one is selected.
 - Lists, the overview, the Code tab and the Changes tab now show loading placeholders while GitHub

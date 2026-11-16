@@ -132,6 +132,7 @@ fn toolbar(s: &App, k: &Kit, i: usize, cwd: &str, running: bool) -> El {
         .on_press_tx(move |s: &mut App, tx| {
             if let Some(t) = s.data.repos.get(i).and_then(|r| s.terms.get(&r.full_name)) {
                 tx.copy(t.text());
+                s.notify("Screen copied");
             }
         }).build(k).key("term-copy");
     let open = Button::new("Open folder").icon(&icons::FOLDER).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
