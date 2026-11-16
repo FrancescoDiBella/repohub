@@ -185,7 +185,16 @@ fn view(s: &App, k: &Kit, i: usize, t: &terminal::Term, dark: bool) -> El {
                 t.resize(grid.0, grid.1);
             }
         })
-        .on_key(move |s: &mut App, ev, _| {
+        .on_key(move |s: &mut App, ev, tx| {
+            match terminal::term_key(ev) {
+                terminal::TermKey::Leave => {
+                    tx.blur();
+                    return true;
+                }
+                // Not handled here: the app's shortcuts get it.
+                terminal::TermKey::App => return false,
+                terminal::TermKey::Shell => {}
+            }
             let Some(bytes) = terminal::key_bytes(ev) else { return false };
             s.term_type_bytes(i, &bytes);
             true
@@ -203,5 +212,5 @@ fn view(s: &App, k: &Kit, i: usize, t: &terminal::Term, dark: bool) -> El {
     }
     col().w_full().gap(6.0)
         .child(area)
-        .child(text("Click the terminal to type. Paste with Ctrl/⌘+V; Ctrl+C stops the running command; Copy screen copies what is shown.").font(k.ty.text_small).color(k.c.text_faint))
+        .child(text("Click the terminal to type. Paste with Ctrl/⌘+V; Ctrl+C stops the running command; Copy screen copies what is shown. Ctrl+Shift+Tab leaves the terminal; ⌘/Ctrl+K and the page shortcuts work here too.").font(k.ty.text_small).color(k.c.text_faint))
 }

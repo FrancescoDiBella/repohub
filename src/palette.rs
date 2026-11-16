@@ -286,14 +286,19 @@ pub fn layer(s: &App, k: &Kit) -> Vec<El> {
         .on_edit(|s: &mut App| &mut s.palette.as_mut().expect("palette open").query)
         .on_change(|s: &mut App, _| if let Some(p) = s.palette.as_mut() { p.selected = 0 })
         .on_submit(|s: &mut App, tx| run_selected(s, tx))
-        .on_key(move |s: &mut App, ev, _| {
+        .on_key(move |s: &mut App, ev, tx| {
             let Some(p) = s.palette.as_mut() else { return false };
             match ev.key {
                 rune::Key::Down => p.selected = (p.selected + 1).min(count.saturating_sub(1)),
                 rune::Key::Up => p.selected = p.selected.saturating_sub(1),
-                rune::Key::Escape => s.palette = None,
+                rune::Key::Escape => {
+                    s.palette = None;
+                    return true;
+                }
                 _ => return false,
             }
+            // The list scrolls: keep the highlighted row in sight.
+            tx.scroll_into_view(format!("palette-{}", p.selected));
             true
         })
         .build(k).key("palette-input").w_full();
@@ -306,7 +311,7 @@ pub fn layer(s: &App, k: &Kit) -> Vec<El> {
         let cmd = e.cmd.clone();
         let mut line = row().w_full().h(36.0).px(10.0).gap(10.0).center_y().radius(k.radius.md)
             .fill(if on { k.c.bg_accent.alpha(0.14) } else { rune::Color::TRANSPARENT }).hover(k.c.hover)
-            .role("option").label(e.title.clone()).key(format!("palette-{n}"))
+            .role("option").checked(on).label(e.title.clone()).key(format!("palette-{n}"))
             .on_press_tx(move |s: &mut App, tx| {
                 s.palette = None;
                 run(s, cmd.clone(), tx);
