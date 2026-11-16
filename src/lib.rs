@@ -25,6 +25,7 @@ mod config;
 mod github;
 mod harness;
 mod icons;
+mod inbox;
 mod lists;
 mod diffs;
 mod filters;
@@ -72,6 +73,8 @@ pub enum Page {
     Pulls,
     Issues,
     Actions,
+    /// What GitHub wants you to look at.
+    Notifications,
     Settings,
     /// A plugin's page (its id).
     Plugin(String),
@@ -189,6 +192,10 @@ pub struct App {
     form: Option<actions::Form>,
     /// The pull request whose Merge is waiting for a yes (`owner/repo#12`).
     confirm_merge: Option<String>,
+    /// Your unread notifications; `None` until they're first asked for.
+    inbox: Option<Load<Vec<inbox::Notification>>>,
+    /// The notifications being marked as read.
+    inbox_busy: std::collections::HashSet<String>,
     /// What the Pull requests and the Issues pages are narrowed to.
     pull_filter: filters::ListFilter,
     issue_filter: filters::ListFilter,
@@ -334,6 +341,9 @@ impl App {
         }
         self.page = p;
         self.thread = None;
+        if self.page == Page::Notifications {
+            self.load_inbox();
+        }
         self.toast = None;
         self.sync_tray();
         self.save_place();
@@ -348,6 +358,7 @@ impl App {
             Page::Pulls => ("pulls", None),
             Page::Issues => ("issues", None),
             Page::Actions => ("actions", None),
+            Page::Notifications => ("notifications", None),
             Page::Settings => ("settings", None),
             Page::Plugin(_) => ("overview", None),
         };
@@ -381,6 +392,7 @@ impl App {
             "pulls" => Page::Pulls,
             "issues" => Page::Issues,
             "actions" => Page::Actions,
+            "notifications" => Page::Notifications,
             "settings" => Page::Settings,
             "repo" => match p.repo.as_ref().and_then(|full| self.data.repos.iter().position(|r| r.full_name.eq_ignore_ascii_case(full))) {
                 Some(i) => {
@@ -409,6 +421,75 @@ impl App {
         self.confirm_merge = None;
         self.thread = None;
         self.close_pull_diff();
+    }
+
+    /// How many unread notifications are loaded.
+    fn unread(&self) -> usize {
+        self.inbox.as_ref().and_then(Load::ready).map_or(0, Vec::len)
+    }
+
+    /// Reads the unread notifications from GitHub (again). The list on screen stays meanwhile.
+    pub(crate) fn load_inbox(&mut self) {
+        if self.data.sample || !self.cfg.live() || self.cfg.token.is_none() {
+            return;
+        }
+        let Some(h) = self.handle.clone() else { return };
+        if !matches!(self.inbox, Some(Load::Ready(_))) {
+            self.inbox = Some(Load::Loading);
+        }
+        let cfg = self.cfg.clone();
+        let account = self.load_gen;
+        net::spawn(h, move || async move { github::load_notifications(&cfg).await }, move |s: &mut App, r| {
+            if s.load_gen != account {
+                return;
+            }
+            s.inbox = Some(match r {
+                Ok(list) => Load::Ready(list),
+                Err(e) => Load::Failed(inbox::explain(&e)),
+            });
+            s.sync_tray();
+        });
+    }
+
+    /// Marks notification `id` as read: it leaves the list at once, and comes back if GitHub
+    /// refuses.
+    pub(crate) fn mark_read(&mut self, id: &str) {
+        let Some(h) = self.handle.clone() else { return };
+        let Some(Load::Ready(list)) = self.inbox.as_mut() else { return };
+        let Some(at) = list.iter().position(|n| n.id == id) else { return };
+        if !self.inbox_busy.insert(id.to_owned()) {
+            return;
+        }
+        let taken = list.remove(at);
+        let cfg = self.cfg.clone();
+        let account = self.load_gen;
+        let id = id.to_owned();
+        net::spawn(h, { let id = id.clone(); move || async move { github::mark_read(&cfg, &id).await } }, move |s: &mut App, r: Result<(), String>| {
+            if s.load_gen != account {
+                return;
+            }
+            s.inbox_busy.remove(&id);
+            if let Err(e) = r {
+                if let Some(Load::Ready(list)) = s.inbox.as_mut() {
+                    list.insert(at.min(list.len()), taken);
+                }
+                s.notify_problem(inbox::explain(&e));
+            }
+            s.sync_tray();
+        });
+    }
+
+    /// Opens what a notification is about (its conversation, or its page on GitHub) and marks
+    /// it as read.
+    pub(crate) fn open_notification(&mut self, n: &inbox::Notification, tx: &mut Tx) {
+        match (n.subject, n.number) {
+            (inbox::Subject::Issue, Some(number)) => self.open_thread(&n.repo, number, false),
+            (inbox::Subject::Pull, Some(number)) => self.open_thread(&n.repo, number, true),
+            _ => {
+                let _ = tx.open_url(&n.url);
+            }
+        }
+        self.mark_read(&n.id);
     }
 
     /// Opens the conversation of issue or pull request `number` of `repo`, in place of the page.
@@ -793,6 +874,8 @@ impl App {
         // Drawings are files on this computer (or the server's notes folder), not account data:
         // writes in flight and queued ones still finish, so no edit is lost on an account switch.
         self.leave_tab();
+        self.inbox = None;
+        self.inbox_busy.clear();
         // Another account has other repositories and labels.
         self.pull_filter.clear();
         self.issue_filter.clear();
@@ -1161,6 +1244,8 @@ impl App {
                     self.go(Page::Overview);
                 }
                 self.restore_place();
+                // With the lists, what's waiting for you.
+                self.load_inbox();
             }
             Err(e) => {
                 if let Some(ra) = e.retry_after {
@@ -2535,6 +2620,8 @@ fn init() -> App {
         branch_filter: TextEdit::new(""),
         form: None,
         confirm_merge: None,
+        inbox: None,
+        inbox_busy: std::collections::HashSet::new(),
         pull_filter: filters::ListFilter::default(),
         issue_filter: filters::ListFilter::default(),
         thread: None,
@@ -2610,6 +2697,7 @@ fn init() -> App {
         Some("pulls") => Page::Pulls,
         Some("issues") => Page::Issues,
         Some("actions") => Page::Actions,
+        Some("notifications") => Page::Notifications,
         Some("settings") => Page::Settings,
         _ => Page::Overview,
     };
@@ -2819,6 +2907,7 @@ fn sidebar(s: &App, k: &Kit) -> El {
         .header(nav(s, k, "Pull requests", &icons::PULL, Page::Pulls, (open_prs > 0 || prs_capped).then(|| model::capped_if(open_prs, prs_capped))))
         .header(nav(s, k, "Issues", &icons::ISSUE, Page::Issues, (!s.data.issues.is_empty() || issues_capped).then(|| model::capped_if(s.data.issues.len(), issues_capped))))
         .header(nav(s, k, "Actions", &icons::PLAY, Page::Actions, None))
+        .header(nav(s, k, "Notifications", &icons::BELL, Page::Notifications, Some(s.unread()).filter(|n| *n > 0).map(|n| if n >= 50 { "50+".to_owned() } else { n.to_string() })))
         .section(SidebarSection::new("Pinned").count(pinned.len()).collapsed(!s.pinned_open)
             .on_toggle(|s: &mut App, _| s.pinned_open = !s.pinned_open).rows(pinned));
     if !org_rows.is_empty() {
@@ -2844,6 +2933,7 @@ fn title(s: &App) -> String {
         Page::Pulls => "Pull requests".into(),
         Page::Issues => "Issues".into(),
         Page::Actions => "Actions".into(),
+        Page::Notifications => "Notifications".into(),
         Page::Settings => "Settings".into(),
         Page::Plugin(id) => s.plugins.list.iter().find(|p| p.id == *id).and_then(|p| p.manifest.page.clone()).unwrap_or_default(),
     }
@@ -2922,7 +3012,7 @@ fn list_shows_failed(s: &App) -> bool {
     s.data.is_empty() && match &s.page {
         Page::Overview | Page::Repos | Page::Repo(_) | Page::Pulls | Page::Issues | Page::Actions => true,
         Page::Plugin(id) => !s.plugins.list.iter().any(|p| p.id == *id && p.running()),
-        Page::Settings => false,
+        Page::Settings | Page::Notifications => false,
     }
 }
 
@@ -2983,6 +3073,7 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
         Page::Pulls => lists::pulls(s, &k),
         Page::Issues => lists::issues(s, &k),
         Page::Actions => lists::actions(s, &k),
+        Page::Notifications => inbox::page(s, &k),
         Page::Settings => lists::settings(s, &k),
         },
     };
@@ -3063,7 +3154,12 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
             Page::Repo(full) => s.repo_index_of(full).and_then(|i| s.data.repos.get(i)).map(|r| r.name.clone()).unwrap_or_else(|| full.clone()),
             _ => title(s),
         };
-        mobile::shell(s, &k, cx.safe_area(), name, trailing.child(theme).child(settings), main.grow(1.0).min_h(0.0))
+        // The phone has no sidebar: the bell is the way to the notifications.
+        let unread = s.unread();
+        let bell = IconButton::new(&icons::BELL).variant(if unread > 0 { IconButtonVariant::Contrast } else { IconButtonVariant::GhostMuted })
+            .label(if unread > 0 { format!("Notifications, {unread} unread") } else { "Notifications".to_owned() })
+            .expanded(s.page == Page::Notifications).on_press(|s: &mut App| s.go(Page::Notifications)).build(&k).key("open-notifications");
+        mobile::shell(s, &k, cx.safe_area(), name, trailing.child(bell).child(theme).child(settings), main.grow(1.0).min_h(0.0))
     } else {
         let toolbar = Toolbar::new().title(title(s)).trailing(trailing
             .child(theme)
@@ -3900,6 +3996,111 @@ mod fix64_tests {
         assert!(rt.state.issue_filter.is_empty());
         // The Pull requests page has its own filter.
         assert!(rt.state.pull_filter.is_empty());
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod fix64_inbox_tests {
+    use crate::inbox::{Notification, Subject};
+    use crate::state::Load;
+    use crate::{App, Page, github, inbox};
+
+    fn live() -> App {
+        let mut s = crate::init();
+        s.data = crate::model::Data::sample();
+        s.data.sample = false;
+        s.pending_place = None;
+        let mut cfg = (*s.cfg).clone();
+        cfg.demo = false;
+        cfg.user = Some("alice".into());
+        cfg.token = Some("tok".into());
+        cfg.api = "http://127.0.0.1:9".into();
+        s.cfg = std::sync::Arc::new(cfg);
+        s.status = crate::Status::Ready;
+        s.page = Page::Notifications;
+        s
+    }
+
+    fn note(id: &str, repo: &str, title: &str, subject: Subject, number: Option<u32>) -> Notification {
+        Notification { id: id.into(), repo: repo.into(), title: title.into(), subject, number, reason: "review_requested".into(), updated_at: 0, url: format!("https://github.com/{repo}") }
+    }
+
+    #[test]
+    fn githubs_notifications_are_read_into_what_the_page_needs() {
+        let v = serde_json::json!({
+            "id": "123", "unread": true, "reason": "review_requested", "updated_at": "2026-11-10T10:00:00Z",
+            "repository": { "full_name": "octo/app" },
+            "subject": { "title": "Speed up loading", "type": "PullRequest", "url": "https://api.github.com/repos/octo/app/pulls/7" },
+        });
+        let n = github::parse_notification(&v).unwrap();
+        assert_eq!((n.id.as_str(), n.repo.as_str(), n.subject, n.number), ("123", "octo/app", Subject::Pull, Some(7)));
+        assert_eq!(n.why(), "Your review was requested");
+        assert_eq!(n.url, "https://github.com/octo/app/pull/7");
+        // A release has no conversation in the app: it opens the repository on GitHub.
+        let mut release = v.clone();
+        release["subject"] = serde_json::json!({ "title": "v1.0", "type": "Release", "url": "https://api.github.com/repos/octo/app/releases/55" });
+        let n = github::parse_notification(&release).unwrap();
+        assert_eq!((n.subject, n.number, n.url.as_str()), (Subject::Other, None, "https://github.com/octo/app"));
+        // Read ones, and ids that aren't numbers (they go into a request's address), are left out.
+        let mut read = v.clone();
+        read["unread"] = false.into();
+        assert_eq!(github::parse_notification(&read), None);
+        let mut odd = v.clone();
+        odd["id"] = "12/../../user".into();
+        assert_eq!(github::parse_notification(&odd), None);
+        assert!(inbox::explain("GitHub refused (403): Resource not accessible by personal access token").contains("classic token"));
+        assert_eq!(inbox::explain("Can't reach GitHub"), "Can't reach GitHub");
+    }
+
+    #[test]
+    fn the_page_groups_by_repository_and_says_why_it_is_empty() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = live();
+        s.inbox = Some(Load::Ready(vec![
+            note("1", "octo/app", "Review this", Subject::Pull, Some(7)),
+            note("2", "octo/site", "A bug", Subject::Issue, Some(3)),
+            note("3", "octo/app", "v1.0", Subject::Other, None),
+        ]));
+        assert_eq!(s.unread(), 3);
+        let mut rt = rune::Runtime::new(s, crate::view, (1180.0, 2400.0), rune::Env::new(true, 1.0));
+        rt.frame(0.0);
+        for key in ["notif-1", "notif-2", "notif-3", "notif-read-1", "nav-Notifications"] {
+            assert!(rt.find(key).is_some(), "{key}");
+        }
+        let texts = |rt: &rune::Runtime<App>| rt.elements().iter().filter_map(|e| e.text.clone()).collect::<Vec<_>>();
+        let t = texts(&rt);
+        assert_eq!(t.iter().filter(|x| x.as_str() == "octo/app").count(), 1, "one group per repository");
+        assert!(t.iter().any(|x| x.starts_with("3 unread")));
+        // Pressing a pull request's notification opens its conversation; the page stays to go back to.
+        let (x, y) = rt.find("notif-1").unwrap();
+        rt.pointer_move(x, y);
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(0.1);
+        assert!(rt.state.thread.as_ref().is_some_and(|t| t.pull && t.number == 7 && t.repo == "octo/app"));
+        assert_eq!(rt.state.page, Page::Notifications);
+
+        rt.update(|s, _| { s.thread = None; s.inbox = Some(Load::Ready(Vec::new())); });
+        rt.frame(0.2);
+        assert!(rt.find("inbox-empty").is_some());
+        rt.update(|s, _| s.inbox = Some(Load::Failed(inbox::explain("GitHub refused (403)"))));
+        rt.frame(0.3);
+        assert!(rt.find("inbox-failed").is_some() && rt.find("inbox-retry").is_some());
+        assert!(texts(&rt).iter().any(|x| x.contains("classic token")));
+        // Without a token there is nothing to ask GitHub, and the page says what's needed.
+        rt.update(|s, _| { let mut c = (*s.cfg).clone(); c.token = None; s.cfg = std::sync::Arc::new(c); s.inbox = None; });
+        rt.frame(0.4);
+        assert!(rt.find("inbox-no-token").is_some());
+    }
+
+    #[test]
+    fn changing_account_forgets_the_notifications() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = live();
+        s.inbox = Some(Load::Ready(vec![note("1", "octo/app", "x", Subject::Issue, Some(1))]));
+        s.inbox_busy.insert("1".into());
+        s.reset_account_state();
+        assert!(s.inbox.is_none() && s.inbox_busy.is_empty() && s.unread() == 0);
     }
 }
 

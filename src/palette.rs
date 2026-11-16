@@ -106,12 +106,13 @@ pub fn entries(s: &App) -> Vec<Entry> {
             }
         }
     }
-    const PAGES: [(&str, Page, &[&str]); 6] = [
+    const PAGES: [(&str, Page, &[&str]); 7] = [
         ("Overview", Page::Overview, &[MOD, "1"]),
         ("Repositories", Page::Repos, &[MOD, "2"]),
         ("Pull requests", Page::Pulls, &[MOD, "3"]),
         ("Issues", Page::Issues, &[MOD, "4"]),
         ("Actions", Page::Actions, &[MOD, "5"]),
+        ("Notifications", Page::Notifications, &[]),
         ("Settings", Page::Settings, &[MOD, ","]),
     ];
     for (title, page, keys) in PAGES {
@@ -120,6 +121,7 @@ pub fn entries(s: &App) -> Vec<Entry> {
             Page::Pulls => &icons::PULL,
             Page::Issues => &icons::ISSUE,
             Page::Actions => &icons::PLAY,
+            Page::Notifications => &icons::BELL,
             Page::Settings => &icons::GEAR,
             _ => &icons::REPO,
         };
