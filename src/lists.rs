@@ -333,6 +333,10 @@ pub fn settings(s: &App, k: &Kit) -> El {
         ("⌘/Ctrl + 1 … 5", "Overview, Repositories, Pull requests, Issues, Actions"),
         ("⌘/Ctrl + ,", "Settings"),
         ("⌘/Ctrl + R", "Refresh from GitHub"),
+        ("⌘/Ctrl + [", "Back: out of a conversation, or from a repository to the list"),
+        ("Esc", "Close what's open: a confirmation, a form, a diff, a conversation, a file, a message"),
+        ("Ctrl + Shift + Tab", "Leave the terminal, so the keyboard reaches the rest of the app"),
+        ("↑ ↓ in ⌘K", "Move through the results; Enter runs the one highlighted"),
     ].iter().fold(keys, |p, (key, what)| p.child(rule(k)).child(info(k, key, (*what).to_owned())));
     col().w_full().gap(16.0).max_w(760.0)
         .child(heading(k, "Settings", "Profile, appearance and the GitHub connection.", None))
