@@ -55,6 +55,28 @@ pub fn clone_command(url: &str, name: &str) -> Result<String, String> {
     Ok(format!("git clone -- {url}.git {name} && cd {name}\r"))
 }
 
+/// What a key pressed in the terminal means for the app, before the shell gets it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TermKey {
+    /// It goes to the shell.
+    Shell,
+    /// Ctrl+Shift+Tab: leave the terminal, so the keyboard reaches the rest of the app.
+    Leave,
+    /// One of the app's own shortcuts (⌘/Ctrl+K and the page shortcuts), which work everywhere.
+    App,
+}
+
+pub fn term_key(ev: &rune::KeyEvent) -> TermKey {
+    if ev.key == rune::Key::Tab && ev.mods.ctrl && ev.mods.shift {
+        return TermKey::Leave;
+    }
+    // Ctrl+R (reverse search) and the other control keys stay the shell's.
+    if ['k', '1', '2', '3', '4', '5', ','].iter().any(|c| ev.is_command(*c)) && !ev.mods.shift && !ev.mods.alt {
+        return TermKey::App;
+    }
+    TermKey::Shell
+}
+
 /// Bytes a key sends to the shell, xterm-style.
 pub fn key_bytes(ev: &rune::KeyEvent) -> Option<Vec<u8>> {
     use rune::Key;
@@ -359,6 +381,21 @@ impl Term {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn some_keys_belong_to_the_app_and_one_leaves_the_terminal() {
+        use rune::{Key, KeyEvent, Mods};
+        let ev = |key: Key, mods: Mods| KeyEvent { key, mods };
+        let ctrl = Mods { cmd: true, ctrl: true, ..Mods::default() };
+        assert_eq!(super::term_key(&ev(Key::Command('k'), ctrl)), super::TermKey::App);
+        assert_eq!(super::term_key(&ev(Key::Command('3'), ctrl)), super::TermKey::App);
+        assert_eq!(super::term_key(&ev(Key::Command(','), ctrl)), super::TermKey::App);
+        assert_eq!(super::term_key(&ev(Key::Command('r'), ctrl)), super::TermKey::Shell, "reverse search stays the shell's");
+        assert_eq!(super::term_key(&ev(Key::Command('c'), ctrl)), super::TermKey::Shell);
+        assert_eq!(super::term_key(&ev(Key::Tab, Mods { ctrl: true, shift: true, ..Mods::default() })), super::TermKey::Leave);
+        assert_eq!(super::term_key(&ev(Key::Tab, Mods::default())), super::TermKey::Shell, "Tab completes in the shell");
+        assert_eq!(super::term_key(&ev(Key::Escape, Mods::default())), super::TermKey::Shell);
+    }
+
     #[test]
     fn a_paste_cant_end_itself_or_carry_control_characters() {
         // The clipboard holds text that tries to close the bracketed paste and run a command.

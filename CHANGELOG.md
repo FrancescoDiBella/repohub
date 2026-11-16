@@ -10,6 +10,10 @@ The sections are **Added**, **Changed** and **Fixed**.
 ## Unreleased
 
 ### Added
+- Keyboard: Esc closes what's open on top of the page (a merge confirmation, a form, a diff, a
+  conversation, a file, a message), ⌘/Ctrl+[ goes back, and Ctrl+Shift+Tab leaves the
+  terminal. ⌘/Ctrl+K and the page shortcuts work while the terminal has the keyboard.
+  Settings lists them all.
 - Notifications: a page with what GitHub wants you to look at (a review asked of you, a
   mention, an assignment), unread first and grouped by repository, with the count in the
   sidebar and a bell on the phone. Clicking one opens its conversation and marks it as read.
@@ -74,6 +78,10 @@ The sections are **Added**, **Changed** and **Fixed**.
 - Docker image for amd64 and arm64.
 
 ### Changed
+- Settings is split into sections, one on screen at a time: **Account**, **Appearance**,
+  **Assistants**, **Plugins** and **About** (version, updates, keyboard shortcuts). The
+  connection's environment variables and files are under **Show details**. The phone's tabs say
+  Repositories and Pull requests.
 - The phone layout fits the newer features: a pull request's or an issue's buttons sit under
   its title instead of squeezing it, diffs are always unified and no taller than the screen
   allows, pinned repositories are at the top of the Repositories page, and the theme editor's
@@ -90,6 +98,8 @@ The sections are **Added**, **Changed** and **Fixed**.
 - A new look, with a more readable layout.
 
 ### Fixed
+- The command palette keeps the highlighted result in sight when you move past the first
+  rows with the arrow keys, and screen readers hear which one is selected.
 - Lists, the overview, the Code tab and the Changes tab now show loading placeholders while GitHub
   or `git` is still working, and show the error with **Retry** if a load fails, instead of saying
   nothing is there.
