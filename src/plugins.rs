@@ -586,6 +586,7 @@ pub fn context(s: &App, dark: bool) -> Data {
         Page::Pulls => ("pulls", None),
         Page::Issues => ("issues", None),
         Page::Actions => ("actions", None),
+        Page::Notifications => ("notifications", None),
         Page::Settings => ("settings", None),
     };
     let in_repo = |name: &str| repo.is_some_and(|r| name.eq_ignore_ascii_case(&r.full_name) || name.eq_ignore_ascii_case(&r.name));

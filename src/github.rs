@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 
 use crate::config::Config;
 use crate::net::{self, Resp, Transport};
+use crate::inbox::{Notification, Subject};
 use crate::thread::{Entry, Standing, Thread, Verdict};
 use crate::model::{Checks, Commit, Data, Detail, Issue, Profile, Pull, PullState, Repo, Run, duration, hex_hue, lang_hue, parse_iso};
 
@@ -229,6 +230,30 @@ impl Gh {
         }
         self.get("/user").await.ok().map(|v| s(&v, "login"))
     }
+}
+
+/// One of GitHub's notification threads; `None` for one with no id or repository.
+pub fn parse_notification(v: &Value) -> Option<Notification> {
+    let id = s(v, "id");
+    let repo = v.get("repository").map(|r| s(r, "full_name")).unwrap_or_default();
+    let id_ok = !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit());
+    if !id_ok || repo.is_empty() || !b(v, "unread") {
+        return None;
+    }
+    let subject = v.get("subject")?;
+    let kind = match s(subject, "type").as_str() {
+        "Issue" => Subject::Issue,
+        "PullRequest" => Subject::Pull,
+        _ => Subject::Other,
+    };
+    // The subject's API address ends with the number: …/repos/o/r/pulls/12.
+    let number = s(subject, "url").rsplit('/').next().and_then(|n| n.parse::<u32>().ok()).filter(|_| kind != Subject::Other);
+    let page = match (kind, number) {
+        (Subject::Issue, Some(n)) => format!("https://github.com/{repo}/issues/{n}"),
+        (Subject::Pull, Some(n)) => format!("https://github.com/{repo}/pull/{n}"),
+        _ => format!("https://github.com/{repo}"),
+    };
+    Some(Notification { id, repo, title: s(subject, "title"), subject: kind, number, reason: s(v, "reason"), updated_at: parse_iso(&s(v, "updated_at")).unwrap_or(0), url: page })
 }
 
 fn labels_of(v: &Value) -> Vec<(String, f32)> {
@@ -728,6 +753,20 @@ impl Gh {
         Ok(parse_thread(&issue, &comments, pull.as_ref().map(|(d, r)| (d, r))))
     }
 
+    /// Your unread notifications, newest first (the first 50).
+    pub async fn notifications(&self) -> Result<Vec<Notification>, String> {
+        let v = self.get("/notifications?per_page=50").await?;
+        Ok(v.as_array().into_iter().flatten().filter_map(parse_notification).collect())
+    }
+
+    pub async fn mark_read(&self, id: &str) -> Result<(), String> {
+        let r = self.t.send_body("PATCH", &format!("/notifications/threads/{id}"), JSON, "").await?;
+        match r.status {
+            200..=299 | 304 => Ok(()),
+            _ => Err(self.explain(&r)),
+        }
+    }
+
     pub async fn comment(&self, full: &str, number: u32, body: &str) -> Result<(), String> {
         self.write("POST", &format!("/repos/{full}/issues/{number}/comments"), json!({ "body": body })).await.map(|_| ())
     }
@@ -903,6 +942,14 @@ pub struct PullFile {
     pub status: String,
     /// The unified diff's hunks (no file headers); `None` for binary or very large files.
     pub patch: Option<String>,
+}
+
+pub async fn load_notifications(cfg: &Config) -> Result<Vec<Notification>, String> {
+    Gh::new(cfg).notifications().await
+}
+
+pub async fn mark_read(cfg: &Config, id: &str) -> Result<(), String> {
+    Gh::new(cfg).mark_read(id).await
 }
 
 pub async fn load_thread(cfg: &Config, full: &str, number: u32) -> Result<Thread, String> {

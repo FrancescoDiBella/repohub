@@ -74,6 +74,12 @@ public class BackendTest {
 
     @Test
     public void allowlistMatchesTheServers() {
+        assertTrue(GitHubPaths.allowed("GET", "/notifications"));
+        assertFalse(GitHubPaths.allowed("GET", "/notifications/threads/12"));
+        assertTrue(GitHubPaths.allowed("PATCH", "/notifications/threads/12"));
+        assertFalse(GitHubPaths.allowed("PATCH", "/notifications/threads/abc"));
+        assertFalse(GitHubPaths.allowed("PUT", "/notifications"));
+        assertFalse(GitHubPaths.allowed("DELETE", "/notifications/threads/12"));
         for (String p : new String[] {"/user", "/user/repos", "/user/starred", "/user/orgs", "/search/issues", "/users/octocat",
             "/users/octocat/repos", "/users/octocat/orgs", "/orgs/acme/repos", "/repos/o/r/actions/runs", "/repos/o/r/stats/participation",
             "/repos/o/r/contents", "/repos/o/r/readme", "/repos/o/r/languages", "/repos/o/r/commits", "/repos/o/r/branches", "/repos/o/r/issues",

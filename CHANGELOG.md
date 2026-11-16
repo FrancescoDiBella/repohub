@@ -10,6 +10,10 @@ The sections are **Added**, **Changed** and **Fixed**.
 ## Unreleased
 
 ### Added
+- Notifications: a page with what GitHub wants you to look at (a review asked of you, a
+  mention, an assignment), unread first and grouped by repository, with the count in the
+  sidebar and a bell on the phone. Clicking one opens its conversation and marks it as read.
+  It needs a classic token: GitHub doesn't give notifications to fine-grained ones.
 - Filters on the Pull requests and Issues pages: search by title or number, pick a repository
   or a label, and show only the pull requests you opened or the issues assigned to you.
   Issues show all their labels, not only the first.

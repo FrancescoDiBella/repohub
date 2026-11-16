@@ -93,7 +93,7 @@ final class GitHubPaths {
         String[] rest = repo ? java.util.Arrays.copyOfRange(seg, 3, seg.length) : new String[0];
         switch (method) {
             case "GET":
-                if (p.equals("/user") || p.equals("/user/repos") || p.equals("/user/starred") || p.equals("/user/orgs") || p.equals("/search/issues")) {
+                if (p.equals("/user") || p.equals("/user/repos") || p.equals("/user/starred") || p.equals("/user/orgs") || p.equals("/search/issues") || p.equals("/notifications")) {
                     return true;
                 }
                 if (seg.length == 2 && seg[0].equals("users") && !seg[1].isEmpty()) {
@@ -145,7 +145,9 @@ final class GitHubPaths {
                     || (rest.length == 2 && rest[0].equals("git") && rest[1].equals("refs"))
                     || (rest.length == 3 && number(rest[1]) && ((rest[0].equals("issues") && rest[2].equals("comments")) || (rest[0].equals("pulls") && rest[2].equals("reviews")))));
             case "PATCH":
-                return repo && rest.length == 2 && rest[0].equals("issues") && number(rest[1]);
+                // Closing or reopening an issue; marking one notification as read.
+                return (repo && rest.length == 2 && rest[0].equals("issues") && number(rest[1]))
+                    || (seg.length == 3 && seg[0].equals("notifications") && seg[1].equals("threads") && number(seg[2]));
             default:
                 return false;
         }
