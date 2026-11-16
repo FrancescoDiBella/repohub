@@ -126,3 +126,29 @@ the same; the clients bypass HTTP proxies for `localhost` and `NO_PROXY` hosts.
    `0.2.0` section (`scripts/release-notes.sh 0.2.0` prints it), followed by GitHub's list of
    pull requests.
 
+## Signing updates
+
+The app checks an update's package against `SHA256SUMS`, which only shows the download isn't
+damaged: both come from the same release. A signature on `SHA256SUMS` shows who made the
+release. It is off until the repository has a key; from then on, builds refuse unsigned updates.
+
+Set it up once, on your own computer. The private key never goes into the repository, an issue
+or a chat.
+
+1. Install [minisign](https://jedisct1.github.io/minisign/) and make a key without a password
+   (CI can't type one): `minisign -G -W -p repohub.pub -s repohub.key`.
+2. Keep `repohub.key` somewhere safe (a password manager). If it's lost, signed builds can no
+   longer update themselves and people must download a new build by hand.
+3. In the repository's **Settings → Secrets and variables → Actions**:
+   - **Secrets** → `MINISIGN_SECRET_KEY`: the whole content of `repohub.key` (both lines).
+   - **Variables** → `REPOHUB_UPDATE_PUBKEY`: the second line of `repohub.pub` (it starts with
+     `RW`).
+   Add the secret first. With the variable but no secret, the release job stops with an error
+   instead of publishing a release the apps would refuse.
+4. Push to `main`. The Desktop workflow builds the apps with the public key inside, signs
+   `SHA256SUMS` and attaches `SHA256SUMS.minisig`.
+
+Builds made before step 4 have no key and keep updating as before; the first build they update
+to has it. To change the key, publish one release signed with the old key that carries the new
+public key, then switch the secret.
+

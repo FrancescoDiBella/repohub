@@ -552,6 +552,12 @@ impl App {
                         s.sync_tray();
                     }
                 });
+                // Who made this release (the signature), then that the package is the one it lists.
+                let signature = match (update::signing_key(), rel.sig.as_deref()) {
+                    (Some(_), Some(url)) => Some(String::from_utf8_lossy(&update::download(url, 0, &job.cancel, |_| {})?).into_owned()),
+                    _ => None,
+                };
+                update::verify_signature(&sums, signature.as_deref(), update::signing_key())?;
                 update::verify(&bytes, &rel.asset, &sums)?;
                 let exe = std::env::current_exe().map_err(|e| e.to_string())?;
                 let target = update::install(&bytes, &rel.asset, &exe)?;
@@ -3566,6 +3572,7 @@ mod fix60_tests {
             url: "https://example.invalid/pkg.tar.gz".into(),
             size: 100,
             sums: None,
+            sig: None,
             notes: String::new(),
         }
     }

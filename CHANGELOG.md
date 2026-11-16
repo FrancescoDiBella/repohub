@@ -75,6 +75,10 @@ The sections are **Added**, **Changed** and **Fixed**.
 - A new look, with a more readable layout.
 
 ### Fixed
+- Security (updates): the app downloads updates only from GitHub's release hosts, every
+  redirect included. Builds made with a signing key refuse an update whose checksums aren't
+  signed by it. macOS checks the new app's code signature before replacing the old one, and on
+  Windows an install folder with an apostrophe in its name no longer breaks updates.
 - Security (plugins): a plugin can no longer open a link or copy text by itself. It asks, and
   RepoHub shows the address or the text with **Open**/**Copy** and **Don't**. Only `https://`
   links, and copied text has no control characters. Installing from a Git address runs in the

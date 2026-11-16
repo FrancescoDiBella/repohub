@@ -42,6 +42,9 @@ jobs:
     env:
       # The app knows which build it is, to update itself from the Latest build (src/update.rs).
       REPOHUB_BUILD: ${{ github.sha }}
+      # The public key updates are signed with: the app refuses an update whose checksums
+      # aren't signed by its private half (the MINISIGN_SECRET_KEY secret). Empty: no check.
+      REPOHUB_UPDATE_PUBKEY: ${{ vars.REPOHUB_UPDATE_PUBKEY }}
     steps:
       - uses: actions/checkout@v4
       - name: Version
@@ -181,6 +184,30 @@ jobs:
           merge-multiple: true
       - name: Checksums
         run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      # Signs the checksums, so the app can tell who made the release, not only that the
+      # download isn't damaged (CONTRIBUTING.md, "Signing updates"). A build that carries the
+      # public key refuses unsigned updates, so with the key set this step must not be skipped.
+      - name: Sign the checksums
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          REPOHUB_UPDATE_PUBKEY: ${{ vars.REPOHUB_UPDATE_PUBKEY }}
+        run: |
+          if [ -z "$MINISIGN_SECRET_KEY" ]; then
+            if [ -n "$REPOHUB_UPDATE_PUBKEY" ]; then
+              echo "::error::REPOHUB_UPDATE_PUBKEY is set but the MINISIGN_SECRET_KEY secret is missing: the apps would refuse this release."
+              exit 1
+            fi
+            echo "::notice::No MINISIGN_SECRET_KEY secret: the checksums are not signed."
+            exit 0
+          fi
+          sudo apt-get update -qq && sudo apt-get install -y -qq minisign
+          key="$RUNNER_TEMP/minisign.key"
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$key"
+          minisign -S -s "$key" -m dist/SHA256SUMS -t "RepoHub ${GITHUB_SHA::7}"
+          rm -f "$key"
+          if [ -n "$REPOHUB_UPDATE_PUBKEY" ]; then
+            minisign -V -P "$REPOHUB_UPDATE_PUBKEY" -m dist/SHA256SUMS
+          fi
       # The notes are the version's section of CHANGELOG.md; GitHub's list of merged pull
       # requests follows them.
       - name: Release notes
@@ -215,6 +242,30 @@ jobs:
       # The app checks what it downloads against these before installing it.
       - name: Checksums
         run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      # Signs the checksums, so the app can tell who made the release, not only that the
+      # download isn't damaged (CONTRIBUTING.md, "Signing updates"). A build that carries the
+      # public key refuses unsigned updates, so with the key set this step must not be skipped.
+      - name: Sign the checksums
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          REPOHUB_UPDATE_PUBKEY: ${{ vars.REPOHUB_UPDATE_PUBKEY }}
+        run: |
+          if [ -z "$MINISIGN_SECRET_KEY" ]; then
+            if [ -n "$REPOHUB_UPDATE_PUBKEY" ]; then
+              echo "::error::REPOHUB_UPDATE_PUBKEY is set but the MINISIGN_SECRET_KEY secret is missing: the apps would refuse this release."
+              exit 1
+            fi
+            echo "::notice::No MINISIGN_SECRET_KEY secret: the checksums are not signed."
+            exit 0
+          fi
+          sudo apt-get update -qq && sudo apt-get install -y -qq minisign
+          key="$RUNNER_TEMP/minisign.key"
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$key"
+          minisign -S -s "$key" -m dist/SHA256SUMS -t "RepoHub ${GITHUB_SHA::7}"
+          rm -f "$key"
+          if [ -n "$REPOHUB_UPDATE_PUBKEY" ]; then
+            minisign -V -P "$REPOHUB_UPDATE_PUBKEY" -m dist/SHA256SUMS
+          fi
       # The notes: the Unreleased section of CHANGELOG.md, which the app shows as "What's new".
       - name: Release notes
         run: |
