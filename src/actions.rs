@@ -231,17 +231,27 @@ pub fn issue_line(s: &App, k: &Kit, x: &Issue) -> El {
         .disabled(busy || blocked(s).is_some())
         .on_press(move |s: &mut App| s.write(&repo, github::Write::CloseIssue(number)))
         .build(k).key(format!("close-{key}"));
-    row().w_full().center_y().child(lists::issue_row(k, x, s.now).grow(1.0).shrink()).child(close.mr(12.0))
+    with_tools(s, lists::issue_row(k, x, s.now), row().child(close))
+}
+
+/// A row and its buttons: side by side, or on a phone the buttons under the row, where the
+/// title keeps the whole width and the buttons wrap.
+fn with_tools(s: &App, line: El, tools: El) -> El {
+    if s.compact {
+        col().w_full().child(line.w_full()).child(tools.w_full().flex_wrap().gap(6.0).px(16.0).pb(10.0))
+    } else {
+        row().w_full().center_y().child(line.grow(1.0).shrink()).child(tools.mr(12.0))
+    }
 }
 
 /// A pull request row with Merge (asks first) on open, non-draft pull requests.
 pub fn pull_line(s: &App, k: &Kit, p: &Pull, compact: bool) -> El {
     let key = busy_key(&p.repo, p.number);
     let active = s.pull_diff_of.as_ref().is_some_and(|(full, num)| *num == p.number && crate::changes_page::pull_repo(&p.url).is_some_and(|f| f.eq_ignore_ascii_case(full)));
-    let line = lists::pull_row(k, p, s.now, compact).grow(1.0).shrink();
+    let line = lists::pull_row(k, p, s.now, compact);
     let files = crate::changes_page::files_button(k, p, active);
     if p.state != PullState::Open {
-        let mut r = row().w_full().center_y().child(line).children(files.map(|f| f.mr(12.0)));
+        let mut r = with_tools(s, line, row().children(files));
         if active {
             r = r.fill(k.c.bg_accent.alpha(0.12));
         }
@@ -250,11 +260,11 @@ pub fn pull_line(s: &App, k: &Kit, p: &Pull, compact: bool) -> El {
     let busy = s.busy.contains(&key);
     let asking = s.confirm_merge.as_deref() == Some(key.as_str());
     let (repo, number) = (p.repo.clone(), p.number);
-    let mut tools = row().gap(6.0).center_y().mr(12.0).children(files);
+    let mut tools = row().gap(6.0).center_y().children(files);
     // With its diff open, the pull request merges from the diff panel (one confirmation on
     // screen, with the method picked there).
     if active {
-        return row().w_full().center_y().child(line).child(tools).fill(k.c.bg_accent.alpha(0.12));
+        return with_tools(s, line, tools).fill(k.c.bg_accent.alpha(0.12));
     }
     if asking && !busy {
         let r2 = repo.clone();
@@ -272,7 +282,7 @@ pub fn pull_line(s: &App, k: &Kit, p: &Pull, compact: bool) -> El {
             .disabled(busy || blocked(s).is_some())
             .on_press(move |s: &mut App| s.confirm_merge = Some(k2.clone())).build(k).key(format!("merge-{key}")));
     }
-    row().w_full().center_y().child(line).child(tools)
+    with_tools(s, line, tools)
 }
 
 #[cfg(test)]

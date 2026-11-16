@@ -168,6 +168,17 @@ pub fn repos(s: &App, k: &Kit) -> El {
         RepoSort::Stars => shown.sort_by(|a, b| all[*b].stars.cmp(&all[*a].stars)),
         RepoSort::Name => shown.sort_by_key(|i| all[*i].name.to_lowercase()),
     }
+    // The phone has no sidebar, where the pinned repositories live: they go at the top here.
+    let pinned = if s.compact { crate::pinned(s) } else { Vec::new() };
+    let pinned_row = (!pinned.is_empty()).then(|| {
+        let chips = pinned.iter().map(|&i| {
+            Button::new(all[i].name.clone()).icon(&icons::PIN).variant(ButtonVariant::Outline).control_size(ControlSize::Small)
+                .on_press(move |s: &mut App| s.open(i)).build(k).key(format!("pinned-chip-{}", all[i].full_name))
+        });
+        col().w_full().gap(6.0).key("pinned-row")
+            .child(text("Pinned").font(k.ty.small_medium).color(k.c.text_muted))
+            .child(row().w_full().scroll_x().child(row().gap(6.0).children(chips)))
+    });
     let sort = row().gap(8.0).center_y()
         .child(ui::ico(&icons::SORT, 14.0, k.c.icon_muted))
         .child(SegmentedControl::new(&RepoSort::LABELS, Some(s.sort.index())).label("Sort by").fit()
@@ -233,6 +244,7 @@ pub fn repos(s: &App, k: &Kit) -> El {
     };
     col().w_full().gap(16.0)
         .child(heading(k, "Repositories", &sub, action))
+        .children(pinned_row)
         .child(owners)
         .child(row().w_full().gap(12.0).center_y().flex_wrap().child(search).child(seg).child(sort))
         .child(list)
