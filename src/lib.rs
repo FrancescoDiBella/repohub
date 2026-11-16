@@ -47,6 +47,8 @@ mod plugins_page;
 mod prefs;
 mod state;
 mod terminal;
+mod thread;
+mod thread_page;
 mod terminal_page;
 mod themes;
 mod themes_page;
@@ -186,6 +188,10 @@ pub struct App {
     form: Option<actions::Form>,
     /// The pull request whose Merge is waiting for a yes (`owner/repo#12`).
     confirm_merge: Option<String>,
+    /// The issue or pull request whose conversation is on screen, in place of the page.
+    thread: Option<thread::Open>,
+    /// Counts conversation loads (see [`thread::Open::epoch`]).
+    thread_epoch: u64,
     /// Rows with a write running (`owner/repo#12`), so their buttons wait.
     busy: std::collections::HashSet<String>,
     /// The title (and draft flag) of the item a form is creating, for showing it once created.
@@ -323,6 +329,7 @@ impl App {
             self.leave_tab();
         }
         self.page = p;
+        self.thread = None;
         self.toast = None;
         self.sync_tray();
         self.save_place();
@@ -396,7 +403,90 @@ impl App {
         self.term_error = None;
         self.picker = None;
         self.confirm_merge = None;
+        self.thread = None;
         self.close_pull_diff();
+    }
+
+    /// Opens the conversation of issue or pull request `number` of `repo`, in place of the page.
+    pub(crate) fn open_thread(&mut self, repo: &str, number: u32, pull: bool) {
+        self.close_pull_diff();
+        self.confirm_merge = None;
+        self.thread_epoch = self.thread_epoch.wrapping_add(1);
+        self.thread = Some(thread::Open { repo: repo.to_owned(), number, pull, load: Load::Loading, reply: TextEdit::new(""), sending: false, epoch: self.thread_epoch });
+        self.load_thread();
+    }
+
+    /// Reads the open conversation from GitHub (again). What's on screen stays until the answer.
+    pub(crate) fn load_thread(&mut self) {
+        let Some(t) = self.thread.as_mut() else { return };
+        let (repo, number, pull, epoch) = (t.repo.clone(), t.number, t.pull, t.epoch);
+        // The sample data has no GitHub behind it: a made-up conversation shows the page.
+        if self.data.sample {
+            let (title, author, standing) = if pull {
+                self.data.pulls.iter().find(|p| p.number == number && same_repo(&p.repo, &repo))
+                    .map(|p| (p.title.clone(), p.author.clone(), match p.state {
+                        PullState::Open => thread::Standing::Open,
+                        PullState::Draft => thread::Standing::Draft,
+                        PullState::Merged => thread::Standing::Merged,
+                        PullState::Closed => thread::Standing::Closed,
+                    }))
+            } else {
+                self.data.issues.iter().find(|x| x.number == number && same_repo(&x.repo, &repo))
+                    .map(|x| (x.title.clone(), self.data.profile.login.clone(), thread::Standing::Open))
+            }.unwrap_or_else(|| (format!("#{number}"), self.data.profile.login.clone(), thread::Standing::Open));
+            t.load = Load::Ready(thread::sample(&title, &author, pull, standing, self.now));
+            return;
+        }
+        let Some(h) = self.handle.clone() else {
+            t.load = Load::Failed("The app isn't ready to load this yet: try again in a moment.".into());
+            return;
+        };
+        if !matches!(t.load, Load::Ready(_)) {
+            t.load = Load::Loading;
+        }
+        let cfg = self.cfg.clone();
+        let account = self.load_gen;
+        let full = self.data.repos.iter().find(|r| same_repo(&r.full_name, &repo)).map(|r| r.full_name.clone()).unwrap_or_else(|| repo.clone());
+        net::spawn(h, move || async move { github::load_thread(&cfg, &full, number).await }, move |s: &mut App, r| {
+            // Another account, another conversation, or this one closed meanwhile: not ours.
+            if s.load_gen != account {
+                return;
+            }
+            let Some(t) = s.thread.as_mut().filter(|t| t.epoch == epoch) else { return };
+            t.load = match r {
+                Ok(thread) => Load::Ready(thread),
+                // A reload that fails keeps what was read before, and says so.
+                Err(e) if matches!(t.load, Load::Ready(_)) => {
+                    s.notify_problem(e);
+                    return;
+                }
+                Err(e) => Load::Failed(e),
+            };
+        });
+    }
+
+    /// Sends what's typed in the conversation's box: a comment, or a review with `verdict`.
+    pub(crate) fn send_reply(&mut self, verdict: Option<thread::Verdict>) {
+        let Some(t) = self.thread.as_mut() else { return };
+        if t.sending {
+            return;
+        }
+        let body = t.reply.text.trim().to_owned();
+        // Only an approval can go without words.
+        if body.is_empty() && verdict != Some(thread::Verdict::Approved) {
+            return;
+        }
+        let (repo, number) = (t.repo.clone(), t.number);
+        let w = match verdict {
+            Some(verdict) => github::Write::Review { number, verdict, body },
+            None => github::Write::Comment { number, body },
+        };
+        if actions::blocked(self).is_none() {
+            if let Some(t) = self.thread.as_mut() {
+                t.sending = true;
+            }
+            self.write(&repo, w);
+        }
     }
 
     /// Switches the repository page of repository `i` to `tab`.
@@ -873,6 +963,8 @@ impl App {
             {
                 self.close_board(i);
             }
+        } else if self.thread.is_some() && self.pull_diff_of.is_none() {
+            self.thread = None;
         } else if self.pull_diff_of.is_some() {
             self.close_pull_diff();
         } else {
@@ -1486,10 +1578,7 @@ impl App {
         if actions::blocked(self).is_some() {
             return;
         }
-        let number = match &w {
-            github::Write::CloseIssue(n) | github::Write::Merge { number: n, .. } => *n,
-            _ => 0,
-        };
+        let number = w.number().unwrap_or(0);
         let key = actions::busy_key(repo, number);
         if !self.busy.insert(key.clone()) {
             return;
@@ -1507,6 +1596,10 @@ impl App {
                 return;
             }
             s.busy.remove(&key);
+            // What was typed stays in the box when sending fails.
+            if let Some(t) = s.thread.as_mut().filter(|t| t.is(&full_cb, number)) {
+                t.sending = false;
+            }
             match r {
                 Ok(done) => s.apply_done(&full_cb, done),
                 Err(e) => s.notify_problem(e),
@@ -1516,7 +1609,21 @@ impl App {
 
     /// Shows what a write changed at once, without waiting for GitHub's lists to catch up.
     fn apply_done(&mut self, repo: &str, done: github::Done) {
+        let about = match &done {
+            github::Done::Closed(n) | github::Done::Reopened(n) | github::Done::Merged(n) | github::Done::Commented(n) | github::Done::Reviewed(n, _) => Some(*n),
+            _ => None,
+        };
+        let sent = matches!(done, github::Done::Commented(_) | github::Done::Reviewed(..));
         self.apply_done_inner(repo, done);
+        // The conversation on screen shows the change: read it again.
+        if let Some(n) = about
+            && let Some(t) = self.thread.as_mut().filter(|t| t.is(repo, n))
+        {
+            if sent {
+                t.reply.clear();
+            }
+            self.load_thread();
+        }
         self.sync_tray();
     }
 
@@ -1570,6 +1677,21 @@ impl App {
                 }
                 self.notify(format!("Closed issue #{n}"));
             }
+            github::Done::Reopened(n) => self.notify(format!("Reopened issue #{n}")),
+            github::Done::Commented(n) => {
+                for x in self.data.issues.iter_mut().filter(|x| x.number == n && same_repo(&x.repo, &full_name)) {
+                    x.comments += 1;
+                }
+                for p in self.data.pulls.iter_mut().filter(|p| p.number == n && same_repo(&p.repo, &full_name)) {
+                    p.comments += 1;
+                }
+                self.notify(format!("Comment added to #{n}"));
+            }
+            github::Done::Reviewed(n, verdict) => self.notify(match verdict {
+                thread::Verdict::Approved => format!("Approved pull request #{n}"),
+                thread::Verdict::ChangesRequested => format!("Requested changes on pull request #{n}"),
+                thread::Verdict::Commented => format!("Review sent on pull request #{n}"),
+            }),
             github::Done::Merged(n) => {
                 let mut changed = false;
                 for p in self.data.pulls.iter_mut().filter(|p| p.number == n && same_repo(&p.repo, &full_name)) {
@@ -2406,6 +2528,8 @@ fn init() -> App {
         branch_filter: TextEdit::new(""),
         form: None,
         confirm_merge: None,
+        thread: None,
+        thread_epoch: 0,
         busy: std::collections::HashSet::new(),
         form_title: None,
         pull_meta: None,
@@ -2486,6 +2610,14 @@ fn init() -> App {
     // `-- tab notes` (a name or a number) picks the repository page's section.
     if let Some(t) = arg("tab").and_then(|t| RepoTab::parse(&t)) {
         s.tab = t;
+    }
+    // `-- thread 14` opens the conversation of that pull request or issue (for headless stills).
+    if let Some(number) = arg("thread").and_then(|n| n.parse::<u32>().ok()) {
+        if let Some(repo) = s.data.pulls.iter().find(|p| p.number == number).map(|p| p.repo.clone()) {
+            s.open_thread(&repo, number, true);
+        } else if let Some(repo) = s.data.issues.iter().find(|x| x.number == number).map(|x| x.repo.clone()) {
+            s.open_thread(&repo, number, false);
+        }
     }
     // `-- board Name` opens a drawing of that section (for headless stills); `zoom 2` zooms it.
     #[cfg(not(target_arch = "wasm32"))]
@@ -2815,7 +2947,9 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
     let k = themes::kit(look);
     s.shown_dark.set(dark);
     s.plugins.set_colors(&k);
-    let content = match &s.page {
+    let content = match (&s.thread, &s.page) {
+        (Some(t), _) => thread_page::view(s, &k, t),
+        (None, page) => match page {
         Page::Overview => pages::overview(s, &k),
         Page::Repos => pages::repos(s, &k),
         Page::Repo(full) => {
@@ -2831,6 +2965,7 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
         Page::Issues => lists::issues(s, &k),
         Page::Actions => lists::actions(s, &k),
         Page::Settings => lists::settings(s, &k),
+        },
     };
     let mut inner = col().w_full().max_w(1080.0).gap(16.0);
     if let Some(b) = update_banner(s, &k) {
@@ -3557,6 +3692,146 @@ mod fix52_tests {
         press(&mut rt, "plugin-ask-yes");
         assert_eq!(rt.state.plugin_ask, None);
         assert_eq!(rt.state.toast.as_ref().map(|t| t.text.as_str()), Some("Copied"));
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod fix63_tests {
+    use crate::state::Load;
+    use crate::thread::{Standing, Verdict};
+    use crate::{App, Page, github};
+
+    fn app() -> App {
+        let mut s = crate::init();
+        s.data = crate::model::Data::sample();
+        s.pending_place = None;
+        s.page = Page::Pulls;
+        s
+    }
+
+    fn press(rt: &mut rune::Runtime<App>, key: &str) {
+        let (x, y) = rt.find(key).unwrap_or_else(|| panic!("{key} is on screen"));
+        rt.pointer_move(x, y);
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(0.1);
+    }
+
+    #[test]
+    fn githubs_answers_become_one_conversation_in_order() {
+        let issue = serde_json::json!({
+            "title": "Speed up loading", "state": "open", "html_url": "https://github.com/o/r/pull/7", "comments": 2,
+            "created_at": "2026-11-01T10:00:00Z", "body": "The description.", "user": { "login": "alice" },
+            "labels": [{ "name": "perf", "color": "ff0000" }], "pull_request": { "url": "x" },
+        });
+        let comments = serde_json::json!([
+            { "user": { "login": "bob" }, "created_at": "2026-11-03T10:00:00Z", "body": "Second." },
+            { "user": null, "created_at": "2026-11-02T10:00:00Z", "body": "First." },
+        ]);
+        let detail = serde_json::json!({ "draft": true, "merged": false, "head": { "ref": "fast" }, "base": { "ref": "main" } });
+        let reviews = serde_json::json!([
+            { "user": { "login": "carol" }, "state": "APPROVED", "body": "", "submitted_at": "2026-11-04T10:00:00Z" },
+            { "user": { "login": "dave" }, "state": "CHANGES_REQUESTED", "body": "Fix the flag.", "submitted_at": "2026-11-02T12:00:00Z" },
+            { "user": { "login": "erin" }, "state": "COMMENTED", "body": "", "submitted_at": "2026-11-02T13:00:00Z" },
+            { "user": { "login": "me" }, "state": "PENDING", "body": "not sent yet" },
+            { "user": { "login": "frank" }, "state": "DISMISSED", "body": "old", "submitted_at": "2026-11-02T14:00:00Z" },
+        ]);
+        let t = github::parse_thread(&issue, &comments, Some((&detail, &reviews)));
+        assert_eq!((t.title.as_str(), t.author.as_str(), t.standing), ("Speed up loading", "alice", Standing::Draft));
+        assert_eq!(t.branches, Some(("fast".into(), "main".into())));
+        assert_eq!(t.labels.len(), 1);
+        // The description first, then everything by time; a deleted account is "ghost".
+        let seen: Vec<(&str, &str, Option<Verdict>)> = t.entries.iter().map(|e| (e.author.as_str(), e.body.as_str(), e.verdict)).collect();
+        assert_eq!(seen, [
+            ("alice", "The description.", None),
+            ("ghost", "First.", None),
+            ("dave", "Fix the flag.", Some(Verdict::ChangesRequested)),
+            ("bob", "Second.", None),
+            ("carol", "", Some(Verdict::Approved)),
+        ], "an empty comment-only review, a pending one and a dismissed one are left out");
+        assert!(!t.more);
+
+        // An issue: no pull request part; closed stays closed; more comments than were read.
+        let issue = serde_json::json!({ "title": "Bug", "state": "closed", "comments": 150, "created_at": "2026-11-01T10:00:00Z", "body": null, "user": { "login": "alice" } });
+        let t = github::parse_thread(&issue, &serde_json::json!([]), None);
+        assert_eq!((t.standing, t.branches.clone(), t.entries.len(), t.more), (Standing::Closed, None, 1, true));
+        assert_eq!(t.entries[0].body, "");
+        // A merged pull request is merged, not just closed.
+        let merged = serde_json::json!({ "merged": true, "draft": false });
+        assert_eq!(github::parse_thread(&issue, &serde_json::json!([]), Some((&merged, &serde_json::json!([])))).standing, Standing::Merged);
+    }
+
+    #[test]
+    fn a_row_opens_its_conversation_and_back_returns_to_the_list() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let s = app();
+        let pr = s.data.pulls.iter().find(|p| p.number == 14).unwrap().clone();
+        let mut rt = rune::Runtime::new(s, crate::view, (1180.0, 3000.0), rune::Env::new(true, 1.0));
+        rt.frame(0.0);
+        press(&mut rt, &format!("pr-{}-{}", pr.repo, pr.number));
+        let open = rt.state.thread.as_ref().expect("the conversation opened");
+        assert!(open.pull && open.number == 14);
+        assert!(matches!(&open.load, Load::Ready(t) if t.title == pr.title), "the sample data shows a conversation without GitHub");
+        assert!(rt.find("thread-entry-0").is_some() && rt.find("thread-reply-text").is_some());
+        assert!(rt.find("pr-filter").is_none(), "it takes the list's place");
+        // A pull request can be approved; with the sample data nothing can be sent, and it says so.
+        assert!(rt.find("thread-approve").is_some() && rt.find("thread-blocked").is_some());
+        press(&mut rt, "thread-back");
+        assert!(rt.state.thread.is_none());
+        assert!(rt.find("pr-filter").is_some() && rt.state.page == Page::Pulls);
+
+        // An issue has no review buttons, and going to another page closes the conversation.
+        rt.update(|s, _| s.go(Page::Issues));
+        rt.frame(0.3);
+        let issue = rt.state.data.issues[0].clone();
+        press(&mut rt, &format!("issue-{}-{}", issue.repo, issue.number));
+        assert!(rt.state.thread.as_ref().is_some_and(|t| !t.pull && t.number == issue.number));
+        assert!(rt.find("thread-approve").is_none() && rt.find("thread-close-issue").is_some());
+        rt.update(|s, _| s.go(Page::Issues));
+        assert!(rt.state.thread.is_none(), "choosing the page again goes back to its list");
+    }
+
+    #[test]
+    fn what_is_sent_and_what_a_finished_write_changes() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = app();
+        let pr = s.data.pulls.iter().find(|p| p.number == 14).unwrap().clone();
+        s.open_thread(&pr.repo, 14, true);
+        // Nothing typed: a comment and "request changes" need words; nothing is marked as sending.
+        s.send_reply(None);
+        s.send_reply(Some(Verdict::ChangesRequested));
+        assert!(!s.thread.as_ref().unwrap().sending);
+        assert_eq!(github::Write::Review { number: 14, verdict: Verdict::Approved, body: String::new() }.number(), Some(14));
+        assert_eq!((Verdict::Approved.event(), Verdict::ChangesRequested.event(), Verdict::Commented.event()), ("APPROVE", "REQUEST_CHANGES", "COMMENT"));
+
+        // A comment that was sent: the box empties, the row's count goes up, a toast says so.
+        s.thread.as_mut().unwrap().reply = rune::TextEdit::new("Thanks!");
+        let before = pr.comments;
+        s.apply_done(&pr.repo, github::Done::Commented(14));
+        assert!(s.thread.as_ref().unwrap().reply.text.is_empty());
+        assert_eq!(s.data.pulls.iter().find(|p| p.number == 14).unwrap().comments, before + 1);
+        assert_eq!(s.toast.as_ref().map(|t| t.text.as_str()), Some("Comment added to #14"));
+        // A write about another pull request leaves what's being typed here alone.
+        s.thread.as_mut().unwrap().reply = rune::TextEdit::new("still typing");
+        s.apply_done(&pr.repo, github::Done::Commented(15));
+        assert_eq!(s.thread.as_ref().unwrap().reply.text, "still typing");
+        s.apply_done(&pr.repo, github::Done::Reviewed(14, Verdict::Approved));
+        assert_eq!(s.toast.as_ref().map(|t| t.text.as_str()), Some("Approved pull request #14"));
+    }
+
+    #[test]
+    fn a_late_answer_for_another_conversation_is_dropped() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = app();
+        let pr = s.data.pulls.iter().find(|p| p.number == 14).unwrap().clone();
+        s.open_thread(&pr.repo, 14, true);
+        let first = s.thread.as_ref().unwrap().epoch;
+        s.thread = None;
+        s.open_thread(&pr.repo, 14, true);
+        assert_ne!(s.thread.as_ref().unwrap().epoch, first, "opening again is a new load: the old answer isn't for it");
+        // Changing section or account closes the conversation.
+        s.leave_tab();
+        assert!(s.thread.is_none());
     }
 }
 

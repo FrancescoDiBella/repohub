@@ -120,7 +120,14 @@ final class GitHubPaths {
                         }
                         return true;
                     }
-                    if (rest.length == 3 && rest[0].equals("pulls") && number(rest[1]) && rest[2].equals("files")) {
+                    if (rest.length == 3 && rest[0].equals("pulls") && number(rest[1]) && (rest[2].equals("files") || rest[2].equals("reviews"))) {
+                        return true;
+                    }
+                    // One issue or pull request and its conversation.
+                    if (rest.length == 2 && (rest[0].equals("issues") || rest[0].equals("pulls")) && number(rest[1])) {
+                        return true;
+                    }
+                    if (rest.length == 3 && rest[0].equals("issues") && number(rest[1]) && rest[2].equals("comments")) {
                         return true;
                     }
                 }
@@ -133,8 +140,10 @@ final class GitHubPaths {
             case "DELETE":
                 return starred(seg);
             case "POST":
+                // Creating an issue, a pull request or a branch; commenting; reviewing a pull request.
                 return repo && ((rest.length == 1 && (rest[0].equals("issues") || rest[0].equals("pulls")))
-                    || (rest.length == 2 && rest[0].equals("git") && rest[1].equals("refs")));
+                    || (rest.length == 2 && rest[0].equals("git") && rest[1].equals("refs"))
+                    || (rest.length == 3 && number(rest[1]) && ((rest[0].equals("issues") && rest[2].equals("comments")) || (rest[0].equals("pulls") && rest[2].equals("reviews")))));
             case "PATCH":
                 return repo && rest.length == 2 && rest[0].equals("issues") && number(rest[1]);
             default:

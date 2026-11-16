@@ -10,6 +10,10 @@ The sections are **Added**, **Changed** and **Fixed**.
 ## Unreleased
 
 ### Added
+- Conversations in the app: click an issue or a pull request to read its description, comments
+  and reviews, and reply with a comment. Approve a pull request or request changes, see its
+  changes from the same page, and close or reopen an issue. The lists no longer send you to
+  GitHub for this; **Open on GitHub** is on the page.
 - An Android app (APK, Android 12 or later). It needs no server: you sign in from Settings, the
   token stays encrypted on the phone, and drawings are kept there too. It has the overview,
   repositories, pull requests, issues, workflow runs, README and code, and you can create

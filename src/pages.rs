@@ -323,7 +323,13 @@ fn list_of(k: &Kit, title: &str, action: Option<El>, rows: Vec<El>) -> El {
 ///   of one block copies the text as shown.
 /// - Each code block has its own Copy button.
 pub fn readme_view(k: &Kit, md: &str) -> El {
+    markdown_view(k, md, "code-copy")
+}
+
+/// Markdown as the app shows it; `prefix` keeps the copy buttons of two texts on one page apart.
+pub fn markdown_view(k: &Kit, md: &str, prefix: &str) -> El {
     let kit = k.clone();
+    let prefix = prefix.to_owned();
     rune_kit::Markdown::new(md.to_owned())
         .selectable(true)
         .copy_source(true)
@@ -332,7 +338,7 @@ pub fn readme_view(k: &Kit, md: &str) -> El {
             let copy = rune_kit::IconButton::new(&icons::COPY).variant(rune_kit::IconButtonVariant::GhostMuted).label("Copy code")
                 .help("Copy code")
                 .on_press_tx(move |s: &mut App, tx| { tx.copy(code.clone()); s.notify("Code copied"); })
-                .build(&kit).key(format!("code-copy-{}", c.index));
+                .build(&kit).key(format!("{prefix}-{}", c.index));
             col().w_full().child(card).child(copy.pin(None, Some(6.0), Some(6.0), None))
         })
         .on_link_tx(|_: &mut App, url: &str, tx| { let _ = tx.open_url(url); })
