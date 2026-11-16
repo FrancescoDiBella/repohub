@@ -18,8 +18,11 @@
 <div id="status">Loading RepoHub…</div>
 
 <script type="module">
-import init from './app.js';
+import init, { repohub_back } from './app.js';
+// The Android app's back button (android/): the app goes back, or asks to be left.
+globalThis.__repohubBack = repohub_back;
 try {
+    if (!navigator.gpu && globalThis.RepoHubNative) throw new Error('RepoHub draws with WebGPU, which this phone\'s Android System WebView doesn\'t offer. Update "Android System WebView" (version 121 or later) from the Play Store, then open RepoHub again.');
     if (!navigator.gpu) throw new Error(window.isSecureContext
         ? 'This browser has no WebGPU. Use a current Chrome, Edge or Safari (iOS 26 or later).'
         : 'RepoHub needs HTTPS (or localhost): browsers only offer WebGPU on secure pages. See "On your phone" in the README.');

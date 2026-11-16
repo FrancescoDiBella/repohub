@@ -63,6 +63,8 @@ REPOHUB_BLOCKING=1 target/release/repohub --snap out.png --size 1180x760 -- page
 `REPOHUB_BLOCKING=1` loads the data before the first frame, so the snapshot shows it.
 Add `tab notes` (a section's name) after `page repo`, and `REPOHUB_TRACE=1` to print every state change.
 `REPOHUB_COMPACT=1` with `--size 390x844` starts in the phone layout.
+After `page repo tab notes`, `board Name` opens that drawing and `zoom 3` zooms it (the phone's full-screen editor in the phone layout).
+The Android app is described in [`android/README.md`](android/README.md).
 
 ### Web build
 

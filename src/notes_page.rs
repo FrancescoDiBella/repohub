@@ -135,12 +135,12 @@ fn tool_icon(t: Tool) -> &'static rune::Icon {
         Tool::Line => &icons::LINE,
         Tool::Pen => &icons::PEN,
         Tool::Text => &icons::TEXT,
+        Tool::Pan => &icons::MOVE,
     }
 }
 
 /// The board editor: toolbar, canvas and status.
 fn editor(_s: &App, k: &Kit, i: usize, b: &Board) -> El {
-    let dark = k.c.page.r + k.c.page.g + k.c.page.b < 1.5;
     let ib = |icon: &'static rune::Icon, label: &str, on: bool, key: String| {
         IconButton::new(icon).variant(if on { IconButtonVariant::Contrast } else { IconButtonVariant::GhostMuted })
             .label(label.to_owned()).help(label.to_owned()).build(k).key(key)
@@ -162,21 +162,7 @@ fn editor(_s: &App, k: &Kit, i: usize, b: &Board) -> El {
         let sw = el().size(20.0, 20.0).radius(10.0).fill(rune::color::hex(c).unwrap_or(k.c.text_base))
             .border(if on { 2.5 } else { 1.0 }, if on { k.c.text_strong } else { k.c.border_weak })
             .role("radio").checked(on).label(format!("Colour {}", ci + 1)).focusable(true)
-            .on_press(move |s: &mut App| {
-                if let Some(b) = s.board.as_mut()
-                    && b.save != Save::Loading
-                {
-                    b.color = ci;
-                    // Recolour the selection too, as Excalidraw does.
-                    if let Some(e) = b.selected.and_then(|i| b.elements.get_mut(i)) {
-                        e.stroke = board::STROKES[ci].to_owned();
-                        if e.fill.is_some() {
-                            e.fill = Some(board::FILLS[ci].to_owned());
-                        }
-                        s.save_board();
-                    }
-                }
-            }).key(format!("color-{ci}"));
+            .on_press(move |s: &mut App| s.pick_board_color(ci)).key(format!("color-{ci}"));
         colors = colors.child(sw);
     }
     let toggles = row().gap(2.0).center_y()
@@ -207,12 +193,33 @@ fn editor(_s: &App, k: &Kit, i: usize, b: &Board) -> El {
         .child(text(b.branch.clone()).font(k.ty.text_small).color(k.c.text_muted).px(8.0).py(2.0).radius(10.0).border(1.0, k.c.border_weak))
         .child(el().grow(1.0))
         .child(text(status).font(k.ty.text_small).color(tint));
-    let scale = rune::memo::layout_size("board").map(|[w, _]| w / board::WORLD[0]).unwrap_or(0.7).max(0.2);
+    let size = rune::memo::layout_size("board").filter(|[w, h]| *w > 1.0 && *h > 1.0).unwrap_or([840.0, 504.0]);
+    let canvas = canvas(b, k, size, false);
+    let hint = match b.tool {
+        Tool::Select => "Click a shape to select it, drag to move it. Delete removes it.",
+        Tool::Text => "Click where the text goes, type, then press Enter.",
+        Tool::Pen => "Drag to draw freehand.",
+        Tool::Pan => "Drag to move around the drawing.",
+        _ => "Drag on the canvas to draw.",
+    };
+    col().w_full().gap(10.0)
+        .child(head)
+        .child(toolbar)
+        .child(canvas.border(1.0, k.c.border_weak))
+        .child(row().w_full().justify_between().gap(12.0).flex_wrap()
+            .child(text(hint).font(k.ty.text_small).color(k.c.text_muted).wrap().shrink())
+            .child(text("Saved as .excalidraw: the file also opens on excalidraw.com.").font(k.ty.text_small).color(k.c.text_faint).wrap().shrink()))
+}
+
+/// The canvas with the app's handlers, and "Loading…" over it while the drawing is read.
+fn canvas(b: &Board, k: &Kit, size: [f32; 2], fill: bool) -> El {
+    let dark = k.c.page.r + k.c.page.g + k.c.page.b < 1.5;
     let mut canvas = board::canvas_view(
         b,
         dark,
         k.c.text_accent,
-        scale,
+        size,
+        fill,
         |s: &mut App, d, _| {
             if s.board.as_ref().is_some_and(|b| b.save == Save::Loading) {
                 return;
@@ -239,17 +246,71 @@ fn editor(_s: &App, k: &Kit, i: usize, b: &Board) -> El {
             .child(text("Loading…").font(k.ty.body_medium).color(k.c.text_strong));
         canvas = canvas.child(overlay);
     }
-    let hint = match b.tool {
-        Tool::Select => "Click a shape to select it, drag to move it. Delete removes it.",
-        Tool::Text => "Click where the text goes, type, then press Enter.",
-        Tool::Pen => "Drag to draw freehand.",
-        _ => "Drag on the canvas to draw.",
+    canvas
+}
+
+/// The phone's board editor: the whole screen is the drawing, with the tools under the thumb.
+///
+/// One finger draws with the chosen tool; **Move the view** drags the drawing around, and the
+/// plus and minus buttons zoom. `safe` is the screen's safe area (top, right, bottom, left).
+pub fn phone_editor(k: &Kit, i: usize, b: &Board, safe: [f32; 4]) -> El {
+    let ready = b.save != Save::Loading;
+    // A 44-point target, as touch guidelines ask.
+    let tb = |icon: &'static rune::Icon, label: &str, on: bool, enabled: bool, key: String| {
+        let ink = if on { k.c.page } else if enabled { k.c.text_base } else { k.c.text_faint };
+        let mut b = row().size(44.0, 44.0).radius(12.0).center().role("button").label(label.to_owned()).key(key)
+            .child(ui::ico(icon, 20.0, ink));
+        if on {
+            b = b.fill(k.c.text_strong);
+        } else if enabled {
+            b = b.press(k.c.pressed);
+        }
+        b
     };
-    col().w_full().gap(10.0)
+    let size = rune::memo::layout_size("board").filter(|[w, h]| *w > 1.0 && *h > 1.0).unwrap_or([360.0, 520.0]);
+    let (status, tint) = match &b.save {
+        Save::Loading => ("Loading…".to_owned(), k.c.text_muted),
+        Save::Saved => ("Saved".to_owned(), k.c.success.icon),
+        Save::Saving { .. } => ("Saving…".to_owned(), k.c.text_muted),
+        Save::Failed(e) => (format!("Not saved: {e}"), k.c.danger.icon),
+    };
+    let head = row().w_full().h(52.0).px(4.0).gap(2.0).center_y()
+        .child(tb(&icons::BACK, "Back to the drawings", false, true, "close-board".into()).on_press(move |s: &mut App| s.close_board(i)))
+        .child(col().grow(1.0).shrink().min_w(0.0).gap(1.0)
+            .child(text(b.name.clone()).font(k.ty.body_medium).color(k.c.text_strong).max_lines(1))
+            .child(text(format!("{} · {status}", b.branch)).font(k.ty.text_small).color(tint).max_lines(1)))
+        .child(tb(&icons::UNDO, "Undo", false, ready && b.can_undo(), "undo".into())
+            .on_press(|s: &mut App| if s.board.as_mut().is_some_and(|b| b.save != Save::Loading && b.undo()) { s.save_board(); }))
+        .child(tb(&icons::REDO, "Redo", false, ready && b.can_redo(), "redo".into())
+            .on_press(|s: &mut App| if s.board.as_mut().is_some_and(|b| b.save != Save::Loading && b.redo()) { s.save_board(); }))
+        .child(tb(&icons::TRASH, "Delete the selection", false, ready && b.selected.is_some(), "delete-element".into())
+            .on_press(|s: &mut App| if s.board.as_mut().is_some_and(|b| b.save != Save::Loading && b.delete_selected()) { s.save_board(); }));
+    let mut tools = row().gap(2.0).center_y();
+    for t in Tool::TOUCH {
+        tools = tools.child(tb(tool_icon(t), t.label(), b.tool == t, true, format!("tool-{}", t.label()))
+            .on_press(move |s: &mut App| if let Some(b) = s.board.as_mut().filter(|b| b.save != Save::Loading) { b.set_tool(t); }));
+    }
+    let mut colors = row().gap(4.0).center_y();
+    for (ci, c) in board::STROKES.iter().enumerate() {
+        let on = b.color == ci;
+        // The swatch is small; the target around it is not.
+        colors = colors.child(row().size(36.0, 44.0).center().role("radio").checked(on).label(format!("Colour {}", ci + 1)).key(format!("color-{ci}"))
+            .child(el().size(24.0, 24.0).radius(12.0).fill(rune::color::hex(c).unwrap_or(k.c.text_base))
+                .border(if on { 3.0 } else { 1.0 }, if on { k.c.text_strong } else { k.c.border_weak }))
+            .on_press(move |s: &mut App| s.pick_board_color(ci)));
+    }
+    let zoom = b.view.zoom_on(size);
+    let options = row().w_full().px(6.0).gap(2.0).center_y()
+        .child(row().grow(1.0).shrink().min_w(0.0).scroll_x().child(colors))
+        .child(tb(&icons::FILL, "Fill new shapes", b.filled, true, "fill".into()).on_press(|s: &mut App| if let Some(b) = s.board.as_mut() { b.filled = !b.filled; }))
+        .child(tb(&icons::BOLD, "Bold strokes and text", b.bold, true, "bold".into()).on_press(|s: &mut App| if let Some(b) = s.board.as_mut() { b.bold = !b.bold; }))
+        .child(tb(&icons::MINUS, "Zoom out", false, zoom > 1.0, "zoom-out".into()).on_press(move |s: &mut App| if let Some(b) = s.board.as_mut() { b.view.zoom_by(size, 1.0 / 1.5); }))
+        .child(tb(&icons::PLUS, "Zoom in", false, zoom < board::MAX_ZOOM, "zoom-in".into()).on_press(move |s: &mut App| if let Some(b) = s.board.as_mut() { b.view.zoom_by(size, 1.5); }));
+    col().w_full().h_full().fill(k.c.bg_base)
+        .child(el().w_full().h(safe[0]))
         .child(head)
-        .child(toolbar)
-        .child(canvas.border(1.0, k.c.border_weak))
-        .child(row().w_full().justify_between().gap(12.0).flex_wrap()
-            .child(text(hint).font(k.ty.text_small).color(k.c.text_muted).wrap().shrink())
-            .child(text("Saved as .excalidraw: the file also opens on excalidraw.com.").font(k.ty.text_small).color(k.c.text_faint).wrap().shrink()))
+        .child(col().w_full().grow(1.0).min_h(0.0).px(6.0).child(canvas(b, k, size, true)))
+        .child(row().w_full().px(6.0).pt(6.0).scroll_x().child(tools))
+        .child(options)
+        .child(el().w_full().h(safe[2].max(6.0)))
 }

@@ -21,10 +21,14 @@ pub enum Tool {
     Line,
     Pen,
     Text,
+    /// Drags the view around a zoomed-in drawing.
+    Pan,
 }
 
 impl Tool {
     pub const ALL: [Tool; 8] = [Tool::Select, Tool::Rectangle, Tool::Ellipse, Tool::Diamond, Tool::Arrow, Tool::Line, Tool::Pen, Tool::Text];
+    /// The tools in the order a phone shows them: drawing by hand first.
+    pub const TOUCH: [Tool; 9] = [Tool::Pen, Tool::Pan, Tool::Select, Tool::Arrow, Tool::Rectangle, Tool::Ellipse, Tool::Diamond, Tool::Line, Tool::Text];
     pub fn label(self) -> &'static str {
         match self {
             Tool::Select => "Select",
@@ -35,6 +39,7 @@ impl Tool {
             Tool::Line => "Line",
             Tool::Pen => "Draw",
             Tool::Text => "Text",
+            Tool::Pan => "Move the view",
         }
     }
 }
@@ -163,6 +168,8 @@ enum Mode {
     Moving { original: Element, moved: bool },
     /// Typing a text that will be placed at this point.
     Typing { at: [f32; 2] },
+    /// Dragging the view; `from` is its top-left when the drag began.
+    Panning { from: [f32; 2] },
 }
 
 /// A pointer gesture on the canvas, in the canvas' local points (see [`Drag`]).
@@ -184,6 +191,64 @@ impl From<&Drag> for Gesture {
     }
 }
 
+/// The part of the drawing on screen: `zoom` times the size that fits the drawing's width, with
+/// world point (`x`, `y`) at the canvas' top-left. A zoom of 0 means "not chosen yet": the
+/// canvas then shows the whole width, or fills its height if it's taller than the drawing, and
+/// (`x`, `y`) is the point to show in the middle.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct View {
+    pub zoom: f32,
+    pub x: f32,
+    pub y: f32,
+}
+
+pub const MAX_ZOOM: f32 = 8.0;
+
+impl View {
+    /// The zoom in use on a canvas of `size` points.
+    pub fn zoom_on(&self, size: [f32; 2]) -> f32 {
+        if self.zoom > 0.0 {
+            return self.zoom;
+        }
+        // A canvas taller than the drawing (a phone held upright) starts filled top to bottom.
+        ((size[1] / size[0].max(1.0)) / (WORLD[1] / WORLD[0])).clamp(1.0, MAX_ZOOM)
+    }
+
+    /// Canvas points per world point.
+    fn scale_on(&self, size: [f32; 2]) -> f32 {
+        size[0].max(1.0) / WORLD[0] * self.zoom_on(size)
+    }
+
+    /// The world size the canvas shows.
+    pub fn visible(&self, size: [f32; 2]) -> [f32; 2] {
+        let k = self.scale_on(size);
+        [size[0] / k, size[1] / k]
+    }
+
+    /// The view's top-left, kept inside the drawing (centred when the canvas shows more).
+    pub fn origin(&self, size: [f32; 2]) -> [f32; 2] {
+        let vis = self.visible(size);
+        let fit = |at: f32, vis: f32, world: f32| if vis >= world { (world - vis) / 2.0 } else { at.clamp(0.0, world - vis) };
+        let (x, y) = if self.zoom > 0.0 { (self.x, self.y) } else { (self.x - vis[0] / 2.0, self.y - vis[1] / 2.0) };
+        [fit(x, vis[0], WORLD[0]), fit(y, vis[1], WORLD[1])]
+    }
+
+    /// The world point under canvas point `p`.
+    pub fn world(&self, size: [f32; 2], p: [f32; 2]) -> [f32; 2] {
+        let (k, o) = (self.scale_on(size), self.origin(size));
+        [o[0] + p[0] / k, o[1] + p[1] / k]
+    }
+
+    /// Zooms by `factor`, keeping the middle of the canvas where it is.
+    pub fn zoom_by(&mut self, size: [f32; 2], factor: f32) {
+        let mid = self.world(size, [size[0] / 2.0, size[1] / 2.0]);
+        self.zoom = (self.zoom_on(size) * factor).clamp(1.0, MAX_ZOOM);
+        let vis = self.visible(size);
+        (self.x, self.y) = (mid[0] - vis[0] / 2.0, mid[1] - vis[1] / 2.0);
+        [self.x, self.y] = self.origin(size);
+    }
+}
+
 /// One open drawing: its elements, the editing state and where it's stored.
 pub struct Board {
     pub repo: String,
@@ -199,6 +264,7 @@ pub struct Board {
     pub bold: bool,
     pub save: crate::state::Save,
     pub text_edit: TextEdit,
+    pub view: View,
     mode: Mode,
     next: u32,
 }
@@ -232,6 +298,7 @@ impl Board {
             bold: false,
             save: crate::state::Save::Saved,
             text_edit: TextEdit::new(""),
+            view: View { zoom: 0.0, x: WORLD[0] / 2.0, y: WORLD[1] / 2.0 },
             mode: Mode::Idle,
             next: 1,
         }
@@ -340,9 +407,12 @@ impl Board {
         if self.save == crate::state::Save::Loading {
             return false;
         }
-        let (sx, sy) = (WORLD[0] / d.w.max(1.0), WORLD[1] / d.h.max(1.0));
-        let p = [d.x * sx, d.y * sy];
-        let start = [d.start_x * sx, d.start_y * sy];
+        let size = [d.w, d.h];
+        if self.tool == Tool::Pan {
+            return self.pan(d, size);
+        }
+        let p = self.view.world(size, [d.x, d.y]);
+        let start = self.view.world(size, [d.start_x, d.start_y]);
         match d.phase {
             Phase::Down => {
                 self.mode = Mode::Idle;
@@ -473,6 +543,24 @@ impl Board {
         }
     }
 
+    /// The Move tool: the drawing follows the finger. Never changes the drawing.
+    fn pan(&mut self, d: Gesture, size: [f32; 2]) -> bool {
+        match d.phase {
+            Phase::Down => self.mode = Mode::Panning { from: self.view.origin(size) },
+            Phase::Move => {
+                if let Mode::Panning { from } = self.mode {
+                    let k = self.view.scale_on(size);
+                    // Keep the zoom the canvas was showing; from here (`x`, `y`) is the top-left.
+                    self.view.zoom = self.view.zoom_on(size);
+                    (self.view.x, self.view.y) = (from[0] - (d.x - d.start_x) / k, from[1] - (d.y - d.start_y) / k);
+                    [self.view.x, self.view.y] = self.view.origin(size);
+                }
+            }
+            Phase::Up => self.mode = Mode::Idle,
+        }
+        false
+    }
+
     /// Adds the text being typed. Returns true when something was added.
     pub fn commit_text(&mut self) -> bool {
         if self.save == crate::state::Save::Loading {
@@ -594,6 +682,18 @@ impl Board {
         self.selected = None;
         self.mode = Mode::Idle;
         self.text_edit = TextEdit::new("");
+        // Open on what's drawn: its middle in the middle of the canvas.
+        let mut centre = [WORLD[0] / 2.0, WORLD[1] / 2.0];
+        if !self.elements.is_empty() {
+            let (mut a, mut b) = ([f32::MAX; 2], [f32::MIN; 2]);
+            for e in &self.elements {
+                let [x0, y0, x1, y1] = e.bbox();
+                a = [a[0].min(x0), a[1].min(y0)];
+                b = [b[0].max(x1), b[1].max(y1)];
+            }
+            centre = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+        }
+        self.view = View { zoom: 0.0, x: centre[0], y: centre[1] };
         Ok(())
     }
 }
@@ -696,34 +796,50 @@ fn draw_element(mut s: Shape, e: &Element, dark: bool) -> Shape {
 }
 
 /// The canvas: dot grid, elements, selection, text labels and the text being typed.
+///
+/// `size` is the canvas' size in points (as last laid out). With `fill` the canvas takes the
+/// space it's given, for the phone's full-screen editor; otherwise it keeps the drawing's shape.
+#[allow(clippy::too_many_arguments)]
 pub fn canvas_view<S: 'static>(
     b: &Board,
     dark: bool,
     accent: Color,
-    scale: f32,
+    size: [f32; 2],
+    fill: bool,
     on_drag: impl Fn(&mut S, &mut Drag, &mut rune::Tx) + 'static,
     access: impl for<'a> Fn(&'a mut S) -> &'a mut TextEdit + 'static,
     commit: impl Fn(&mut S, &mut rune::Tx) + 'static,
 ) -> El {
     let bg = if dark { hex("#121212") } else { hex("#ffffff") };
+    let outside = if dark { hex("#1c1c1c") } else { hex("#eceef1") };
     let dot = if dark { Color::WHITE.alpha(0.08) } else { Color::BLACK.alpha(0.09) };
-    let mut s = Shape::new().view_box(WORLD[0], WORLD[1]);
+    let (vis, o, scale) = (b.view.visible(size), b.view.origin(size), b.view.scale_on(size));
+    let mut s = Shape::new().view_box(vis[0], vis[1]);
+    // The drawing's own area; around it (a zoomed-out or taller canvas) nothing can be drawn.
+    s = s.fill(vec![[-o[0], -o[1]], [WORLD[0] - o[0], -o[1]], [WORLD[0] - o[0], WORLD[1] - o[1]], [-o[0], WORLD[1] - o[1]]], bg);
     let step = 40.0;
-    let (mut y, mut gy) = (step, 0);
-    while y < WORLD[1] && gy < 40 {
+    let mut y = step;
+    while y < WORLD[1] {
         let mut x = step;
         while x < WORLD[0] {
-            s = s.fill(vec![[x - 0.9, y - 0.9], [x + 0.9, y - 0.9], [x + 0.9, y + 0.9], [x - 0.9, y + 0.9]], dot);
+            let (px, py) = (x - o[0], y - o[1]);
+            if px > -1.0 && py > -1.0 && px < vis[0] + 1.0 && py < vis[1] + 1.0 {
+                s = s.fill(vec![[px - 0.9, py - 0.9], [px + 0.9, py - 0.9], [px + 0.9, py + 0.9], [px - 0.9, py + 0.9]], dot);
+            }
             x += step;
         }
         y += step;
-        gy += 1;
     }
+    let shown = |e: &Element| {
+        let mut e = e.clone();
+        (e.x, e.y) = (e.x - o[0], e.y - o[1]);
+        e
+    };
     for e in &b.elements {
-        s = draw_element(s, e, dark);
+        s = draw_element(s, &shown(e), dark);
     }
     if let Some(e) = b.selected.and_then(|i| b.elements.get(i)) {
-        let [x0, y0, x1, y1] = e.bbox();
+        let [x0, y0, x1, y1] = shown(e).bbox();
         let pad = 6.0;
         let (x0, y0, x1, y1) = (x0 - pad, y0 - pad, x1 + pad, y1 + pad);
         s = s.stroke_with(vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]], true, 1.0, LineCap::Butt, accent);
@@ -732,15 +848,17 @@ pub fn canvas_view<S: 'static>(
             s = s.fill(vec![[c[0] - h, c[1] - h], [c[0] + h, c[1] - h], [c[0] + h, c[1] + h], [c[0] - h, c[1] + h]], accent);
         }
     }
-    let mut board = el().key("board").w_full().aspect_ratio(WORLD[0] / WORLD[1]).fill(bg).radius(10.0).clip_rounded(10.0)
+    let frame = el().key("board").w_full().fill(outside).radius(10.0).clip_rounded(10.0);
+    let frame = if fill { frame.grow(1.0).min_h(0.0) } else { frame.aspect_ratio(WORLD[0] / WORLD[1]) };
+    let mut board = frame
         .role("img").label("Drawing canvas")
         .child(canvas(s).pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))
         .on_drag(on_drag);
     for e in b.elements.iter().filter(|e| e.kind == Kind::Text) {
-        let size = (e.font * scale).max(6.0);
-        let mut lines = col().absolute(e.x * scale, e.y * scale).gap(0.0);
+        let font = (e.font * scale).max(6.0);
+        let mut lines = col().absolute((e.x - o[0]) * scale, (e.y - o[1]) * scale).gap(0.0);
         for l in e.text.lines() {
-            lines = lines.child(text(l.to_owned()).font(TextStyle::new(size, 500.0)).color(ink(e, dark)));
+            lines = lines.child(text(l.to_owned()).font(TextStyle::new(font, 500.0)).color(ink(e, dark)));
         }
         board = board.child(lines);
     }
@@ -748,10 +866,10 @@ pub fn canvas_view<S: 'static>(
         let field = text_input(&b.text_edit, TextStyle::new((20.0 * scale).max(10.0), 500.0))
             .single_line().placeholder("Type, then Enter", if dark { Color::WHITE.alpha(0.4) } else { Color::BLACK.alpha(0.35) })
             .color(if dark { hex("#e6edf3") } else { hex(&b_stroke(b)) })
-            .w(320.0 * scale.max(0.6)).h((30.0 * scale).max(22.0)).px(4.0)
+            .w((320.0 * scale.max(0.6)).min(size[0] - 16.0)).h((30.0 * scale).max(22.0)).px(4.0)
             .border(1.0, accent).radius(4.0).fill(bg)
             .on_edit(access).on_submit(commit).key("board-text");
-        board = board.child(row().absolute(at[0] * scale, (at[1] - 14.0) * scale).child(field));
+        board = board.child(row().absolute((at[0] - o[0]) * scale, (at[1] - 14.0 - o[1]) * scale).child(field));
     }
     board
 }
@@ -766,6 +884,74 @@ mod tests {
 
     fn drag(phase: Phase, x: f32, y: f32, sx: f32, sy: f32) -> Gesture {
         Gesture { phase, x, y, start_x: sx, start_y: sy, w: WORLD[0], h: WORLD[1], cancelled: false }
+    }
+
+    #[test]
+    fn a_wide_canvas_shows_the_whole_drawing_as_before() {
+        let mut b = Board::new("o/r", "main", "t");
+        b.tool = Tool::Rectangle;
+        // A canvas of half the world's size: canvas points map to world points times two.
+        let g = |phase, x, y, sx, sy| Gesture { phase, x, y, start_x: sx, start_y: sy, w: 600.0, h: 360.0, cancelled: false };
+        b.on_drag(g(Phase::Down, 50.0, 50.0, 50.0, 50.0));
+        b.on_drag(g(Phase::Move, 150.0, 100.0, 50.0, 50.0));
+        assert!(b.on_drag(g(Phase::Up, 150.0, 100.0, 50.0, 50.0)));
+        assert_eq!((b.elements[0].x, b.elements[0].y, b.elements[0].w, b.elements[0].h), (100.0, 100.0, 200.0, 100.0));
+    }
+
+    #[test]
+    fn a_phone_canvas_zooms_and_moves() {
+        let size = [360.0, 540.0];
+        let mut b = Board::new("o/r", "main", "t");
+        // Taller than the drawing: it fills the height, showing the middle of the drawing.
+        let zoom = b.view.zoom_on(size);
+        assert!((zoom - 2.5).abs() < 1e-3, "{zoom}");
+        let vis = b.view.visible(size);
+        assert!((vis[1] - WORLD[1]).abs() < 0.01 && (vis[0] - 480.0).abs() < 0.01);
+        assert_eq!(b.view.origin(size), [360.0, 0.0]);
+        // Drawing lands where the finger is.
+        b.tool = Tool::Pen;
+        let g = |phase, x, y, sx, sy| Gesture { phase, x, y, start_x: sx, start_y: sy, w: size[0], h: size[1], cancelled: false };
+        b.on_drag(g(Phase::Down, 0.0, 0.0, 0.0, 0.0));
+        b.on_drag(g(Phase::Move, 180.0, 270.0, 0.0, 0.0));
+        assert!(b.on_drag(g(Phase::Up, 180.0, 270.0, 0.0, 0.0)));
+        let e = &b.elements[0];
+        assert_eq!((e.x, e.y), (360.0, 0.0));
+        let last = e.points.last().unwrap();
+        assert!((e.x + last[0] - 600.0).abs() < 0.01 && (e.y + last[1] - 360.0).abs() < 0.01);
+        // The Move tool drags the view, never the drawing, and stops at the edges.
+        b.tool = Tool::Pan;
+        let before = b.elements.clone();
+        b.on_drag(g(Phase::Down, 200.0, 200.0, 200.0, 200.0));
+        assert!(!b.on_drag(g(Phase::Move, 125.0, 200.0, 200.0, 200.0)));
+        assert!((b.view.origin(size)[0] - 460.0).abs() < 0.01, "75 points left at 0.75 points per unit");
+        b.on_drag(g(Phase::Move, -5000.0, 200.0, 200.0, 200.0));
+        assert!(!b.on_drag(g(Phase::Up, -5000.0, 200.0, 200.0, 200.0)));
+        assert_eq!(b.view.origin(size)[0], WORLD[0] - b.view.visible(size)[0]);
+        assert_eq!(b.elements, before);
+        // Zooming keeps the middle and its limits.
+        let mid = b.view.world(size, [180.0, 270.0]);
+        b.view.zoom_by(size, 1.5);
+        let after = b.view.world(size, [180.0, 270.0]);
+        assert!((mid[1] - after[1]).abs() < 0.01);
+        for _ in 0..20 { b.view.zoom_by(size, 1.5); }
+        assert_eq!(b.view.zoom, MAX_ZOOM);
+        for _ in 0..20 { b.view.zoom_by(size, 1.0 / 1.5); }
+        assert_eq!(b.view.zoom, 1.0);
+        assert_eq!(b.view.origin(size)[0], 0.0);
+    }
+
+    #[test]
+    fn a_loaded_drawing_opens_on_its_content() {
+        let mut a = Board::new("o/r", "main", "t");
+        a.tool = Tool::Rectangle;
+        a.on_drag(drag(Phase::Down, 900.0, 100.0, 900.0, 100.0));
+        a.on_drag(drag(Phase::Move, 1100.0, 200.0, 900.0, 100.0));
+        a.on_drag(drag(Phase::Up, 1100.0, 200.0, 900.0, 100.0));
+        let mut b = Board::new("o/r", "main", "t");
+        b.load_json(&a.to_json()).unwrap();
+        let size = [360.0, 540.0];
+        let o = b.view.origin(size);
+        assert!(o[0] > 700.0 && o[0] + b.view.visible(size)[0] >= 1100.0, "{o:?}");
     }
 
     #[test]

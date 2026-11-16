@@ -12,12 +12,13 @@ repository and branch, saved on your computer.
 | --- | --- |
 | ![Overview, dark theme](docs/overview.png) | ![Repository page, light theme](docs/repository.png) |
 
-There are three ways to run it:
+There are four ways to run it:
 
 | | What you need | Data |
 | --- | --- | --- |
 | **Docker** (recommended) | Docker and a browser with WebGPU | yours, from `.env` |
 | **Desktop app** | Rust | yours, from `.env` |
+| **Android app** | Android 12 or later | yours, from Settings on the phone |
 | **Static page** (GitHub Pages) | a browser with WebGPU | sample data only |
 
 ## Run it with Docker
@@ -70,6 +71,26 @@ anyone with the secret uses your token.
 Below 720 points of width RepoHub switches to a phone layout: a top bar, the page in one column
 and a tab bar at the bottom (Overview, Repos, Pulls, Issues, Actions) instead of the sidebar. The
 same happens in a narrow desktop window. Notes work with touch; the terminal stays desktop-only.
+
+### Android app
+
+RepoHub is also an Android app that needs no server. Download
+`RepoHub-<version>-android.apk` from the
+[Latest build](https://github.com/FrancescoDiBella/repohub/releases/tag/latest), open it on the
+phone and allow the installation.
+
+- **Account:** open Settings (the gear), type your user name and a token, and press **Connect**.
+  The token stays on the phone, encrypted with a key that can't leave it, and is only ever sent
+  to GitHub.
+- **What it has:** the overview, repositories, pull requests, issues, workflow runs, README and
+  code; creating issues, branches and pull requests, and merging; Notes.
+- **Notes:** a drawing opens full screen. One finger draws with the chosen tool, **Move the
+  view** drags the drawing, and plus and minus zoom. Drawings are kept on the phone.
+- **Back:** the back button closes what's open, then goes up a page, then leaves the app.
+- **Not on the phone:** the terminal, Claude, local clones and plugins need a computer.
+- **Needs:** Android 12 or later with a current Android System WebView (121 or later).
+- **Updates:** unless the build is signed with your own key, remove the app before installing a
+  newer APK. [`android/README.md`](android/README.md) explains signing and how to build it.
 
 ![RepoHub on a phone](docs/mobile.png)
 
@@ -316,7 +337,8 @@ Drawings never go to GitHub. They are stored at
 `notes/<owner>/<repo>/<branch>/<name>.excalidraw` inside:
 - the desktop app: `REPOHUB_DATA_DIR`, or the platform's data folder (`~/.local/share/repohub`,
   `~/Library/Application Support/RepoHub`, `%APPDATA%\RepoHub`);
-- Docker: the `notes` volume (`/data` in the container), which survives rebuilds and updates.
+- Docker: the `notes` volume (`/data` in the container), which survives rebuilds and updates;
+- the Android app: the app's private storage on the phone.
 
 The static GitHub Pages build has nowhere to store them, so the tab explains that instead.
 

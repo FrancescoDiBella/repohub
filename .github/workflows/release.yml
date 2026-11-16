@@ -1,4 +1,5 @@
-# Builds the desktop app for macOS (one app for Apple silicon and Intel), Windows and Linux.
+# Builds the desktop app for macOS (one app for Apple silicon and Intel), Windows and Linux,
+# and the Android app (an APK).
 # - Every push to main rebuilds them and replaces the "Latest build" pre-release, so the newest
 #   app is always at .../releases/tag/latest with no manual step.
 # - Pushing a tag like v0.1.0 publishes them as a versioned GitHub release.
@@ -15,7 +16,7 @@ on:
     paths-ignore: ["**.md", "docs/**"]
   workflow_dispatch:
   pull_request:
-    paths: ["src/**", "assets/**", "Cargo.toml", "Cargo.lock", "packaging/**", ".github/workflows/release.yml"]
+    paths: ["src/**", "assets/**", "Cargo.toml", "Cargo.lock", "packaging/**", "android/**", "web/**", "scripts/android-web.sh", ".github/workflows/release.yml"]
 
 permissions:
   contents: write
@@ -101,10 +102,72 @@ jobs:
             dist/*.tar.gz
           if-no-files-found: error
 
+  # The Android app: the web build inside a WebView, with the account and the drawings kept on
+  # the phone (android/README.md).
+  android:
+    runs-on: ubuntu-latest
+    env:
+      REPOHUB_BUILD: ${{ github.sha }}
+      # Each build must have a higher number than the one it updates.
+      ANDROID_VERSION_CODE: ${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)-dev" >> "$GITHUB_ENV"
+          fi
+          echo "REPOHUB_BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+      - name: Toolchain
+        run: rustup show active-toolchain && rustup target add wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+      - name: wasm-bindgen
+        run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
+      - name: The page
+        run: scripts/android-web.sh
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+      # With a keystore in the repository's secrets, updates install over the old app. Without
+      # one the APK is signed with a key made for this build, and installs only on its own.
+      - name: Signing key
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            echo "ANDROID_KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+          else
+            echo "::notice::No ANDROID_KEYSTORE_BASE64 secret: the APK is signed with a throwaway key."
+          fi
+      - name: Tests and APK
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          gradle -p android --no-daemon test assembleRelease
+          mkdir -p dist
+          cp android/app/build/outputs/apk/release/app-release.apk "dist/RepoHub-$VERSION-android.apk"
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RepoHub-android
+          path: dist/*.apk
+          if-no-files-found: error
+
   # A versioned release, from a v* tag.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -137,7 +200,7 @@ jobs:
   # The rolling pre-release: always the newest build of main.
   latest:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: build
+    needs: [build, android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

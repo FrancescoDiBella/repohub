@@ -137,7 +137,23 @@ mod js {
     use wasm_bindgen::prelude::*;
 
     #[wasm_bindgen(inline_js = "
+// The Android app has no server: its Kotlin side answers the same requests (android/).
+let nativeSeq = 0;
+const nativeWaiting = new Map();
+globalThis.__repohubNative = (id, reply) => {
+    const done = nativeWaiting.get(id);
+    nativeWaiting.delete(id);
+    if (done) done(reply);
+};
+export function native_exit() { if (globalThis.RepoHubNative) globalThis.RepoHubNative.exit(); }
 export async function gh_fetch(method, url, accept, body) {
+    if (globalThis.RepoHubNative) {
+        return await new Promise((done) => {
+            const id = ++nativeSeq;
+            nativeWaiting.set(id, done);
+            globalThis.RepoHubNative.request(id, method, url, accept, body || '');
+        });
+    }
     try {
         const init = { method, headers: { Accept: accept, 'X-RepoHub': '1' }, credentials: 'same-origin' };
         if (method !== 'GET' && method !== 'HEAD') {
@@ -158,6 +174,7 @@ export function absolute_url(rel) { return new URL(rel, location.href).href; }
         pub async fn gh_fetch(method: &str, url: &str, accept: &str, body: &str) -> JsValue;
         pub fn now_secs() -> f64;
         pub fn absolute_url(rel: &str) -> String;
+        pub fn native_exit();
     }
 }
 
@@ -200,6 +217,12 @@ pub async fn request(method: &str, url: &str, accept: &str, body: &str) -> Resul
     let retry_after = a.get(4).as_string().and_then(|s| s.trim().parse().ok());
     let link = a.get(5).as_string().filter(|s| !s.is_empty());
     Ok(Resp { status, body, remaining, reset, retry_after, link })
+}
+
+/// The Android app: leaves the app (the back button, with nowhere left to go back to).
+#[cfg(target_arch = "wasm32")]
+pub fn leave_app() {
+    js::native_exit();
 }
 
 /// Web only: `rel` resolved against the page's address.

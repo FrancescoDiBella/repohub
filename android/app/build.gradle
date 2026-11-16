@@ -1,0 +1,65 @@
+// The Android app: a WebView around RepoHub's web build (see android/README.md).
+//
+// The page's files (index.html, app.js, app_bg.wasm) are not in the repository: build them
+// with scripts/android-web.sh, which puts them in app/src/main/assets/web.
+plugins {
+    id "com.android.application"
+}
+
+// Set by CI; a local build gets 0.0.0-dev.
+def appVersion = System.getenv("VERSION") ?: "0.0.0-dev"
+def appBuild = (System.getenv("ANDROID_VERSION_CODE") ?: "1") as int
+// A keystore of your own (never in the repository) makes updates install over the old app.
+def keystore = System.getenv("ANDROID_KEYSTORE_FILE")
+
+android {
+    namespace "io.github.francescodibella.repohub"
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "io.github.francescodibella.repohub"
+        // Android 12: the first with WebGPU in its WebView.
+        minSdk 31
+        targetSdk 34
+        versionCode appBuild
+        versionName appVersion
+    }
+
+    signingConfigs {
+        if (keystore) {
+            release {
+                storeFile file(keystore)
+                storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                keyAlias System.getenv("ANDROID_KEY_ALIAS")
+                keyPassword System.getenv("ANDROID_KEY_PASSWORD")
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig keystore ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    // The WebView reads the wasm straight from the APK: don't compress it twice.
+    androidResources {
+        noCompress += ["wasm"]
+    }
+
+    lint {
+        abortOnError false
+    }
+}
+
+dependencies {
+    testImplementation "junit:junit:4.13.2"
+    // The real org.json for unit tests (the Android one is a stub there).
+    testImplementation "org.json:json:20240303"
+}
