@@ -416,6 +416,8 @@ with colours, scrollback (mouse wheel) and paste.
   `REPOHUB_REPOS_DIR` (comma-separated folders) or in `~/Developer`, `~/Projects`, `~/code`,
   `~/src`, `~/GitHub`, `~/repos` and `~/Documents/GitHub`. You can also type the folder, or press
   **Clone into …** to clone it there. A folder you pick is remembered.
+  A folder found by its name is used only if one of its git remotes is that repository.
+  Otherwise RepoHub says it found another repository there, and **Use it anyway** is your call.
 - **Coding assistants:** each harness in **Settings → Coding assistants** gets a button, such as
   **Claude Code** or **Codex**, that starts it in the clone. ⌘K → *Start … in …* does the same.
 - **Command buttons:** one click types `git status`, `git pull` or `git log`. Set your own list
