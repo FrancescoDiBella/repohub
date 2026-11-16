@@ -12,6 +12,12 @@ use crate::{App, github, icons};
 /// The diff's height: it scrolls inside, so a long diff never makes the page long.
 const DIFF_H: f32 = 620.0;
 
+/// The diff's height: on a phone it leaves room to see what's around it and to scroll the page.
+fn diff_h(s: &App) -> f32 {
+    if s.compact { (s.backdrop_size[1] - 260.0).clamp(260.0, DIFF_H) } else { DIFF_H }
+}
+
+
 /// Unified / Split, and the files' totals.
 fn diff_head(s: &App, k: &Kit) -> El {
     let n = s.diff.files().len();
@@ -26,6 +32,10 @@ fn diff_head(s: &App, k: &Kit) -> El {
             .child(text(format!("{n} file{}", if n == 1 { "" } else { "s" })).font(k.ty.small).color(k.c.text_muted))
             .child(text(format!("+{add}")).font(k.ty.small_medium).color(k.c.success.icon))
             .child(text(format!("−{del}")).font(k.ty.small_medium).color(k.c.danger.icon));
+    }
+    // Side by side needs width a phone doesn't have: there it's always unified.
+    if s.compact {
+        return r;
     }
     r.child(SegmentedControl::new(&["Unified", "Split"], Some(usize::from(s.diff.mode() == DiffMode::Split))).label("Diff layout").fit()
         .on_pick(|s: &mut App, i, _| s.diff.set_mode(if i == 1 { DiffMode::Split } else { DiffMode::Unified })).build(k).key("diff-mode"))
@@ -48,7 +58,7 @@ fn diff_body(s: &App, k: &Kit, i: usize, empty: &str) -> El {
             })
         }
         Some(Load::Ready(())) if s.diff.files().is_empty() => col().w_full().padding(24.0).items_center().child(text(empty.to_owned()).font(k.ty.ui).color(k.c.text_muted)),
-        Some(Load::Ready(())) => col().w_full().h(DIFF_H).clip_rounded(0.0)
+        Some(Load::Ready(())) => col().w_full().h(diff_h(s)).clip_rounded(0.0)
             .child(DiffView::new(|s: &App| &s.diff, |s: &mut App| &mut s.diff).key("diff").build(s, k)),
     }
 }
@@ -203,6 +213,9 @@ fn pull_diff_head(s: &App, k: &Kit) -> El {
             .child(text(format!("+{add}")).font(k.ty.small_medium).color(k.c.success.icon))
             .child(text(format!("−{del}")).font(k.ty.small_medium).color(k.c.danger.icon));
     }
+    if s.compact {
+        return r;
+    }
     r.child(SegmentedControl::new(&["Unified", "Split"], Some(usize::from(s.pull_diff.mode() == DiffMode::Split))).label("Diff layout").fit()
         .on_pick(|s: &mut App, i, _| s.pull_diff.set_mode(if i == 1 { DiffMode::Split } else { DiffMode::Unified })).build(k).key("pull-diff-mode"))
 }
@@ -215,7 +228,7 @@ fn pull_diff_body(s: &App, k: &Kit, full: &str, number: u32, empty: &str) -> El 
             ui::error_inline(k, e, "retry-pull-diff", move |s: &mut App| s.open_pull_diff(repo.clone(), number))
         }
         Some(Load::Ready(())) if s.pull_diff.files().is_empty() => col().w_full().padding(24.0).items_center().child(text(empty.to_owned()).font(k.ty.ui).color(k.c.text_muted)),
-        Some(Load::Ready(())) => col().w_full().h(DIFF_H).clip_rounded(0.0)
+        Some(Load::Ready(())) => col().w_full().h(diff_h(s)).clip_rounded(0.0)
             .child(DiffView::new(|s: &App| &s.pull_diff, |s: &mut App| &mut s.pull_diff).key("pull-diff-view").build(s, k)),
     }
 }

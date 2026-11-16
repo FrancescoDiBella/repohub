@@ -96,7 +96,9 @@ fn editor(s: &App, k: &Kit, shown_dark: bool) -> El {
                 .on_press(move |s: &mut App| s.delete_look(&del)).build(k).key("look-delete"))
             .child(Button::new("Done").control_size(ControlSize::Small)
                 .on_press(|s: &mut App| s.look_edit = crate::LookEditor::default()).build(k).key("look-done")));
-    let label = |t: &str| text(t.to_owned()).font(k.ty.small).color(k.c.text_muted).w(190.0).shrink();
+    // On a phone the label takes less, and a row that still doesn't fit wraps.
+    let label_w = if s.compact { 120.0 } else { 190.0 };
+    let label = |t: &str| text(t.to_owned()).font(k.ty.small).color(k.c.text_muted).w(label_w).shrink();
     let name = row().w_full().gap(12.0).center_y().flex_wrap().child(label("Name"))
         .child(TextInput::new(&s.look_edit.name).label("Theme name").on_edit(|s: &mut App| &mut s.look_edit.name)
             .on_change(|s: &mut App, _| s.look_typed()).build(k).key("look-name").grow(1.0).min_w(180.0));
@@ -104,7 +106,7 @@ fn editor(s: &App, k: &Kit, shown_dark: bool) -> El {
         let i = p.index();
         let edit = &s.look_edit.colors[i];
         let valid = themes::parse_hex(&edit.text).is_some();
-        row().w_full().gap(12.0).center_y()
+        row().w_full().gap(12.0).center_y().flex_wrap()
             .child(label(p.label()))
             .child(el().size(24.0, 24.0).radius(6.0).fill(t.color(*p)).border(1.0, k.c.border_base))
             .child(TextInput::new(edit).label(p.label()).placeholder("#rrggbb").invalid(!valid)
