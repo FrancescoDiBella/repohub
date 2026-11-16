@@ -217,6 +217,30 @@ impl Theme {
     }
 }
 
+/// The sections of the Settings page, one shown at a time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SettingsSection {
+    /// Your profile, the GitHub account and the connection.
+    #[default]
+    Account,
+    /// Light, dark or system, and the themes.
+    Appearance,
+    /// Claude and the other coding assistants.
+    Assistants,
+    Plugins,
+    /// The version, updates and the keyboard shortcuts.
+    About,
+}
+
+impl SettingsSection {
+    pub const ALL: [SettingsSection; 5] = [SettingsSection::Account, SettingsSection::Appearance, SettingsSection::Assistants, SettingsSection::Plugins, SettingsSection::About];
+    pub const LABELS: [&'static str; 5] = ["Account", "Appearance", "Assistants", "Plugins", "About"];
+
+    pub fn index(self) -> usize {
+        SettingsSection::ALL.iter().position(|x| *x == self).unwrap_or(0)
+    }
+}
+
 /// The sections of a repository's page.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RepoTab {
