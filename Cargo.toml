@@ -29,6 +29,8 @@ portable-pty = "0.9"
 vt100 = "0.18"
 # Checks downloaded updates against the release's SHA256SUMS.
 sha2 = "0.10"
+# Checks the signature of SHA256SUMS (Ed25519, minisign's format); no dependencies of its own.
+minisign-verify = "0.2"
 # Plugins: sandboxed Luau scripts that build Rune UI (src/plugins.rs); `watch` reloads a plugin
 # when one of its files is saved.
 rune-luau = { git = "https://github.com/anomalyco/rune", rev = "39301f6793266450a057f270da06b048a689be96", features = ["watch"] }

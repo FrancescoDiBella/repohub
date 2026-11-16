@@ -108,6 +108,8 @@ pub struct Release {
     pub size: u64,
     /// The address of `SHA256SUMS`, when the release has one.
     pub sums: Option<String>,
+    /// The address of `SHA256SUMS.minisig`, its signature, when the release has one.
+    pub sig: Option<String>,
     /// What's new: the release notes (CHANGELOG.md's Unreleased section), Markdown; may be empty.
     pub notes: String,
 }
@@ -147,6 +149,7 @@ pub fn parse_release(json: &str, suffix: &str) -> Result<Release, String> {
         url: s(&asset, "browser_download_url"),
         size: asset.get("size").and_then(Value::as_u64).unwrap_or(0),
         sums: pick("SHA256SUMS").map(|a| s(&a, "browser_download_url")),
+        sig: pick("SHA256SUMS.minisig").map(|a| s(&a, "browser_download_url")),
         notes: notes(&s(&v, "body")),
     })
 }
@@ -180,6 +183,43 @@ pub fn verify(bytes: &[u8], name: &str, sums: &str) -> Result<(), String> {
     }).ok_or_else(|| format!("SHA256SUMS doesn't list {name}."))?;
     let got: String = Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect();
     if got == want { Ok(()) } else { Err(format!("The download of {name} is damaged (its checksum doesn't match). Nothing was changed.")) }
+}
+
+/// The public key updates are signed with (minisign's base64 line), when this build has one:
+/// CI builds it in from the repository's `REPOHUB_UPDATE_PUBKEY` variable. A build without it
+/// (your own `cargo build`) can only check that a download isn't damaged.
+pub fn signing_key() -> Option<&'static str> {
+    option_env!("REPOHUB_UPDATE_PUBKEY").map(str::trim).filter(|k| !k.is_empty())
+}
+
+/// Checks that `sums` (the text of `SHA256SUMS`) was signed by the holder of `key`.
+///
+/// The checksums come from the same release as the package, so by themselves they only show
+/// the download isn't damaged. The signature shows who made the release: someone who replaces
+/// its files can't make one without the private key, which isn't on GitHub's servers.
+/// With no `key` (a build that has none) there's nothing to check against.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn verify_signature(sums: &str, signature: Option<&str>, key: Option<&str>) -> Result<(), String> {
+    let Some(key) = key else { return Ok(()) };
+    let refused = |why: &str| format!("This update wasn't installed: {why} Nothing was changed. If it happens again, download RepoHub from the Releases page.");
+    let signature = signature.ok_or_else(|| refused("it isn't signed."))?;
+    let key = minisign_verify::PublicKey::from_base64(key).map_err(|_| refused("this copy of RepoHub has a signing key it can't read."))?;
+    let signature = minisign_verify::Signature::decode(signature).map_err(|_| refused("its signature can't be read."))?;
+    key.verify(sums.as_bytes(), &signature, false).map_err(|_| refused("its signature isn't RepoHub's."))
+}
+
+/// True when an update may be downloaded from `url`: over https, from GitHub's release hosts.
+pub fn trusted_url(url: &str) -> bool {
+    const HOSTS: [&str; 3] = ["github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"];
+    url.strip_prefix("https://").and_then(|rest| rest.split(['/', '?', '#']).next())
+        .is_some_and(|authority| !authority.contains('@') && HOSTS.contains(&authority.to_ascii_lowercase().as_str()))
+}
+
+/// A path inside a PowerShell `'…'` string: a quote in it is doubled, or it would end the
+/// string and the rest would run as a command (`C:\Users\O'Neil\…`).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn powershell_quote(path: &str) -> String {
+    format!("'{}'", path.replace('\'', "''"))
 }
 
 // ------------------------------------------------------------------ desktop: network and files
@@ -224,13 +264,47 @@ mod native {
         parse_release(&body, suffix())
     }
 
+    /// Whether downloads may come from anywhere: only where `REPOHUB_UPDATE_API` points the
+    /// updater at a test server, in a test or debug build.
+    fn any_host() -> bool {
+        cfg!(any(test, debug_assertions)) && std::env::var("REPOHUB_UPDATE_API").is_ok_and(|v| !v.trim().is_empty())
+    }
+
+    /// Asks for `url`, following redirects itself so that every address on the way is one of
+    /// GitHub's release hosts (a release's files are served from another host than its page).
+    fn fetch(url: &str) -> Result<ureq::Response, String> {
+        let agent = ureq::AgentBuilder::new()
+            .try_proxy_from_env(!crate::net::bypass_proxy(&api()))
+            .timeout_connect(std::time::Duration::from_secs(15))
+            .timeout_read(std::time::Duration::from_secs(30))
+            .user_agent("RepoHub updater")
+            .redirects(0)
+            .build();
+        let mut url = url.to_owned();
+        for _ in 0..6 {
+            if !any_host() && !super::trusted_url(&url) {
+                return Err("This update wasn't downloaded: its address isn't on GitHub. Nothing was changed.".into());
+            }
+            let resp = match agent.get(&url).call() {
+                Ok(r) => r,
+                Err(ureq::Error::Status(code, _)) => return Err(format!("Couldn't download the update: the server answered {code}.")),
+                Err(e) => return Err(format!("Couldn't download the update: {e}")),
+            };
+            if !(300..400).contains(&resp.status()) {
+                return Ok(resp);
+            }
+            url = resp.header("Location").map(str::to_owned).ok_or("Couldn't download the update: a redirect without an address.")?;
+        }
+        Err("Couldn't download the update: too many redirects.".into())
+    }
+
     /// Downloads `url`, reporting progress (0–100) when the size is known, stopping if `cancel` is set.
     pub fn download(url: &str, size: u64, cancel: &std::sync::atomic::AtomicBool, progress: impl Fn(u8)) -> Result<Vec<u8>, String> {
         use std::sync::atomic::Ordering;
         if cancel.load(Ordering::Relaxed) {
             return Err("Download cancelled.".into());
         }
-        let resp = agent().get(url).call().map_err(|e| format!("Couldn't download the update: {e}"))?;
+        let resp = fetch(url)?;
         let total = resp.header("Content-Length").and_then(|v| v.parse::<u64>().ok()).unwrap_or(size).max(1);
         let mut out = Vec::with_capacity(total as usize);
         let mut reader = resp.into_reader().take(512 << 20);
@@ -298,6 +372,11 @@ mod native {
         crate::config::scrub_child_env(&mut detach);
         let _ = detach.args(["detach", "-quiet"]).arg(&mnt).output();
         copied?;
+        // The new app must be intact and signed as a whole before it replaces this one.
+        if let Err(e) = run(Command::new("codesign").args(["--verify", "--deep", "--strict"]).arg(&staged), "check the new app's signature") {
+            let _ = std::fs::remove_dir_all(&tmp);
+            return Err(format!("{e}. Nothing was changed."));
+        }
         let old = parent.join(".RepoHub-old.app");
         let _ = std::fs::remove_dir_all(&old);
         std::fs::rename(&bundle, &old).map_err(|e| format!("Couldn't move the old app aside: {e}"))?;
@@ -320,7 +399,8 @@ mod native {
         std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
         if name.ends_with(".zip") {
             run(Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command"])
-                .arg(format!("Expand-Archive -LiteralPath '{}' -DestinationPath '{}' -Force", archive.display(), out.display())), "unpack the update")?;
+                .arg(format!("Expand-Archive -LiteralPath {} -DestinationPath {} -Force",
+                    super::powershell_quote(&archive.display().to_string()), super::powershell_quote(&out.display().to_string()))), "unpack the update")?;
         } else {
             run(Command::new("tar").arg("-xzf").arg(&archive).arg("-C").arg(&out), "unpack the update")?;
         }
@@ -392,6 +472,78 @@ mod native {
 
 #[cfg(test)]
 mod tests {
+    // A key pair made for these tests (its private half was thrown away) and its signature of SUMS.
+    #[cfg(not(target_arch = "wasm32"))]
+    const KEY: &str = "RWRBZcvGo7o0bdNeYr3KOfnpnyZq6H83eII8FrqVGQkeiOpp3X+6Sirb";
+    #[cfg(not(target_arch = "wasm32"))]
+    const OTHER_KEY: &str = "RWQJmXGn7wtVFS6/nHe3hg9vc7IcPvgJCKlIEVikpSDrcKH5Bl7qYXV4";
+    #[cfg(not(target_arch = "wasm32"))]
+    const SUMS: &str = "0f3a  RepoHub-0.1.0-dev-linux-x86_64.tar.gz\n";
+    #[cfg(not(target_arch = "wasm32"))]
+    const SIGNATURE: &str = "untrusted comment: signature from rsign secret key\nRURBZcvGo7o0bXPwTCJAeQw/bqVbVhVBsgOMVZ9psp1TFTiyclpluwFct1bqep2G9AGNJMLZiR4VB790zLA+Mt2flFCFGOPrtAA=\ntrusted comment: RepoHub test\nHITnbHVk/tPNBskSb5yZrcHy+sCHcilJzj6bDMev/Pz5qXiZ4YVWajxmHefBFMi06f+WZCfV36UBHD0wq3nlDA==\n";
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn only_signed_checksums_are_accepted_by_a_build_with_a_key() {
+        assert_eq!(verify_signature(SUMS, Some(SIGNATURE), Some(KEY)), Ok(()));
+        // The checksums were changed after signing (someone replaced the package and its sum).
+        let tampered = SUMS.replace("0f3a", "beef");
+        assert!(verify_signature(&tampered, Some(SIGNATURE), Some(KEY)).unwrap_err().contains("isn't RepoHub's"));
+        // Valid checksums with no signature at all.
+        assert!(verify_signature(SUMS, None, Some(KEY)).unwrap_err().contains("isn't signed"));
+        // Signed, but by someone else's key.
+        assert!(verify_signature(SUMS, Some(SIGNATURE), Some(OTHER_KEY)).unwrap_err().contains("isn't RepoHub's"));
+        assert!(verify_signature(SUMS, Some("not a signature"), Some(KEY)).unwrap_err().contains("can't be read"));
+        for e in [verify_signature(&tampered, Some(SIGNATURE), Some(KEY)), verify_signature(SUMS, None, Some(KEY))] {
+            assert!(e.unwrap_err().contains("Nothing was changed"));
+        }
+        // A build without a key (your own) has nothing to check a signature against.
+        assert_eq!(verify_signature(SUMS, None, None), Ok(()));
+    }
+
+    #[test]
+    fn updates_come_from_githubs_release_hosts_only() {
+        for ok in ["https://github.com/FrancescoDiBella/repohub/releases/download/latest/RepoHub.zip", "https://objects.githubusercontent.com/x?y=1", "https://release-assets.githubusercontent.com/a/b", "https://GitHub.com/x"] {
+            assert!(trusted_url(ok), "{ok}");
+        }
+        for bad in ["http://github.com/x", "https://github.com.evil.example/x", "https://evil.example/github.com/x", "https://github.com@evil.example/x", "https://github.com:8443/x", "https://raw.githubusercontent.com/x", "file:///tmp/x", ""] {
+            assert!(!trusted_url(bad), "{bad}");
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_download_from_another_host_is_refused_before_any_request() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let before = std::env::var_os("REPOHUB_UPDATE_API");
+        // SAFETY: the lock keeps other environment-changing tests out.
+        unsafe { std::env::remove_var("REPOHUB_UPDATE_API") };
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let err = download("https://evil.example/RepoHub.zip", 0, &cancel, |_| {}).unwrap_err();
+        // SAFETY: as above.
+        unsafe {
+            if let Some(v) = before {
+                std::env::set_var("REPOHUB_UPDATE_API", v);
+            }
+        }
+        assert!(err.contains("isn't on GitHub"), "{err}");
+    }
+
+    #[test]
+    fn the_signature_file_is_found_next_to_the_checksums() {
+        let json = r#"{"target_commitish":"abc1234","published_at":"2026-11-10T10:00:00Z","body":"",
+          "assets":[{"name":"RepoHub-0.1.0-dev-linux-x86_64.tar.gz","browser_download_url":"https://x/linux.tgz","size":20},
+                    {"name":"SHA256SUMS.minisig","browser_download_url":"https://x/sums.minisig","size":3},
+                    {"name":"SHA256SUMS","browser_download_url":"https://x/sums","size":3}]}"#;
+        let r = parse_release(json, "-linux-x86_64.tar.gz").unwrap();
+        assert_eq!((r.sums.as_deref(), r.sig.as_deref()), (Some("https://x/sums"), Some("https://x/sums.minisig")));
+    }
+
+    #[test]
+    fn a_quote_in_the_install_folder_stays_inside_the_powershell_string() {
+        assert_eq!(powershell_quote(r"C:\Users\O'Neil\RepoHub"), r"'C:\Users\O''Neil\RepoHub'");
+        assert_eq!(powershell_quote("a'; Remove-Item x; '"), "'a''; Remove-Item x; '''");
+    }
     use super::*;
 
     const RELEASE: &str = r#"{"tag_name":"latest","target_commitish":"abc1234def","published_at":"2026-11-11T12:36:05Z",

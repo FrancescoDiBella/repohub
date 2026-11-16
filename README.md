@@ -152,6 +152,10 @@ From the first build that includes it, the app updates itself from the
 - When a newer build is out, a banner (and the status-bar menu) offers **Install and restart**.
   The package for your system is downloaded, checked against the release's `SHA256SUMS`, put in
   place of the running app, and the new version starts.
+- Updates are downloaded only from GitHub's release hosts. When the repository has a signing
+  key, the checksums are signed and the app refuses an update whose signature is missing or
+  isn't RepoHub's, so replacing a release's files isn't enough to ship code to you. On macOS the
+  new app's code signature is checked before it replaces the old one.
 - macOS replaces `RepoHub.app` where it is (it needs to be in a folder you can write to, such as
   Applications); Windows replaces `RepoHub.exe`; Linux replaces the `repohub` program.
 - `REPOHUB_UPDATES=off` turns the checks off. Builds from source update with `git pull`, the
