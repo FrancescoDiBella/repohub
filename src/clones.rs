@@ -4,6 +4,7 @@
 //! git checkout named after the repository in `REPOHUB_REPOS_DIR` (comma-separated folders) or,
 //! without it, in the usual places: `~/Developer`, `~/Projects`, `~/code`, `~/src`, `~/GitHub`,
 //! `~/repos`, `~/Documents/GitHub` and the home folder itself, each also as `<folder>/<owner>/<repo>`.
+//! A checkout found this way counts only if one of its remotes is the repository.
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -50,22 +51,93 @@ pub fn is_checkout(p: &Path) -> bool {
     p.join(".git").exists()
 }
 
+/// The repository (`owner/name`, lower case) a remote's address points to:
+/// `https://host/owner/name.git`, `git@host:owner/name.git`, `ssh://git@host/owner/name`.
+fn remote_repo(url: &str) -> Option<String> {
+    let url = url.trim().trim_end_matches('/');
+    let url = url.strip_suffix(".git").unwrap_or(url);
+    let url = url.split_once("://").map_or(url, |(_, rest)| rest);
+    // What follows the host (and a port): the last two parts are the owner and the name.
+    let (_, path) = url.split_once(['/', ':'])?;
+    let mut parts = path.rsplit('/');
+    let (name, owner) = (parts.next()?, parts.next()?);
+    (!name.is_empty() && !owner.is_empty()).then(|| format!("{owner}/{name}").to_ascii_lowercase())
+}
+
+/// The addresses of the remotes of the checkout at `dir`, read from its git configuration.
+fn remotes(dir: &Path) -> Vec<String> {
+    let dot_git = dir.join(".git");
+    // A worktree or a submodule has a `.git` file that points to the real folder.
+    let git_dir = match std::fs::read_to_string(&dot_git) {
+        Ok(s) => match s.trim().strip_prefix("gitdir:") {
+            Some(p) => {
+                let p = dir.join(p.trim());
+                match std::fs::read_to_string(p.join("commondir")) {
+                    Ok(common) => p.join(common.trim()),
+                    Err(_) => p,
+                }
+            }
+            None => return Vec::new(),
+        },
+        Err(_) => dot_git,
+    };
+    let Ok(config) = std::fs::read_to_string(git_dir.join("config")) else { return Vec::new() };
+    let mut in_remote = false;
+    let mut out = Vec::new();
+    for line in config.lines().map(str::trim) {
+        if line.starts_with('[') {
+            in_remote = line.starts_with("[remote ");
+        } else if in_remote
+            && let Some((k, v)) = line.split_once('=')
+            && k.trim().eq_ignore_ascii_case("url")
+        {
+            out.push(v.trim().to_owned());
+        }
+    }
+    out
+}
+
+/// True when the checkout at `dir` has a remote that is `repo` (`owner/name`).
+fn is_clone_of(dir: &Path, repo: &str) -> bool {
+    let want = repo.to_ascii_lowercase();
+    remotes(dir).iter().any(|u| remote_repo(u).as_deref() == Some(want.as_str()))
+}
+
+/// The folders named after `repo` in the search folders that are git checkouts.
+fn candidates(repo: &str) -> Vec<PathBuf> {
+    let (owner, name) = repo.split_once('/').unwrap_or(("", repo));
+    let mut out = Vec::new();
+    for dir in search_dirs() {
+        for candidate in [dir.join(name), dir.join(owner).join(name), dir.join(name.to_ascii_lowercase())] {
+            if is_checkout(&candidate) && !out.contains(&candidate) {
+                out.push(candidate);
+            }
+        }
+    }
+    out
+}
+
 /// The local clone of `repo` (`owner/name`), if one is known or found.
+///
+/// A folder you picked is trusted. A folder found by its name is used only when one of its
+/// remotes is this repository: another project with the same name is not its clone, and
+/// commits, merges and commands meant for one must not land in the other.
 pub fn find(repo: &str) -> Option<PathBuf> {
     if let Some(p) = load_map().get(&repo.to_ascii_lowercase()).map(|p| expand(p))
         && p.is_dir()
     {
         return Some(p);
     }
-    let (owner, name) = repo.split_once('/').unwrap_or(("", repo));
-    for dir in search_dirs() {
-        for candidate in [dir.join(name), dir.join(owner).join(name), dir.join(name.to_ascii_lowercase())] {
-            if is_checkout(&candidate) {
-                return Some(candidate);
-            }
-        }
+    candidates(repo).into_iter().find(|c| is_clone_of(c, repo))
+}
+
+/// A checkout named like `repo` that isn't its clone (no remote points to it), when no clone
+/// was found: the user may know better (a fork, a renamed repository) and choose it.
+pub fn lookalike(repo: &str) -> Option<PathBuf> {
+    if find(repo).is_some() {
+        return None;
     }
-    None
+    candidates(repo).into_iter().next()
 }
 
 /// Remembers `path` as the clone of `repo`.
@@ -90,6 +162,7 @@ mod tests {
         let base = std::env::temp_dir().join(format!("repohub-clones-{}", std::process::id()));
         let repo = base.join("work").join("demo");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join(".git/config"), "[core]\n\tbare = false\n[remote \"origin\"]\n\turl = git@github.com:octo/Demo.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n").unwrap();
         // SAFETY: test setup before any thread reads the environment.
         unsafe {
             std::env::set_var("REPOHUB_REPOS_DIR", base.join("work"));
@@ -103,5 +176,53 @@ mod tests {
         assert_eq!(find("Octo/Missing"), Some(other));
         assert_eq!(expand("~/x"), home().join("x"));
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn a_folder_with_the_same_name_is_not_the_clone() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!("repohub-lookalike-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        // `~/work/api` is your own project; `acme/api` on GitHub is something else.
+        let mine = base.join("work").join("api");
+        std::fs::create_dir_all(mine.join(".git")).unwrap();
+        std::fs::write(mine.join(".git/config"), "[remote \"origin\"]\n\turl = https://github.com/me/api.git\n").unwrap();
+        // SAFETY: the lock keeps other environment-changing tests out.
+        unsafe {
+            std::env::set_var("REPOHUB_REPOS_DIR", base.join("work"));
+            std::env::set_var("REPOHUB_DATA_DIR", base.join("data"));
+        }
+        assert_eq!(find("acme/api"), None, "another repository's folder isn't used");
+        assert_eq!(lookalike("acme/api"), Some(mine.clone()), "but it's offered");
+        assert_eq!(find("me/api"), Some(mine.clone()));
+        assert_eq!(lookalike("me/api"), None);
+        // A checkout without remotes is nobody's clone.
+        std::fs::write(mine.join(".git/config"), "[core]\n\turl = https://github.com/acme/api\n").unwrap();
+        assert_eq!(find("acme/api"), None, "a url outside a remote section doesn't count");
+        // Any remote counts (a fork with an upstream), and choosing the folder is trusted.
+        std::fs::write(mine.join(".git/config"), "[remote \"origin\"]\n\turl = git@github.com:me/api.git\n[remote \"upstream\"]\n  URL = ssh://git@github.com/Acme/API/\n").unwrap();
+        assert_eq!(find("acme/api"), Some(mine.clone()));
+        std::fs::write(mine.join(".git/config"), "[remote \"origin\"]\n\turl = https://github.com/me/api.git\n").unwrap();
+        remember("acme/api", &mine).unwrap();
+        assert_eq!(find("acme/api"), Some(mine.clone()));
+        // A worktree's `.git` file leads to the main checkout's configuration.
+        let tree = base.join("work").join("tool");
+        std::fs::create_dir_all(&tree).unwrap();
+        let real = base.join("real.git");
+        std::fs::create_dir_all(real.join("worktrees/tool")).unwrap();
+        std::fs::write(real.join("config"), "[remote \"origin\"]\n\turl = https://github.com/acme/tool\n").unwrap();
+        std::fs::write(real.join("worktrees/tool/commondir"), "../..\n").unwrap();
+        std::fs::write(tree.join(".git"), format!("gitdir: {}\n", real.join("worktrees/tool").display())).unwrap();
+        assert_eq!(find("acme/tool"), Some(tree));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn remote_addresses() {
+        assert_eq!(remote_repo("https://github.com/Octo/Demo.git").as_deref(), Some("octo/demo"));
+        assert_eq!(remote_repo("git@github.com:octo/demo.git").as_deref(), Some("octo/demo"));
+        assert_eq!(remote_repo("ssh://git@ghe.example:2222/octo/demo/").as_deref(), Some("octo/demo"));
+        assert_eq!(remote_repo("https://github.com/demo"), None);
+        assert_eq!(remote_repo("../demo"), None);
     }
 }

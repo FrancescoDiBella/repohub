@@ -2239,6 +2239,20 @@ impl App {
     }
 
     /// Uses the folder typed in the field as repository `i`'s clone.
+    /// Uses the folder that has the repository's name but isn't known to be its clone: the
+    /// user says it is.
+    fn use_lookalike(&mut self, i: usize) {
+        let Some(full) = self.data.repos.get(i).map(|r| r.full_name.clone()) else { return };
+        let Some(dir) = clones_shim::lookalike(&full) else { return };
+        match clones_shim::remember(&full, &dir) {
+            Ok(()) => {
+                self.term_error = None;
+                self.notify(format!("Using {} for {full}", dir.display()));
+            }
+            Err(e) => self.term_error = Some(e),
+        }
+    }
+
     fn use_folder(&mut self, i: usize) {
         let Some(r) = self.data.repos.get(i) else { return };
         let full = r.full_name.clone();
@@ -2268,13 +2282,20 @@ impl App {
             self.term_error = Some(format!("Couldn't create {}: {e}", parent.display()));
             return;
         }
+        let command = match terminal::clone_command(&url, &name) {
+            Ok(c) => c,
+            Err(e) => {
+                self.term_error = Some(e);
+                return;
+            }
+        };
         let _ = clones_shim::remember(&full, &parent.join(&name));
         self.terms.remove(&full);
         // The clone runs in the terminal, so show it.
         if self.tab != RepoTab::Terminal {
             self.set_tab(i, RepoTab::Terminal);
         }
-        self.start_terminal(i, parent, Some(format!("git clone {url}.git && cd {name}\r")));
+        self.start_terminal(i, parent, Some(command));
     }
 
     /// Types `text` into repository `i`'s terminal.

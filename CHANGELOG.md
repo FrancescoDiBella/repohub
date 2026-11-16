@@ -80,6 +80,12 @@ The sections are **Added**, **Changed** and **Fixed**.
   links, and copied text has no control characters. Installing from a Git address runs in the
   background, never waits for a password, and stops after a minute. A plugin with links to
   other folders, or more than 500 files or 10 MB, is refused.
+- Security: text pasted into the Terminal can no longer end the paste early and run as typed
+  commands (control characters are removed). The **Clone into …** command is refused when the
+  repository's address or name has characters a shell could read as a command.
+- A folder that only shares a repository's name is no longer taken for its clone: one of its
+  git remotes must be that repository, or you choose it with **Use it anyway**. Commit, merge,
+  Claude and the Terminal can't act on the wrong project by accident.
 - The phone layout's tab bar (Overview, Repos, Pulls, Issues, Actions) is on screen again: a
   long page pushed it below the bottom edge.
 - Lists page through GitHub results with the `Link` header rather than stopping at the first page:
