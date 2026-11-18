@@ -3435,7 +3435,11 @@ pub fn repohub_back() {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen::prelude::wasm_bindgen(start))]
 pub fn start() {
-    let mut app = rune::App::new(AppSpec { on_key: Some(on_key), poll: Some(poll), setup: Some(setup), fonts: FONTS, families: FAMILIES, ..AppSpec::new("RepoHub", (1180.0, 760.0), init, view) });
+    let app = rune::App::new(AppSpec { on_key: Some(on_key), poll: Some(poll), setup: Some(setup), fonts: FONTS, families: FAMILIES, ..AppSpec::new("RepoHub", (1180.0, 760.0), init, view) });
+    // macOS: draw with wgpu's Metal backend rather than Rune's own, which makes coloured parts of
+    // the window flicker on every key press and pointer move (#108). `RUNE_GPU_BACKEND=metal`
+    // still picks Rune's, to check whether a newer Rune fixed it.
+    let mut app = app.gpu_backend(rune::GpuBackend::Wgpu);
     // With the status-bar widget, closing the window keeps RepoHub there (macOS, Windows).
     if tray::keeps_running() {
         app = app.keep_running().on_close(on_close);
