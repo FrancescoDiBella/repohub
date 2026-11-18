@@ -331,7 +331,7 @@ pub fn layer(s: &App, k: &Kit) -> Vec<El> {
     let panel = col().key("palette").role("dialog").label("Command palette").w_full().max_w(640.0)
         .radius(k.radius.lg).fill(k.c.layer_01).border(1.0, k.c.border_base).padding(8.0).gap(6.0)
         .child(field)
-        .child(col().w_full().max_h(420.0).scroll(rune::ScrollSpec { stick_bottom: false }).child(rows))
+        .child(rune_kit::ScrollBar::scroll_bar(col().w_full().max_h(420.0).scroll(rune::ScrollSpec { stick_bottom: false }).child(rows), k))
         .child(row().w_full().px(6.0).gap(14.0)
             .child(text("↑ ↓ to move · Enter to run · Esc to close").font(k.ty.text_small).color(k.c.text_faint)))
         .modal(true, close)
