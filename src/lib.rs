@@ -269,6 +269,8 @@ pub struct App {
     /// Updating the app itself (see `update`), whether its banner was put off, and Rune's clock
     /// at the last check.
     update: update::Update,
+    /// Where updates come from: numbered releases or the Latest build.
+    update_channel: update::Channel,
     #[cfg(not(target_arch = "wasm32"))]
     update_cancel: Option<UpdateJob>,
     update_later: bool,
@@ -666,7 +668,8 @@ impl App {
             let Some(h) = self.handle.clone() else { return };
             let Some(prior) = self.update.start_check(asked) else { return };
             self.update_checked = Some(self.clock);
-            net::spawn(h, || async { update::check() }, move |s: &mut App, r| {
+            let channel = self.update_channel;
+            net::spawn(h, move || async move { update::check(channel) }, move |s: &mut App, r| {
                 s.apply_update_check(prior, asked, r);
             });
         }
@@ -677,7 +680,7 @@ impl App {
     #[cfg(not(target_arch = "wasm32"))]
     fn apply_update_check(&mut self, prior: Option<update::Release>, asked: bool, r: Result<update::Release, String>) {
         let outcome = match r {
-            Ok(rel) if update::build().is_some_and(|b| update::is_newer(&rel, b, update::built_at())) => {
+            Ok(rel) if update::is_newer(&rel, update::build().unwrap_or(""), update::built_at()) => {
                 if asked {
                     self.notify(format!("A new version is ready ({})", rel.short()));
                 }
@@ -769,6 +772,20 @@ impl App {
     }
 
     /// Stops an in-progress update download and restores the ready update.
+    /// Picks where updates come from, and checks there.
+    fn set_update_channel(&mut self, channel: update::Channel) {
+        if self.update_channel == channel {
+            return;
+        }
+        self.update_channel = channel;
+        channel.save();
+        // What was found on the other channel doesn't count here.
+        if !matches!(self.update, update::Update::Unavailable(_) | update::Update::Downloading { .. } | update::Update::Installing) {
+            self.update = update::Update::Idle;
+            self.check_update(false);
+        }
+    }
+
     fn cancel_update(&mut self) {
         if !matches!(self.update, update::Update::Downloading { .. }) {
             return;
@@ -2850,6 +2867,7 @@ fn init() -> App {
         palette: None,
         retry_after: None,
         update: update::Update::initial(),
+        update_channel: update::Channel::load(),
         #[cfg(not(target_arch = "wasm32"))]
         update_cancel: None,
         update_later: false,
@@ -4618,6 +4636,7 @@ mod fix60_tests {
     fn sample_release() -> crate::update::Release {
         crate::update::Release {
             sha: "abc1234def".into(),
+            version: None,
             published: 1_700_000_000,
             asset: "RepoHub-linux-x86_64.tar.gz".into(),
             url: "https://example.invalid/pkg.tar.gz".into(),
@@ -7223,5 +7242,31 @@ mod phone_sizes {
         assert!(h < 844.0 - 250.0 && h >= 240.0, "{h}");
         s.backdrop_size = [390.0, 400.0];
         assert_eq!(crate::terminal_page::term_h(&s), 240.0, "never smaller than a few lines");
+    }
+}
+
+#[cfg(test)]
+mod update_channel_ui {
+    /// Settings → About shows the version and the channel; picking one is kept.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_channel_is_picked_in_settings_and_kept() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _tmp = crate::load_gen_tests::TempDataDir::new("update-channel");
+        let mut s = crate::init();
+        s.pending_place = None;
+        s.page = crate::Page::Settings;
+        s.settings_section = crate::state::SettingsSection::About;
+        let mut rt = rune::Runtime::new(s, crate::view, (1180.0, 1400.0), rune::Env::new(true, 1.0));
+        rt.frame(0.0);
+        assert!(rt.find("update-channel").is_some());
+        let v = crate::update::version();
+        assert!(rt.elements().iter().any(|e| e.text.as_deref().is_some_and(|t| t.starts_with(v))), "the version shows");
+        rt.update(|s, _| s.set_update_channel(crate::update::Channel::Stable));
+        rt.update(|s, _| s.set_update_channel(crate::update::Channel::Preview));
+        assert_eq!(rt.state.update_channel, crate::update::Channel::Preview);
+        assert_eq!(crate::update::Channel::load(), crate::update::Channel::Preview, "saved");
+        rt.update(|s, _| s.set_update_channel(crate::update::Channel::Stable));
+        assert_eq!(crate::update::Channel::load(), crate::update::Channel::Stable);
     }
 }

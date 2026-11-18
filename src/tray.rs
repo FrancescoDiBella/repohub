@@ -83,6 +83,8 @@ pub fn menu(s: &App) -> Vec<Entry> {
     let failed = d.runs.iter().filter(|r| r.checks == Checks::Failing).count();
     let mut m = vec![
         Entry::item("open", format!("Open {}", s.cfg.title)),
+        // Which version this is, as a line that does nothing.
+        Entry::item("version", format!("Version {}", crate::update::version())).off(true),
         Entry::sep(),
     ];
     if let Some(r) = s.update.available() {
@@ -292,6 +294,7 @@ mod tests {
         let m = menu(&s);
         let ids: Vec<&str> = m.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(ids.first(), Some(&"open"));
+        assert!(m.iter().any(|e| e.id == "version" && !e.enabled && e.label.starts_with("Version ")));
         assert_eq!(ids.last(), Some(&"quit"));
         assert!(m.iter().any(|e| e.id == "go:pulls" && e.label.ends_with("open pull requests")), "{m:#?}");
         let first = &s.data.repos[0].full_name;

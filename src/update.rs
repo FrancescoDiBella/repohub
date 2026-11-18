@@ -1,5 +1,7 @@
-//! Updating the desktop app from inside it, from the **Latest build** that every push to `main`
-//! publishes (`.github/workflows/release.yml`).
+//! Updating the desktop app from inside it (`.github/workflows/release.yml` makes the builds).
+//! Two channels: **Stable**, the numbered releases (`v0.1.0` tags), and **Preview**, the Latest
+//! build that every push to `main` publishes. A numbered build follows Stable unless you pick
+//! Preview in Settings; a Latest build follows Preview.
 //!
 //! The build knows its commit (`REPOHUB_BUILD`, set by the workflow) and when it was built. A
 //! newer Latest build (another commit, published after this build) can be installed: the package
@@ -23,6 +25,82 @@ pub const REPO: &str = "FrancescoDiBella/repohub";
 /// The commit this build was made from, when the release workflow built it.
 pub fn build() -> Option<&'static str> {
     option_env!("REPOHUB_BUILD").filter(|s| !s.trim().is_empty())
+}
+
+/// This build's version: `0.1.0` for a numbered release, `0.1.0-dev` for the Latest build or a
+/// build from source (`REPOHUB_VERSION`, set by the release workflow).
+pub fn version() -> &'static str {
+    option_env!("REPOHUB_VERSION").filter(|s| !s.trim().is_empty()).unwrap_or(concat!(env!("CARGO_PKG_VERSION"), "-dev"))
+}
+
+/// Where updates come from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Channel {
+    /// Numbered releases only.
+    Stable,
+    /// The Latest build of `main`, replaced on every push.
+    Preview,
+}
+
+impl Channel {
+    pub const ALL: [Channel; 2] = [Channel::Stable, Channel::Preview];
+    pub const LABELS: [&'static str; 2] = ["Stable", "Preview"];
+
+    /// A numbered build starts on Stable, any other on Preview (what it was made from).
+    pub fn for_version(version: &str) -> Channel {
+        if version.contains('-') { Channel::Preview } else { Channel::Stable }
+    }
+
+    /// The saved choice, else the one for this build.
+    pub fn load() -> Channel {
+        match crate::prefs::get("update.channel").as_ref().and_then(Value::as_str) {
+            Some("stable") => Channel::Stable,
+            Some("preview") => Channel::Preview,
+            _ => Channel::for_version(version()),
+        }
+    }
+
+    pub fn save(self) {
+        crate::prefs::set("update.channel", Value::from(match self {
+            Channel::Stable => "stable",
+            Channel::Preview => "preview",
+        }));
+    }
+
+    pub fn index(self) -> usize {
+        Channel::ALL.iter().position(|c| *c == self).unwrap_or(0)
+    }
+
+    /// What the channel's builds are called in messages.
+    pub fn what(self) -> &'static str {
+        match self {
+            Channel::Stable => "the latest release",
+            Channel::Preview => "the Latest build",
+        }
+    }
+}
+
+/// `1.2.3` or `1.2.3-dev` as numbers and whether it's a pre-release.
+fn semver(v: &str) -> Option<([u64; 3], bool)> {
+    let v = v.trim().trim_start_matches('v');
+    let (core, pre) = match v.split_once('-') {
+        Some((c, _)) => (c, true),
+        None => (v, false),
+    };
+    let mut n = [0u64; 3];
+    let mut parts = core.split('.');
+    for slot in &mut n {
+        *slot = parts.next()?.parse().ok()?;
+    }
+    parts.next().is_none().then_some((n, pre))
+}
+
+/// Whether version `a` comes after `b` (a pre-release comes before its release).
+pub fn version_newer(a: &str, b: &str) -> bool {
+    match (semver(a), semver(b)) {
+        (Some((an, apre)), Some((bn, bpre))) => an > bn || (an == bn && bpre && !apre),
+        _ => false,
+    }
 }
 
 /// When this build was made (Unix seconds), when the release workflow built it.
@@ -52,7 +130,7 @@ impl Update {
             Update::Unavailable("The web version updates with its Docker image: docker compose pull && docker compose up -d.")
         } else if std::env::var("REPOHUB_UPDATES").is_ok_and(|v| matches!(v.trim(), "off" | "0" | "false")) {
             Update::Unavailable("Updates are off (REPOHUB_UPDATES=off).")
-        } else if build().is_none() {
+        } else if build().is_none() && option_env!("REPOHUB_VERSION").is_none() {
             Update::Unavailable("This copy was built from source: update it with git pull and cargo run --release.")
         } else {
             Update::Idle
@@ -98,8 +176,10 @@ impl Update {
 /// The Latest build, as this platform needs it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Release {
-    /// The commit it was built from.
+    /// The commit it was built from (for a numbered release GitHub may give a branch name).
     pub sha: String,
+    /// A numbered release's version (`0.2.0`, from the `v0.2.0` tag); `None` for the Latest build.
+    pub version: Option<String>,
     /// When it was published (Unix seconds).
     pub published: i64,
     /// This platform's package: its file name, download address and size in bytes.
@@ -115,8 +195,12 @@ pub struct Release {
 }
 
 impl Release {
+    /// The version of a numbered release, else the commit's first characters.
     pub fn short(&self) -> &str {
-        &self.sha[..self.sha.len().min(7)]
+        match &self.version {
+            Some(v) => v,
+            None => &self.sha[..self.sha.len().min(7)],
+        }
     }
 }
 
@@ -137,13 +221,17 @@ pub fn parse_release(json: &str, suffix: &str) -> Result<Release, String> {
     let s = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_owned();
     let assets = v.get("assets").and_then(Value::as_array).cloned().unwrap_or_default();
     let pick = |end: &str| assets.iter().find(|a| s(a, "name").ends_with(end)).cloned();
-    let asset = pick(suffix).ok_or_else(|| format!("The Latest build has no package for this system (*{suffix})."))?;
+    let tag = s(&v, "tag_name");
+    let version = tag.strip_prefix('v').filter(|t| semver(t).is_some()).map(str::to_owned);
+    let what = if version.is_some() { "This release" } else { "The Latest build" };
+    let asset = pick(suffix).ok_or_else(|| format!("{what} has no package for this system (*{suffix})."))?;
     let sha = s(&v, "target_commitish");
-    if sha.is_empty() {
+    if sha.is_empty() && version.is_none() {
         return Err("The Latest build doesn't say which commit it was built from.".into());
     }
     Ok(Release {
         sha,
+        version,
         published: crate::model::parse_iso(&s(&v, "published_at")).unwrap_or(0),
         asset: s(&asset, "name"),
         url: s(&asset, "browser_download_url"),
@@ -169,6 +257,10 @@ pub fn notes(body: &str) -> String {
 /// Whether `release` should replace build `sha` built at `built`: another commit, published
 /// after this build (a newer local build isn't "updated" to an older Latest build).
 pub fn is_newer(release: &Release, sha: &str, built: Option<i64>) -> bool {
+    // A numbered release is newer by its version.
+    if let Some(v) = &release.version {
+        return version_newer(v, version());
+    }
     let same = release.sha.starts_with(sha) || sha.starts_with(&release.sha);
     !same && built.is_none_or(|b| release.published > b)
 }
@@ -252,13 +344,22 @@ mod native {
         std::env::var("REPOHUB_UPDATE_API").ok().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| "https://api.github.com".into()).trim_end_matches('/').to_owned()
     }
 
-    /// Asks GitHub for the Latest build.
-    pub fn check() -> Result<Release, String> {
-        let url = format!("{}/repos/{REPO}/releases/tags/latest", api());
+    /// Asks GitHub for the newest build on `channel`: the latest numbered release (GitHub's
+    /// `releases/latest` skips pre-releases, so never the Latest build), or the Latest build.
+    pub fn check(channel: super::Channel) -> Result<Release, String> {
+        let path = match channel {
+            super::Channel::Stable => "releases/latest",
+            super::Channel::Preview => "releases/tags/latest",
+        };
+        let url = format!("{}/repos/{REPO}/{path}", api());
+        let what = channel.what();
         let body = match agent().get(&url).set("Accept", "application/vnd.github+json").call() {
             Ok(r) => r.into_string().map_err(|e| e.to_string())?,
-            Err(ureq::Error::Status(404, _)) => return Err("There is no Latest build on GitHub yet.".into()),
-            Err(ureq::Error::Status(code, _)) => return Err(format!("GitHub answered {code} when asked for the Latest build.")),
+            Err(ureq::Error::Status(404, _)) => return Err(match channel {
+                super::Channel::Stable => "There is no numbered release on GitHub yet: pick Preview for the Latest build.".into(),
+                super::Channel::Preview => "There is no Latest build on GitHub yet.".into(),
+            }),
+            Err(ureq::Error::Status(code, _)) => return Err(format!("GitHub answered {code} when asked for {what}.")),
             Err(e) => return Err(format!("Can't reach GitHub: {e}")),
         };
         parse_release(&body, suffix())
@@ -564,6 +665,23 @@ mod tests {
         assert!(!is_newer(&r, "abc1234", None), "a short sha of the same commit");
         assert!(!is_newer(&r, "fff0000", crate::model::parse_iso("2026-11-12T00:00:00Z")), "this build is newer than the release");
         assert_eq!(r.notes, "");
+    }
+
+    #[test]
+    fn numbered_releases_compare_by_version() {
+        assert!(version_newer("0.2.0", "0.1.0") && version_newer("0.1.0", "0.1.0-dev") && version_newer("1.0.0", "0.9.9"));
+        assert!(!version_newer("0.1.0", "0.1.0") && !version_newer("0.1.0-dev", "0.1.0") && !version_newer("0.1.0", "0.2.0-dev"));
+        assert!(!version_newer("latest", "0.1.0") && !version_newer("0.1", "0.0.1"), "not a version");
+        let json = RELEASE.replace(r#""tag_name":"latest","target_commitish":"abc1234def""#, r#""tag_name":"v9.0.0","target_commitish":"main""#);
+        let r = parse_release(&json, "-linux-x86_64.tar.gz").unwrap();
+        assert_eq!((r.version.as_deref(), r.short()), (Some("9.0.0"), "9.0.0"));
+        assert!(is_newer(&r, "abc", None), "a higher version than this build");
+        let old = RELEASE.replace(r#""tag_name":"latest""#, r#""tag_name":"v0.0.1""#);
+        assert!(!is_newer(&parse_release(&old, "-linux-x86_64.tar.gz").unwrap(), "fff", None), "an older release never replaces this build");
+        // A Latest build is still told apart by its commit.
+        assert_eq!(parse_release(RELEASE, "-linux-x86_64.tar.gz").unwrap().version, None);
+        assert_eq!(Channel::for_version("0.1.0"), Channel::Stable);
+        assert_eq!(Channel::for_version("0.1.0-dev"), Channel::Preview);
     }
 
     #[test]

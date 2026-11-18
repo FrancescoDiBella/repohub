@@ -144,8 +144,14 @@ publishes a numbered release next to it.
 
 ### Updates
 
-From the first build that includes it, the app updates itself from the
-[Latest build](https://github.com/FrancescoDiBella/repohub/releases/tag/latest):
+The app updates itself from one of two channels, picked in **Settings → About → Channel**:
+- **Stable**: the [numbered releases](https://github.com/FrancescoDiBella/repohub/releases)
+  (`v0.1.0`, …). A numbered build starts here.
+- **Preview**: the [Latest build](https://github.com/FrancescoDiBella/repohub/releases/tag/latest),
+  rebuilt on every change to `main`. A Latest build starts here.
+
+The version (`0.1.0`, or `0.1.0-dev` for a Latest build) shows in Settings → About and in the
+status-bar menu.
 
 - It checks GitHub at start and every 6 hours (**Settings → App version → Check now**, or ⌘K →
   *Check for updates*, any time).
