@@ -22,17 +22,20 @@ pub struct ListFilter {
     pub label: Option<String>,
     /// Pull requests you opened; issues assigned to you.
     pub mine: bool,
+    /// Pull requests only: drafts, and ones whose checks failed.
+    pub drafts: bool,
+    pub failing: bool,
 }
 
 impl Default for ListFilter {
     fn default() -> Self {
-        ListFilter { search: TextEdit::new(""), repo: None, label: None, mine: false }
+        ListFilter { search: TextEdit::new(""), repo: None, label: None, mine: false, drafts: false, failing: false }
     }
 }
 
 impl ListFilter {
     pub fn is_empty(&self) -> bool {
-        self.search.text.trim().is_empty() && self.repo.is_none() && self.label.is_none() && !self.mine
+        self.search.text.trim().is_empty() && self.repo.is_none() && self.label.is_none() && !self.mine && !self.drafts && !self.failing
     }
 
     pub fn clear(&mut self) {
@@ -59,7 +62,10 @@ impl ListFilter {
     }
 
     pub fn pull(&self, p: &Pull, me: &str) -> bool {
-        self.common(p.number, &p.title, &p.repo, &p.labels) && (!self.mine || p.author.eq_ignore_ascii_case(me))
+        self.common(p.number, &p.title, &p.repo, &p.labels)
+            && (!self.mine || p.author.eq_ignore_ascii_case(me))
+            && (!self.drafts || p.state == crate::model::PullState::Draft)
+            && (!self.failing || p.checks == Some(crate::model::Checks::Failing))
     }
 
     pub fn issue(&self, x: &Issue, me: &str) -> bool {
@@ -104,6 +110,11 @@ pub fn bar(s: &App, k: &Kit, which: Which, repos: Vec<String>, labels: Vec<Strin
     };
     let mut top_row = row().w_full().gap(8.0).center_y().flex_wrap().child(search)
         .child(chip(mine_label.to_owned(), f.mine, format!("{tag}-mine")).on_press(move |s: &mut App| { let f = of(s, which); f.mine = !f.mine; }));
+    if which == Which::Pulls {
+        top_row = top_row
+            .child(chip("Drafts".to_owned(), f.drafts, format!("{tag}-drafts")).on_press(|s: &mut App| s.pull_filter.drafts = !s.pull_filter.drafts))
+            .child(chip("Failing checks".to_owned(), f.failing, format!("{tag}-failing")).on_press(|s: &mut App| s.pull_filter.failing = !s.pull_filter.failing));
+    }
     if !f.is_empty() {
         top_row = top_row.child(Button::new("Clear").icon(&icons::CROSS).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
             .on_press(move |s: &mut App| of(s, which).clear()).build(k).key(format!("{tag}-clear")));
@@ -187,6 +198,15 @@ mod tests {
         // For pull requests "mine" is the author.
         assert!(f.pull(&pull(1, "x", "octo/app", "alice"), "alice") && !f.pull(&pull(2, "x", "octo/app", "bob"), "alice"));
         assert!(!f.is_empty());
+        // Drafts, and failing checks, for pull requests.
+        let mut draft = pull(3, "x", "octo/app", "bob");
+        draft.state = PullState::Draft;
+        let mut red = pull(4, "x", "octo/app", "bob");
+        red.checks = Some(crate::model::Checks::Failing);
+        let f = ListFilter { drafts: true, ..ListFilter::default() };
+        assert!(f.pull(&draft, "alice") && !f.pull(&red, "alice") && !f.is_empty());
+        let f = ListFilter { failing: true, ..ListFilter::default() };
+        assert!(!f.pull(&draft, "alice") && f.pull(&red, "alice"));
     }
 
     #[test]

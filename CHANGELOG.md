@@ -10,6 +10,8 @@ The sections are **Added**, **Changed** and **Fixed**.
 ## Unreleased
 
 ### Added
+- The Pull requests page filters **Drafts** and **Failing checks**, and the status-bar menu
+  shows how many notifications are unread (it opens the Notifications page).
 - **Comments on a pull request's lines**: the comments people left on its diff show under their
   lines, and the **+** by a line number (or a dragged range of lines) opens a box to write one.
 - **Undo** after closing an issue (it's reopened and comes back to the list) and after deleting

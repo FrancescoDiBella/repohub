@@ -285,7 +285,7 @@ With a token that has write access, the everyday changes happen in RepoHub:
 | Issue and pull request rows | Click one to **read its conversation**: the description, comments and reviews, as formatted text. Write a **comment** there. On a pull request, **Approve** or **Request changes** and **See the changes** (the diff), with the comments left on its lines; the **+** by a line number comments on that line. On an issue, **Close issue** or **Reopen issue**. **Open on GitHub** is still there. |
 | Issue rows | **Close**. |
 | Notifications page | Your unread GitHub notifications, grouped by repository, with why you got each. Click one to open its conversation; it's marked as read. **Mark as read** does only that. Needs a classic token with the `notifications` or `repo` scope: GitHub doesn't give notifications to fine-grained tokens. |
-| Pull requests and Issues pages | **Filters**: search by title or number, pick a repository or a label, **Opened by me** (pull requests) or **Assigned to me** (issues). They narrow what's already loaded, as you type. |
+| Pull requests and Issues pages | **Filters**: search by title or number, pick a repository or a label, **Opened by me**, **Drafts** and **Failing checks** (pull requests) or **Assigned to me** (issues). They narrow what's already loaded, as you type. |
 | Pull request rows | **Files** shows what it changes as a diff, unified or side by side, with syntax colours and word changes. From there **Merge** with a merge commit, **Squash** or **Rebase**. **Merge** on the row asks first. |
 | Changes tab (desktop, with a local clone) | What changed since the last commit, as a diff, new files included. **Commit** or **Commit and push** everything with a message. **Push**, **Pull** (fast-forward only), and **New pull request** from the branch. |
 | Changes tab: merging | **Merge a branch** into the one checked out: pick it to preview its commits and the diff it brings, then merge. If there are conflicts, it lists the files and offers **Abort merge**. Fix them in your editor or the Terminal, then **Commit** finishes the merge. Commit refuses files that still have conflict markers. |
@@ -355,7 +355,7 @@ RepoHub puts an icon in the macOS menu bar and the Windows notification area (an
 where one runs). Its menu has:
 
 - **Open RepoHub**; how many pull requests and issues are open and how many runs failed, each
-  opening its page;
+  opening its page; how many notifications are unread (with a classic token);
 - the pinned repositories, each opening in RepoHub;
 - **New issue in …** for the repository on screen (or the first pinned one);
 - **Refresh** and **Quit RepoHub**.
