@@ -130,6 +130,10 @@ final class GitHubPaths {
                     if (rest.length == 3 && rest[0].equals("issues") && number(rest[1]) && rest[2].equals("comments")) {
                         return true;
                     }
+                    // The checks on a pull request's last commit (a hex commit id).
+                    if (rest.length == 3 && rest[0].equals("commits") && rest[1].matches("[0-9a-fA-F]{7,64}") && rest[2].equals("check-runs")) {
+                        return true;
+                    }
                 }
                 return false;
             case "PUT":

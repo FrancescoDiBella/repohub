@@ -5,7 +5,7 @@ use rune::{El, col, el, row, text};
 use rune_kit::{Button, ButtonVariant, ControlSize, Kit, TextArea};
 
 use crate::state::Load;
-use crate::thread::{Entry, Open, Standing, Thread, Verdict};
+use crate::thread::{Check, CheckState, Entry, Open, Standing, Thread, Verdict};
 use crate::ui::{self, panel, rule};
 use crate::{App, actions, github, icons, model, pages};
 
@@ -17,6 +17,32 @@ fn standing_pill(k: &Kit, st: Standing) -> El {
         Standing::Merged => k.c.text_accent,
     };
     ui::pill(k, st.label(), ink)
+}
+
+/// A pull request's checks on its last commit: a summary, then one row per check.
+fn checks(k: &Kit, list: &[Check]) -> El {
+    let mut p = panel(k).key("thread-checks")
+        .child(row().w_full().px(16.0).py(10.0).gap(10.0).center_y()
+            .child(text("Checks").font(k.ty.small_medium).color(k.c.text_strong))
+            .child(text(crate::thread::checks_summary(list)).font(k.ty.small).color(k.c.text_muted).key("thread-checks-summary")));
+    for (n, c) in list.iter().enumerate() {
+        let (icon, ink) = match c.state {
+            CheckState::Passed => (&icons::CHECK, k.c.success.icon),
+            CheckState::Failed => (&icons::CROSS, k.c.danger.icon),
+            CheckState::Running => (&icons::DOT, k.c.warning.icon),
+            CheckState::Other => (&icons::DOT, k.c.text_faint),
+        };
+        // The word says it; the colour and the mark only repeat it.
+        let mut line = row().w_full().px(16.0).py(8.0).gap(10.0).center_y().key(format!("thread-check-{n}"))
+            .child(ui::ico(icon, 14.0, ink))
+            .child(text(c.name.clone()).font(k.ty.small).color(k.c.text_base).grow(1.0).wrap())
+            .child(ui::pill(k, c.state.label(), ink));
+        if !c.url.is_empty() {
+            line = line.child(pages::open_button(k, "Details", &c.url, &format!("thread-check-open-{n}")));
+        }
+        p = p.child(rule(k)).child(line);
+    }
+    p
 }
 
 /// One description, comment or review.
@@ -64,6 +90,22 @@ fn reply(s: &App, k: &Kit, o: &Open, t: &Thread) -> El {
             .child(Button::new("Request changes").control_size(ControlSize::Small)
                 .help("Say what must change before this is merged (type it first)")
                 .disabled(off || empty).on_press(|s: &mut App| s.send_reply(Some(Verdict::ChangesRequested))).build(k).key("thread-request-changes"));
+    }
+    if o.pull && matches!(t.standing, Standing::Open | Standing::Draft | Standing::Closed) {
+        let (repo, number) = (o.repo.clone(), o.number);
+        let open = t.standing == Standing::Closed;
+        buttons = buttons.child(el().grow(1.0));
+        buttons = buttons.child(
+            Button::new(match (open, busy) {
+                (false, false) => "Close pull request",
+                (false, true) => "Closing…",
+                (true, false) => "Reopen pull request",
+                (true, true) => "Reopening…",
+            }).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
+                .help(if open { "Open it again for review" } else { "Close it without merging" })
+                .disabled(busy || blocked.is_some())
+                .on_press(move |s: &mut App| s.write(&repo, github::Write::SetPullOpen { number, open })).build(k)
+                .key(if open { "thread-reopen-pull" } else { "thread-close-pull" }));
     }
     if !o.pull {
         let (repo, number) = (o.repo.clone(), o.number);
@@ -128,6 +170,9 @@ pub fn view(s: &App, k: &Kit, o: &Open) -> El {
         .child(col().w_full().gap(8.0)
             .child(text(t.title.clone()).font(ui::H2).color(k.c.text_strong).wrap())
             .child(meta));
+    if let Some(list) = &t.checks {
+        page = page.child(checks(k, list));
+    }
     // A pull request's changes: the diff panel the lists use, opened here.
     if o.pull {
         let active = s.pull_diff_of.as_ref().is_some_and(|(full, n)| *n == o.number && model::same_repo(full, &o.repo));

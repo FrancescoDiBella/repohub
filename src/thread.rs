@@ -70,6 +70,48 @@ pub struct Entry {
     pub verdict: Option<Verdict>,
 }
 
+/// How one check on a pull request's last commit went.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CheckState {
+    Passed,
+    Failed,
+    Running,
+    /// Skipped, neutral or cancelled: neither passed nor failed.
+    Other,
+}
+
+impl CheckState {
+    pub fn label(self) -> &'static str {
+        match self {
+            CheckState::Passed => "Passed",
+            CheckState::Failed => "Failed",
+            CheckState::Running => "Running",
+            CheckState::Other => "Skipped",
+        }
+    }
+}
+
+/// One check run (a CI job) on a pull request's last commit.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Check {
+    pub name: String,
+    pub state: CheckState,
+    pub url: String,
+}
+
+/// "2 passed, 1 failed": the checks in a few words.
+pub fn checks_summary(list: &[Check]) -> String {
+    if list.is_empty() {
+        return "No checks on the last commit.".into();
+    }
+    let count = |st: CheckState| list.iter().filter(|c| c.state == st).count();
+    let parts: Vec<String> = [(CheckState::Failed, "failed"), (CheckState::Running, "running"), (CheckState::Passed, "passed"), (CheckState::Other, "skipped")]
+        .into_iter()
+        .filter_map(|(st, w)| Some(count(st)).filter(|n| *n > 0).map(|n| format!("{n} {w}")))
+        .collect();
+    parts.join(", ")
+}
+
 /// A conversation as loaded from GitHub.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Thread {
@@ -85,6 +127,9 @@ pub struct Thread {
     pub entries: Vec<Entry>,
     /// GitHub has more comments than the ones loaded.
     pub more: bool,
+    /// A pull request's checks on its last commit; `None` for an issue, or when the token
+    /// can't read them.
+    pub checks: Option<Vec<Check>>,
 }
 
 /// The conversation on screen: which one, what's loaded, and the reply being typed.
@@ -141,5 +186,10 @@ pub fn sample(title: &str, author: &str, pull: bool, standing: Standing, now: i6
         branches: pull.then(|| ("feature/chunked-loading".to_owned(), "main".to_owned())),
         entries,
         more: false,
+        checks: pull.then(|| vec![
+            Check { name: "build (ubuntu)".into(), state: CheckState::Passed, url: String::new() },
+            Check { name: "build (macos)".into(), state: CheckState::Running, url: String::new() },
+            Check { name: "test".into(), state: CheckState::Passed, url: String::new() },
+        ]),
     }
 }
