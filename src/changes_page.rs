@@ -229,7 +229,14 @@ fn pull_diff_body(s: &App, k: &Kit, full: &str, number: u32, empty: &str) -> El 
         }
         Some(Load::Ready(())) if s.pull_diff.files().is_empty() => col().w_full().padding(24.0).items_center().child(text(empty.to_owned()).font(k.ty.ui).color(k.c.text_muted)),
         Some(Load::Ready(())) => col().w_full().h(diff_h(s)).clip_rounded(0.0)
-            .child(DiffView::new(|s: &App| &s.pull_diff, |s: &mut App| &mut s.pull_diff).key("pull-diff-view").build(s, k)),
+            .child({
+                // The "+" by a line number writes a comment there; comments show under their line.
+                let kit = k.clone();
+                DiffView::new(|s: &App| &s.pull_diff, |s: &mut App| &mut s.pull_diff).key("pull-diff-view")
+                    .on_comment(|s: &mut App, range, _| s.start_line_comment(range))
+                    .annotation(move |s: &App, a| crate::review::annotation(s, &kit, a))
+                    .build(s, k)
+            }),
     }
 }
 

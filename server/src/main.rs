@@ -528,7 +528,7 @@ fn allowed(method: &Method, path: &str) -> bool {
                 if rest.len() >= 4 && rest[0] == "git" && rest[1] == "ref" && rest[2] == "heads" && rest[3..].iter().all(|s| !s.is_empty()) {
                     return true;
                 }
-                if rest.len() == 3 && rest[0] == "pulls" && number(rest[1]) && (rest[2] == "files" || rest[2] == "reviews") {
+                if rest.len() == 3 && rest[0] == "pulls" && number(rest[1]) && matches!(rest[2], "files" | "reviews" | "comments") {
                     return true;
                 }
                 // One issue or pull request and its conversation.
@@ -545,7 +545,7 @@ fn allowed(method: &Method, path: &str) -> bool {
         Method::Put | Method::Delete => seg.len() == 4 && seg[0] == "user" && seg[1] == "starred" && !seg[2].is_empty() && !seg[3].is_empty(),
         // Creating an issue, a pull request or a branch; commenting; reviewing a pull request.
         Method::Post => repo && (matches!(rest, ["issues"] | ["pulls"] | ["git", "refs"])
-            || (rest.len() == 3 && number(rest[1]) && matches!((rest[0], rest[2]), ("issues", "comments") | ("pulls", "reviews")))),
+            || (rest.len() == 3 && number(rest[1]) && matches!((rest[0], rest[2]), ("issues", "comments") | ("pulls", "reviews") | ("pulls", "comments")))),
         // Closing or reopening an issue; marking one notification as read.
         Method::Patch => (repo && rest.len() == 2 && rest[0] == "issues" && number(rest[1]))
             || (seg.len() == 3 && seg[0] == "notifications" && seg[1] == "threads" && number(seg[2])),
@@ -952,6 +952,11 @@ mod tests {
         // Commenting and reviewing are writes the app makes; nothing else under them is.
         assert!(allowed(&Method::Post, "/repos/owner/repo/issues/12/comments"));
         assert!(allowed(&Method::Post, "/repos/owner/repo/pulls/7/reviews"));
+        // Comments on lines of a pull request's diff: read and written, nothing under them.
+        assert!(allowed(&Method::Get, "/repos/owner/repo/pulls/7/comments"));
+        assert!(allowed(&Method::Post, "/repos/owner/repo/pulls/7/comments"));
+        assert!(!allowed(&Method::Post, "/repos/owner/repo/pulls/7/comments/3/replies"));
+        assert!(!allowed(&Method::Patch, "/repos/owner/repo/pulls/comments/3"));
         assert!(!allowed(&Method::Post, "/repos/owner/repo/issues/bad/comments"));
         assert!(!allowed(&Method::Post, "/repos/owner/repo/pulls/7/merge"));
         assert!(!allowed(&Method::Post, "/repos/owner/repo/pulls/7/reviews/3/dismissals"));
