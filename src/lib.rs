@@ -1837,7 +1837,7 @@ impl App {
     /// Shows what a write changed at once, without waiting for GitHub's lists to catch up.
     fn apply_done(&mut self, repo: &str, done: github::Done) {
         let about = match &done {
-            github::Done::Closed(n) | github::Done::Reopened(n) | github::Done::Merged(n) | github::Done::Commented(n) | github::Done::Reviewed(n, _) => Some(*n),
+            github::Done::Closed(n) | github::Done::Reopened(n) | github::Done::Merged(n) | github::Done::PullOpen(n, _) | github::Done::Commented(n) | github::Done::Reviewed(n, _) => Some(*n),
             _ => None,
         };
         let sent = matches!(done, github::Done::Commented(_) | github::Done::Reviewed(..));
@@ -1965,6 +1965,26 @@ impl App {
                     }
                 }
                 self.notify(format!("Merged pull request #{n}"));
+            }
+            github::Done::PullOpen(n, open) => {
+                let mut changed = false;
+                for p in self.data.pulls.iter_mut().filter(|p| p.number == n && same_repo(&p.repo, &full_name)) {
+                    let was_open = matches!(p.state, PullState::Open | PullState::Draft);
+                    if was_open != open {
+                        changed = true;
+                        p.state = if open { PullState::Open } else { PullState::Closed };
+                    }
+                }
+                if changed {
+                    let (from, to) = if open { (&mut self.data.closed_pulls_total, &mut self.data.open_pulls_total) } else { (&mut self.data.open_pulls_total, &mut self.data.closed_pulls_total) };
+                    if let Some(t) = from.as_mut() {
+                        *t = t.saturating_sub(1);
+                    }
+                    if let Some(t) = to.as_mut() {
+                        *t += 1;
+                    }
+                }
+                self.notify(format!("{} pull request #{n}", if open { "Reopened" } else { "Closed" }));
             }
         }
     }
@@ -4119,6 +4139,40 @@ mod fix63_tests {
         assert!(rt.find("thread-approve").is_none() && rt.find("thread-close-issue").is_some());
         rt.update(|s, _| s.go(Page::Issues));
         assert!(rt.state.thread.is_none(), "choosing the page again goes back to its list");
+    }
+
+    #[test]
+    fn a_pull_request_shows_its_checks_and_can_be_closed_and_reopened() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = app();
+        let pr = s.data.pulls.iter().find(|p| p.number == 14).unwrap().clone();
+        let open_before = s.data.open_pulls_total;
+        s.open_thread(&pr.repo, 14, true);
+        let mut rt = rune::Runtime::new(s, crate::view, (1180.0, 3000.0), rune::Env::new(true, 1.0));
+        rt.frame(0.0);
+        assert!(rt.find("thread-checks").is_some() && rt.find("thread-check-2").is_some(), "one row per check");
+        assert!(rt.elements().iter().any(|e| e.text.as_deref() == Some("1 running, 2 passed")));
+        assert!(rt.find("thread-close-pull").is_some() && rt.find("thread-reopen-pull").is_none());
+
+        // Closing it without merging: the list and its counts follow, and the button turns to Reopen.
+        let mut s = rt.state;
+        s.apply_done(&pr.repo, github::Done::PullOpen(14, false));
+        let p = s.data.pulls.iter().find(|p| p.number == 14).unwrap();
+        assert_eq!(p.state, crate::model::PullState::Closed);
+        if let Some(n) = open_before {
+            assert_eq!(s.data.open_pulls_total, Some(n.saturating_sub(1)));
+        }
+        let mut rt = rune::Runtime::new(s, crate::view, (1180.0, 3000.0), rune::Env::new(true, 1.0));
+        rt.frame(0.0);
+        assert!(rt.find("thread-reopen-pull").is_some(), "a closed pull request can be reopened");
+        let mut s = rt.state;
+        s.apply_done(&pr.repo, github::Done::PullOpen(14, true));
+        assert_eq!(s.data.pulls.iter().find(|p| p.number == 14).unwrap().state, crate::model::PullState::Open);
+        assert_eq!(s.data.open_pulls_total, open_before);
+        // An issue has no checks.
+        s.open_thread(&s.data.issues[0].repo.clone(), s.data.issues[0].number, false);
+        let rt = rune::Runtime::new(s, crate::view, (1180.0, 3000.0), rune::Env::new(true, 1.0));
+        assert!(rt.find("thread-checks").is_none() && rt.find("thread-close-pull").is_none());
     }
 
     #[test]

@@ -498,6 +498,7 @@ fn allowed(method: &Method, path: &str) -> bool {
     let repo = seg.len() >= 3 && seg[0] == "repos" && !seg[1].is_empty() && !seg[2].is_empty();
     let rest = if repo { &seg[3..] } else { &[][..] };
     let number = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let sha = |s: &str| (7..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit());
 
     match method {
         Method::Get => {
@@ -536,6 +537,10 @@ fn allowed(method: &Method, path: &str) -> bool {
                     return true;
                 }
                 if rest.len() == 3 && rest[0] == "issues" && number(rest[1]) && rest[2] == "comments" {
+                    return true;
+                }
+                // The checks on a pull request's last commit (a hex commit id).
+                if rest.len() == 3 && rest[0] == "commits" && sha(rest[1]) && rest[2] == "check-runs" {
                     return true;
                 }
             }
@@ -927,6 +932,11 @@ mod tests {
         assert!(allowed(&Method::Get, "/notifications"));
         assert!(!allowed(&Method::Get, "/notifications/threads/12"));
         assert!(!allowed(&Method::Get, "/repos/owner/repo/notifications"));
+        // The checks on a commit, by its id only.
+        assert!(allowed(&Method::Get, "/repos/owner/repo/commits/0123abcdef0123abcdef0123abcdef0123abcdef/check-runs"));
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/commits/main/check-runs"));
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/commits/0123abc/statuses"));
+        assert!(!allowed(&Method::Post, "/repos/owner/repo/commits/0123abc/check-runs"));
     }
 
     #[test]

@@ -10,6 +10,8 @@ The sections are **Added**, **Changed** and **Fixed**.
 ## Unreleased
 
 ### Added
+- A pull request's conversation shows its **checks** (the CI jobs on its last commit, with a
+  summary and a link to each), and **Close pull request** / **Reopen pull request**.
 - **Comments on a pull request's lines**: the comments people left on its diff show under their
   lines, and the **+** by a line number (or a dragged range of lines) opens a box to write one.
 - **Undo** after closing an issue (it's reopened and comes back to the list) and after deleting
