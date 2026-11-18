@@ -10,6 +10,8 @@ The sections are **Added**, **Changed** and **Fixed**.
 ## Unreleased
 
 ### Added
+- The Pull requests page filters **Drafts** and **Failing checks**, and the status-bar menu
+  shows how many notifications are unread (it opens the Notifications page).
 - A pull request's conversation shows its **checks** (the CI jobs on its last commit, with a
   summary and a link to each), and **Close pull request** / **Reopen pull request**.
 - **Comments on a pull request's lines**: the comments people left on its diff show under their

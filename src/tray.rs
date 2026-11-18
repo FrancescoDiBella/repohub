@@ -53,6 +53,7 @@ pub fn parse(id: &str) -> Option<Action> {
             "issues" => Page::Issues,
             "actions" => Page::Actions,
             "repos" => Page::Repos,
+            "notifications" => Page::Notifications,
             _ => Page::Overview,
         }),
         "repo" if !arg.is_empty() => Action::OpenRepo(arg.to_owned()),
@@ -117,6 +118,15 @@ pub fn menu(s: &App) -> Vec<Entry> {
         Entry::item("go:issues", issues_label),
         Entry::item("go:actions", runs_label),
     ]);
+    // What GitHub wants you to look at, once the inbox has loaded (it needs a classic token).
+    if let Some(list) = s.inbox.as_ref().and_then(crate::state::Load::ready) {
+        let label = match list.len() {
+            0 => "No unread notifications".to_owned(),
+            n if n >= 50 => "50+ unread notifications".to_owned(),
+            n => plural(n, "unread notification", "unread notifications"),
+        };
+        m.push(Entry::item("go:notifications", label));
+    }
     let pinned = crate::pinned(s);
     if !pinned.is_empty() {
         m.push(Entry::sep());
@@ -294,11 +304,16 @@ mod tests {
         s.page = Page::Repo(s.data.repos[1].full_name.clone());
         let target = format!("new-issue:{}", s.data.repos[1].full_name);
         assert!(menu(&s).iter().any(|e| e.id == target));
+        // The inbox shows once it has loaded, with its count.
+        assert!(!menu(&s).iter().any(|e| e.id == "go:notifications"), "not before it loads");
+        s.inbox = Some(crate::state::Load::Ready(Vec::new()));
+        assert!(menu(&s).iter().any(|e| e.id == "go:notifications" && e.label == "No unread notifications"));
     }
 
     #[test]
     fn ids_round_trip() {
         assert_eq!(parse("go:pulls"), Some(Action::Go(Page::Pulls)));
+        assert_eq!(parse("go:notifications"), Some(Action::Go(Page::Notifications)));
         assert_eq!(parse("repo:octo/app"), Some(Action::OpenRepo("octo/app".into())));
         assert_eq!(parse("new-issue:octo/app"), Some(Action::NewIssue("octo/app".into())));
         assert_eq!(parse("repo:"), None);
