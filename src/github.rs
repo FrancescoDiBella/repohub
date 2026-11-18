@@ -344,7 +344,25 @@ pub fn parse_thread(issue: &Value, comments: &Value, pull: Option<(&Value, &Valu
         branches,
         entries,
         more,
+        checks: None,
     }
+}
+
+/// The check runs in GitHub's answer for a commit's `check-runs`.
+pub fn parse_check_runs(v: &Value) -> Vec<crate::thread::Check> {
+    use crate::thread::{Check, CheckState};
+    v.get("check_runs").and_then(Value::as_array).into_iter().flatten().map(|r| {
+        let state = if s(r, "status") != "completed" {
+            CheckState::Running
+        } else {
+            match s(r, "conclusion").as_str() {
+                "success" => CheckState::Passed,
+                "failure" | "timed_out" | "action_required" | "startup_failure" => CheckState::Failed,
+                _ => CheckState::Other,
+            }
+        };
+        Check { name: s(r, "name"), state, url: s(r, "html_url") }
+    }).collect()
 }
 
 pub fn parse_issue(v: &Value) -> Issue {
@@ -765,7 +783,12 @@ impl Gh {
         } else {
             None
         };
-        Ok(parse_thread(&issue, &comments, pull.as_ref().map(|(d, r)| (d, r))))
+        let mut t = parse_thread(&issue, &comments, pull.as_ref().map(|(d, r)| (d, r)));
+        // The checks are extra: a token that can't read them still shows the conversation.
+        if let Some(sha) = pull.as_ref().and_then(|(d, _)| d.get("head")).map(|h| s(h, "sha")).filter(|x| !x.is_empty()) {
+            t.checks = self.get(&format!("/repos/{full}/commits/{sha}/check-runs?per_page=100")).await.ok().map(|v| parse_check_runs(&v));
+        }
+        Ok(t)
     }
 
     /// Your unread notifications, newest first (the first 50).
@@ -816,6 +839,11 @@ impl Gh {
 
     pub async fn reopen_issue(&self, full: &str, number: u32) -> Result<(), String> {
         self.write("PATCH", &format!("/repos/{full}/issues/{number}"), json!({ "state": "open" })).await.map(|_| ())
+    }
+
+    /// Closes (`open` false) or reopens a pull request, through the issues API like an issue.
+    pub async fn set_pull_open(&self, full: &str, number: u32, open: bool) -> Result<(), String> {
+        self.write("PATCH", &format!("/repos/{full}/issues/{number}"), json!({ "state": if open { "open" } else { "closed" } })).await.map(|_| ())
     }
 
     pub async fn close_issue(&self, full: &str, number: u32) -> Result<(), String> {
@@ -1041,6 +1069,8 @@ pub enum Write {
     Pull(NewPull),
     CloseIssue(u32),
     ReopenIssue(u32),
+    /// Closing (`open` false) or reopening a pull request without merging it.
+    SetPullOpen { number: u32, open: bool },
     Merge { number: u32, method: &'static str },
     /// A comment on an issue or a pull request.
     Comment { number: u32, body: String },
@@ -1054,7 +1084,7 @@ impl Write {
     /// The issue or pull request the write is about, when there is one.
     pub fn number(&self) -> Option<u32> {
         match self {
-            Write::CloseIssue(n) | Write::ReopenIssue(n) | Write::Merge { number: n, .. } | Write::Comment { number: n, .. } | Write::Review { number: n, .. } | Write::LineComment { number: n, .. } => Some(*n),
+            Write::CloseIssue(n) | Write::ReopenIssue(n) | Write::SetPullOpen { number: n, .. } | Write::Merge { number: n, .. } | Write::Comment { number: n, .. } | Write::Review { number: n, .. } | Write::LineComment { number: n, .. } => Some(*n),
             Write::Issue { .. } | Write::Branch { .. } | Write::Pull(_) => None,
         }
     }
@@ -1069,6 +1099,8 @@ pub enum Done {
     Closed(u32),
     Reopened(u32),
     Merged(u32),
+    /// A pull request closed (`false`) or reopened (`true`).
+    PullOpen(u32, bool),
     Commented(u32),
     Reviewed(u32, Verdict),
     LineCommented(u32),
@@ -1085,6 +1117,7 @@ pub async fn run(cfg: &Config, full: &str, w: Write) -> Result<Done, String> {
         Write::Comment { number, body } => gh.comment(full, number, &body).await.map(|_| Done::Commented(number)),
         Write::Review { number, verdict, body } => gh.review(full, number, verdict.event(), &body).await.map(|_| Done::Reviewed(number, verdict)),
         Write::LineComment { number, comment } => gh.line_comment(full, number, &comment).await.map(|_| Done::LineCommented(number)),
+        Write::SetPullOpen { number, open } => gh.set_pull_open(full, number, open).await.map(|_| Done::PullOpen(number, open)),
         Write::Merge { number, method } => gh.merge_pull(full, number, method).await.map(|_| Done::Merged(number)),
     }
 }
@@ -1122,6 +1155,23 @@ pub async fn set_star(cfg: &Config, full: &str, on: bool) -> Result<(), String> 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn check_runs_read_as_passed_failed_running_or_skipped() {
+        use crate::thread::CheckState::*;
+        let v = serde_json::json!({"check_runs": [
+            {"name": "test", "status": "completed", "conclusion": "success", "html_url": "u1"},
+            {"name": "lint", "status": "completed", "conclusion": "failure"},
+            {"name": "build", "status": "in_progress", "conclusion": null},
+            {"name": "deploy", "status": "completed", "conclusion": "skipped"},
+        ]});
+        let list = super::parse_check_runs(&v);
+        let states: Vec<_> = list.iter().map(|c| c.state).collect();
+        assert_eq!(states, vec![Passed, Failed, Running, Other]);
+        assert_eq!(list[0].url, "u1");
+        assert_eq!(crate::thread::checks_summary(&list), "1 failed, 1 running, 1 passed, 1 skipped");
+        assert_eq!(crate::thread::checks_summary(&[]), "No checks on the last commit.");
+    }
+
     #[test]
     fn line_comments_read_their_side_and_skip_outdated_ones() {
         let v = serde_json::json!({"path": "src/a.rs", "line": 7, "side": "LEFT", "user": {"login": "bob"}, "body": "hm", "created_at": "2026-01-02T03:04:05Z"});
