@@ -141,7 +141,9 @@ fn see_all(k: &Kit, label: &str, page: Page) -> El {
 }
 
 fn compact_repo(k: &Kit, i: usize, r: &Repo, me: &str, now: i64) -> El {
+    let shown = if r.owner.eq_ignore_ascii_case(me) { &r.name } else { &r.full_name };
     row().w_full().px(16.0).py(10.0).gap(12.0).center_y().hover(k.c.hover).press(k.c.pressed)
+        .role("link").label(format!("Open {shown}"))
         .on_press(move |s: &mut App| s.open(i)).key(format!("recent-{}", r.full_name))
         .child(ui::avatar(k, &r.name, r.hue, 28.0))
         .child(col().grow(1.0).shrink().gap(2.0)
@@ -183,7 +185,7 @@ pub fn repos(s: &App, k: &Kit) -> El {
         .child(ui::ico(&icons::SORT, 14.0, k.c.icon_muted))
         .child(SegmentedControl::new(&RepoSort::LABELS, Some(s.sort.index())).label("Sort by").fit()
             .on_pick(|s: &mut App, i, _| s.sort = RepoSort::from_index(i)).build(k).key("sort"));
-    let search = TextInput::new(&s.search).placeholder("Search by name, description or topic…").leading_icon(k.glyph.search)
+    let search = TextInput::new(&s.search).label("Search repositories").placeholder("Search by name, description or topic…").leading_icon(k.glyph.search)
         .on_edit(|s: &mut App| &mut s.search).build(k).key("search").grow(1.0).min_w(200.0);
     let seg = SegmentedControl::new(&RepoFilter::LABELS, Some(s.filter.index())).label("Filter").fit()
         .on_pick(|s: &mut App, i, _| s.filter = RepoFilter::from_index(i)).build(k).key("filter");
@@ -284,8 +286,10 @@ fn repo_card(k: &Kit, i: usize, r: &Repo, show_owner: bool, pinned: bool, now: i
     if show_owner {
         title = title.child(text(format!("{} /", r.owner)).font(k.ty.body).color(k.c.text_muted));
     }
+    let open_label = format!("Open {}", if show_owner { &r.full_name } else { &r.name });
     let mut title = title
         .child(text(r.name.clone()).font(k.ty.body_medium).color(k.c.text_accent)
+            .role("link").label(open_label)
             .on_press(move |s: &mut App| s.open(i)).key(format!("open-{}", r.full_name)))
         .child(vis);
     if r.fork {
