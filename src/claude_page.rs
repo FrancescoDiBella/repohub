@@ -86,7 +86,7 @@ pub fn claude_tab(s: &App, k: &Kit, i: usize) -> El {
             }
         }
     }
-    let convo = col().key("claude-chat").w_full().max_h(560.0).padding(16.0).radius(k.radius.lg).fill(k.c.bg_base).border(1.0, k.c.border_weak)
+    let convo = col().key("claude-chat").w_full().max_h(if s.compact { (s.backdrop_size[1] - 320.0).clamp(240.0, 560.0) } else { 560.0 }).padding(16.0).radius(k.radius.lg).fill(k.c.bg_base).border(1.0, k.c.border_weak)
         .scroll(ScrollSpec { stick_bottom: true }).child(list);
     let convo = rune_kit::ScrollBar::scroll_bar(convo, k);
     // The composer: Enter sends, Shift+Enter starts a new line.

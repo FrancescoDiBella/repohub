@@ -104,6 +104,9 @@ The sections are **Added**, **Changed** and **Fixed**.
 - A new look, with a more readable layout.
 
 ### Fixed
+- On a phone: a repository's buttons (Open on GitHub, Fork, Pin, Star) wrap instead of running off
+  the screen, the Changes tab's commit note wraps, the Terminal's buttons go under its folder, and
+  the Terminal and the Claude chat are sized to the screen.
 - Long pages, the command palette and the Claude chat show a scroll bar again, so you can see
   where you are (it follows the system's *Show scroll bars* setting).
 - macOS: coloured parts of the window no longer flicker when you type or move the pointer. The
