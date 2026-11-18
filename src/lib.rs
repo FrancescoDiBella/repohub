@@ -2897,6 +2897,19 @@ fn init() -> App {
     if let Some(t) = arg("tab").and_then(|t| RepoTab::parse(&t)) {
         s.tab = t;
     }
+    // For headless stills the clone's changes are read before the first frame (the background
+    // read would land after the picture is taken).
+    #[cfg(not(target_arch = "wasm32"))]
+    if s.tab == RepoTab::Changes
+        && let Page::Repo(full) = &s.page
+        && let Some(root) = clones_shim::find(full)
+        && let Ok(c) = local::changes(&root)
+    {
+        s.diff_of = Some(diffs::DiffOf::Local(full.clone()));
+        s.diff.set_files(diffs::local_files(&c));
+        s.changes = Some(c);
+        s.diff_load = Some(Load::Ready(()));
+    }
     // `-- thread 14` opens the conversation of that pull request or issue (for headless stills).
     if let Some(number) = arg("thread").and_then(|n| n.parse::<u32>().ok()) {
         if let Some(repo) = s.data.pulls.iter().find(|p| p.number == number).map(|p| p.repo.clone()) {
@@ -2904,6 +2917,19 @@ fn init() -> App {
         } else if let Some(repo) = s.data.issues.iter().find(|x| x.number == number).map(|x| x.repo.clone()) {
             s.open_thread(&repo, number, false);
         }
+    }
+    // `-- section appearance` picks the Settings page's section.
+    if let Some(sec) = arg("section") {
+        if let Some(n) = state::SettingsSection::LABELS.iter().position(|l| l.eq_ignore_ascii_case(&sec)) {
+            s.settings_section = state::SettingsSection::ALL[n];
+        }
+    }
+    // `-- diff 14` also opens that pull request's changes.
+    if let Some(number) = arg("diff").and_then(|n| n.parse::<u32>().ok())
+        && let Some(repo) = s.data.pulls.iter().find(|p| p.number == number).map(|p| p.repo.clone())
+    {
+        s.open_thread(&repo, number, true);
+        s.open_pull_diff(repo, number);
     }
     // `-- board Name` opens a drawing of that section (for headless stills); `zoom 2` zooms it.
     #[cfg(not(target_arch = "wasm32"))]

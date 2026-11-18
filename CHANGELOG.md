@@ -86,6 +86,9 @@ The sections are **Added**, **Changed** and **Fixed**.
 - Docker image for amd64 and arm64.
 
 ### Changed
+- New README pictures (a pull request with its checks and diff, the Changes tab, the theme
+  gallery, the phone layout), made by `scripts/screenshots.sh`; a feature overview and contents at
+  the top of the README, and what the server forwards brought up to date.
 - Settings is split into sections, one on screen at a time: **Account**, **Appearance**,
   **Assistants**, **Plugins** and **About** (version, updates, keyboard shortcuts). The
   connection's environment variables and files are under **Show details**. The phone's tabs say
