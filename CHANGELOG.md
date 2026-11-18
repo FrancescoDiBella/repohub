@@ -9,6 +9,10 @@ The sections are **Added**, **Changed** and **Fixed**.
 
 ## Unreleased
 
+## 0.1.0 — 2026-11-18
+
+The first numbered release.
+
 ### Added
 - **Update channel** in Settings → About: **Stable** (numbered releases, the default for a
   numbered build) or **Preview** (the Latest build, as before). The version shows there and in
