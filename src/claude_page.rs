@@ -88,6 +88,7 @@ pub fn claude_tab(s: &App, k: &Kit, i: usize) -> El {
     }
     let convo = col().key("claude-chat").w_full().max_h(560.0).padding(16.0).radius(k.radius.lg).fill(k.c.bg_base).border(1.0, k.c.border_weak)
         .scroll(ScrollSpec { stick_bottom: true }).child(list);
+    let convo = rune_kit::ScrollBar::scroll_bar(convo, k);
     // The composer: Enter sends, Shift+Enter starts a new line.
     let field = TextArea::new(&s.claude_prompt).placeholder(if chat.is_some_and(|c| c.session.is_some()) { "Reply to Claude" } else { "Ask Claude to explain, review or change something" })
         .label("Message to Claude").auto_grow(2, 8)

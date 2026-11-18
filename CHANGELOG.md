@@ -100,6 +100,8 @@ The sections are **Added**, **Changed** and **Fixed**.
 - A new look, with a more readable layout.
 
 ### Fixed
+- Long pages, the command palette and the Claude chat show a scroll bar again, so you can see
+  where you are (it follows the system's *Show scroll bars* setting).
 - Every action now says how it went: **Copy screen** in the Terminal confirms the copy, and
   Commit, Push or Pull on a repository with no local copy says so instead of doing nothing.
 - The command palette keeps the highlighted result in sight when you move past the first
