@@ -101,6 +101,9 @@ public class BackendTest {
         assertTrue(GitHubPaths.allowed("POST", "/repos/o/r/git/refs"));
         assertTrue(GitHubPaths.allowed("POST", "/repos/o/r/issues/7/comments"));
         assertTrue(GitHubPaths.allowed("POST", "/repos/o/r/pulls/12/reviews"));
+        assertTrue(GitHubPaths.allowed("GET", "/repos/o/r/pulls/12/comments"));
+        assertTrue(GitHubPaths.allowed("POST", "/repos/o/r/pulls/12/comments"));
+        assertFalse(GitHubPaths.allowed("POST", "/repos/o/r/pulls/12/comments/3/replies"));
         assertFalse(GitHubPaths.allowed("POST", "/repos/o/r/pulls/12/merge"));
         assertFalse(GitHubPaths.allowed("POST", "/repos/o/r/issues/x/comments"));
         assertFalse(GitHubPaths.allowed("POST", "/repos/o/r/pulls/12/reviews/3/dismissals"));

@@ -48,6 +48,7 @@ mod plugins;
 mod plugins_page;
 mod prefs;
 mod state;
+mod review;
 mod terminal;
 mod thread;
 mod thread_page;
@@ -200,6 +201,8 @@ pub struct App {
     settings_section: state::SettingsSection,
     /// The connection's details (environment variables, files) are shown in Settings.
     connection_details: bool,
+    /// The line comments of the pull request whose diff is open, and the one being written.
+    pull_review: Option<review::Review>,
     /// Issues being reopened with Undo, to put back in the list when GitHub confirms.
     reopening: Vec<model::Issue>,
     /// What the Pull requests and the Issues pages are narrowed to.
@@ -1501,6 +1504,7 @@ impl App {
             Ok(files) => {
                 self.pull_diff.set_files(diffs::pull_files(&files));
                 self.pull_diff_load = Some(Load::Ready(()));
+                self.place_line_comments();
             }
             Err(e) => self.pull_diff_load = Some(Load::Failed(e)),
         }
@@ -1514,11 +1518,13 @@ impl App {
         self.pull_diff_of = Some(key.clone());
         self.pull_diff_load = Some(Load::Loading);
         self.pull_diff.set_files(Vec::new());
+        self.pull_review = Some(review::Review::default());
         if self.data.sample {
             self.pull_diff.set_files(diffs::pull_files(&diffs::sample_pull_files()));
             self.pull_diff_load = Some(Load::Ready(()));
             return;
         }
+        self.load_line_comments();
         let Some(h) = self.handle.clone() else {
             self.pull_diff_load = Some(Load::Failed("The app isn't ready to load this diff yet: try again in a moment.".into()));
             return;
@@ -1536,7 +1542,84 @@ impl App {
         }
         self.pull_diff_of = None;
         self.pull_diff_load = None;
+        self.pull_review = None;
         self.pull_diff.set_files(Vec::new());
+    }
+
+    /// Reads the comments on the open diff's lines (again), with the commit it shows.
+    fn load_line_comments(&mut self) {
+        let Some((full, number)) = self.pull_diff_of.clone() else { return };
+        let Some(h) = self.handle.clone() else { return };
+        let cfg = self.cfg.clone();
+        let epoch = self.load_gen;
+        let key = (full.clone(), number);
+        net::spawn(h, move || async move { github::load_line_comments(&cfg, &full, number).await }, move |s: &mut App, r| {
+            // Another account or another diff since: not for this one.
+            if s.load_gen != epoch || s.pull_diff_of.as_ref() != Some(&key) {
+                return;
+            }
+            match r {
+                Ok((head, comments)) => {
+                    if let Some(rv) = s.pull_review.as_mut() {
+                        rv.head = head;
+                        rv.comments = comments;
+                    }
+                    s.place_line_comments();
+                }
+                // The diff still shows; only its comments are missing.
+                Err(e) => s.notify_problem(format!("The comments on this pull request's lines couldn't load: {e}")),
+            }
+        });
+    }
+
+    /// Puts the line comments and the one being written under their lines.
+    fn place_line_comments(&mut self) {
+        let list = self.pull_review.as_ref().map(|r| r.annotations(self.pull_diff.files())).unwrap_or_default();
+        self.pull_diff.set_annotations(list);
+    }
+
+    /// The "+" by a line of the pull request's diff: a box to write a comment there.
+    fn start_line_comment(&mut self, range: rune_kit::diff::LineRange) {
+        let files = self.pull_diff.files().to_vec();
+        if self.pull_review.get_or_insert_with(review::Review::default).start(&files, range) {
+            self.place_line_comments();
+        }
+    }
+
+    fn cancel_line_comment(&mut self) {
+        if let Some(r) = self.pull_review.as_mut() {
+            r.draft = None;
+        }
+        self.place_line_comments();
+    }
+
+    /// Sends the comment being written on the diff's lines.
+    fn send_line_comment(&mut self) {
+        if actions::blocked(self).is_some() {
+            return;
+        }
+        let Some((full, number)) = self.pull_diff_of.clone() else { return };
+        let Some(r) = self.pull_review.as_mut() else { return };
+        let head = r.head.clone();
+        let Some(d) = r.draft.as_mut() else { return };
+        let body = d.text.text.trim().to_owned();
+        if body.is_empty() || d.sending {
+            return;
+        }
+        if head.is_empty() {
+            self.notify_problem("The pull request's commit isn't known yet: try again in a moment.");
+            return;
+        }
+        d.sending = true;
+        let comment = github::NewLineComment {
+            body,
+            commit: head,
+            path: d.path.clone(),
+            line: d.end.line,
+            side: review::side_word(d.end.side),
+            start: (d.start != d.end).then(|| (d.start.line, review::side_word(d.start.side))),
+        };
+        self.write(&full, github::Write::LineComment { number, comment });
     }
 
     /// Opens `path` in repository `i`'s local clone: a folder lists it, a file shows it.
@@ -1739,6 +1822,11 @@ impl App {
             if let Some(t) = s.thread.as_mut().filter(|t| t.is(&full_cb, number)) {
                 t.sending = false;
             }
+            if s.pull_diff_of.as_ref().is_some_and(|(f, n)| *n == number && same_repo(f, &full_cb))
+                && let Some(d) = s.pull_review.as_mut().and_then(|r| r.draft.as_mut())
+            {
+                d.sending = false;
+            }
             match r {
                 Ok(done) => s.apply_done(&full_cb, done),
                 Err(e) => s.notify_problem(e),
@@ -1844,6 +1932,16 @@ impl App {
                     p.comments += 1;
                 }
                 self.notify(format!("Comment added to #{n}"));
+            }
+            github::Done::LineCommented(n) => {
+                if self.pull_diff_of.as_ref().is_some_and(|(f, num)| *num == n && same_repo(f, &full_name)) {
+                    if let Some(r) = self.pull_review.as_mut() {
+                        r.draft = None;
+                    }
+                    self.place_line_comments();
+                    self.load_line_comments();
+                }
+                self.notify(format!("Comment added to pull request #{n}"));
             }
             github::Done::Reviewed(n, verdict) => self.notify(match verdict {
                 thread::Verdict::Approved => format!("Approved pull request #{n}"),
@@ -2689,6 +2787,7 @@ fn init() -> App {
         confirm_merge: None,
         settings_section: state::SettingsSection::Account,
         connection_details: false,
+        pull_review: None,
         reopening: Vec::new(),
         inbox: None,
         inbox_busy: std::collections::HashSet::new(),

@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 use crate::config::Config;
 use crate::net::{self, Resp, Transport};
 use crate::inbox::{Notification, Subject};
+use crate::review::LineComment;
 use crate::thread::{Entry, Standing, Thread, Verdict};
 use crate::model::{Checks, Commit, Data, Detail, Issue, Profile, Pull, PullState, Repo, Run, duration, hex_hue, lang_hue, parse_iso};
 
@@ -254,6 +255,20 @@ pub fn parse_notification(v: &Value) -> Option<Notification> {
         _ => format!("https://github.com/{repo}"),
     };
     Some(Notification { id, repo, title: s(subject, "title"), subject: kind, number, reason: s(v, "reason"), updated_at: parse_iso(&s(v, "updated_at")).unwrap_or(0), url: page })
+}
+
+/// One of GitHub's comments on a diff line; `None` for one that isn't on a line any more.
+pub fn parse_line_comment(v: &Value) -> Option<LineComment> {
+    let line = v.get("line").and_then(Value::as_u64)? as u32;
+    let side = if s(v, "side") == "LEFT" { rune_kit::diff::Side::Old } else { rune_kit::diff::Side::New };
+    Some(LineComment {
+        path: s(v, "path"),
+        line,
+        side,
+        author: v.get("user").map(|u| s(u, "login")).filter(|l| !l.is_empty()).unwrap_or_else(|| "ghost".into()),
+        body: s(v, "body"),
+        at: parse_iso(&s(v, "created_at")).unwrap_or(0),
+    })
 }
 
 fn labels_of(v: &Value) -> Vec<(String, f32)> {
@@ -767,6 +782,25 @@ impl Gh {
         }
     }
 
+    /// The commit pull request `number` shows, and the comments on lines of its diff (the
+    /// first 100). A comment on a line that changed since (`line` is null) is left out.
+    pub async fn line_comments(&self, full: &str, number: u32) -> Result<(String, Vec<LineComment>), String> {
+        let detail = self.get(&format!("/repos/{full}/pulls/{number}")).await?;
+        let head = detail.get("head").map(|h| s(h, "sha")).unwrap_or_default();
+        let list = self.get(&format!("/repos/{full}/pulls/{number}/comments?per_page=100")).await?;
+        Ok((head, list.as_array().into_iter().flatten().filter_map(parse_line_comment).collect()))
+    }
+
+    /// Writes a comment on lines of a pull request's diff.
+    pub async fn line_comment(&self, full: &str, number: u32, c: &NewLineComment) -> Result<(), String> {
+        let mut v = json!({ "body": c.body, "commit_id": c.commit, "path": c.path, "line": c.line, "side": c.side });
+        if let Some((line, side)) = &c.start {
+            v["start_line"] = json!(line);
+            v["start_side"] = json!(side);
+        }
+        self.write("POST", &format!("/repos/{full}/pulls/{number}/comments"), v).await.map(|_| ())
+    }
+
     pub async fn comment(&self, full: &str, number: u32, body: &str) -> Result<(), String> {
         self.write("POST", &format!("/repos/{full}/issues/{number}/comments"), json!({ "body": body })).await.map(|_| ())
     }
@@ -952,6 +986,10 @@ pub async fn mark_read(cfg: &Config, id: &str) -> Result<(), String> {
     Gh::new(cfg).mark_read(id).await
 }
 
+pub async fn load_line_comments(cfg: &Config, full: &str, number: u32) -> Result<(String, Vec<LineComment>), String> {
+    Gh::new(cfg).line_comments(full, number).await
+}
+
 pub async fn load_thread(cfg: &Config, full: &str, number: u32) -> Result<Thread, String> {
     Gh::new(cfg).thread(full, number).await
 }
@@ -981,6 +1019,20 @@ pub struct NewPull {
     pub draft: bool,
 }
 
+/// A comment to write on lines of a pull request's diff.
+#[derive(Clone, Debug)]
+pub struct NewLineComment {
+    pub body: String,
+    /// The commit the diff shows.
+    pub commit: String,
+    pub path: String,
+    pub line: u32,
+    /// `RIGHT` (the new side) or `LEFT`.
+    pub side: &'static str,
+    /// Where a comment on several lines starts.
+    pub start: Option<(u32, &'static str)>,
+}
+
 /// One of the writes RepoHub makes on GitHub. Running it returns a message for the toast.
 #[derive(Clone, Debug)]
 pub enum Write {
@@ -994,13 +1046,15 @@ pub enum Write {
     Comment { number: u32, body: String },
     /// A review of a pull request; `body` may be empty for an approval.
     Review { number: u32, verdict: Verdict, body: String },
+    /// A comment on lines of a pull request's diff.
+    LineComment { number: u32, comment: NewLineComment },
 }
 
 impl Write {
     /// The issue or pull request the write is about, when there is one.
     pub fn number(&self) -> Option<u32> {
         match self {
-            Write::CloseIssue(n) | Write::ReopenIssue(n) | Write::Merge { number: n, .. } | Write::Comment { number: n, .. } | Write::Review { number: n, .. } => Some(*n),
+            Write::CloseIssue(n) | Write::ReopenIssue(n) | Write::Merge { number: n, .. } | Write::Comment { number: n, .. } | Write::Review { number: n, .. } | Write::LineComment { number: n, .. } => Some(*n),
             Write::Issue { .. } | Write::Branch { .. } | Write::Pull(_) => None,
         }
     }
@@ -1017,6 +1071,7 @@ pub enum Done {
     Merged(u32),
     Commented(u32),
     Reviewed(u32, Verdict),
+    LineCommented(u32),
 }
 
 pub async fn run(cfg: &Config, full: &str, w: Write) -> Result<Done, String> {
@@ -1029,6 +1084,7 @@ pub async fn run(cfg: &Config, full: &str, w: Write) -> Result<Done, String> {
         Write::ReopenIssue(n) => gh.reopen_issue(full, n).await.map(|_| Done::Reopened(n)),
         Write::Comment { number, body } => gh.comment(full, number, &body).await.map(|_| Done::Commented(number)),
         Write::Review { number, verdict, body } => gh.review(full, number, verdict.event(), &body).await.map(|_| Done::Reviewed(number, verdict)),
+        Write::LineComment { number, comment } => gh.line_comment(full, number, &comment).await.map(|_| Done::LineCommented(number)),
         Write::Merge { number, method } => gh.merge_pull(full, number, method).await.map(|_| Done::Merged(number)),
     }
 }
