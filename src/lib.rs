@@ -243,6 +243,18 @@ pub struct App {
     /// Rows and columns the terminal area fits.
     term_grid: (u16, u16),
     clone_path: TextEdit,
+    /// Cached local clone path per repository (`full_name`), avoiding filesystem/git probes in `view()`.
+    clone_dirs: std::cell::RefCell<HashMap<String, Option<std::path::PathBuf>>>,
+    /// Cached lookalike folder per repository (`full_name`), avoiding `git remote -v` probes in `view()`.
+    lookalike_dirs: std::cell::RefCell<HashMap<String, Option<std::path::PathBuf>>>,
+    default_clone_parent: std::path::PathBuf,
+    plugins_folder: std::path::PathBuf,
+    /// How many cards `Page::Repos` renders before **Show more**.
+    repos_limit: usize,
+    /// Monotonic counter bumped when `data` or repository metadata mutates.
+    data_gen: u64,
+    /// Cached filtered/sorted repository indices, pinned indices, and organization counts.
+    repo_cache: std::cell::RefCell<RepoCache>,
     // The account form in Settings (desktop).
     acct_user: TextEdit,
     acct_token: TextEdit,
@@ -283,6 +295,18 @@ pub struct App {
     #[cfg(not(target_arch = "wasm32"))]
     tray: Option<tray::Native>,
     tray_menu: Vec<tray::Entry>,
+}
+
+#[derive(Default)]
+struct RepoCache {
+    orgs_stamp: Option<u64>,
+    orgs: Vec<(String, usize)>,
+    mine_count: usize,
+    pins_stamp: Option<u64>,
+    pinned: Vec<usize>,
+    pinned_set: std::collections::HashSet<usize>,
+    shown_stamp: Option<u64>,
+    shown: Vec<usize>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -889,6 +913,9 @@ impl App {
         self.pull_filter.clear();
         self.issue_filter.clear();
         self.data = Data::default();
+        self.data_gen = self.data_gen.wrapping_add(1);
+        self.repos_limit = pages::REPOS_PAGE;
+        self.refresh_clone_cache();
         self.tab = RepoTab::Code;
         self.plugin_tab = None;
         self.pending_place = None;
@@ -995,6 +1022,7 @@ impl App {
         } else {
             self.now = net::now();
             self.data = Data::sample();
+            self.data_gen = self.data_gen.wrapping_add(1);
             self.set_status(Status::Sample);
             self.notify("Signed out. Showing the sample data.");
         }
@@ -1043,6 +1071,7 @@ impl App {
                 } else {
                     s.now = net::now();
                     s.data = Data::sample();
+                    s.data_gen = s.data_gen.wrapping_add(1);
                     s.set_status(Status::Sample);
                     s.notify("Signed out. Showing the sample data.");
                 }
@@ -1254,6 +1283,8 @@ impl App {
                     }).collect();
                 self.branches.clear();
                 self.data = d;
+                self.data_gen = self.data_gen.wrapping_add(1);
+                self.refresh_clone_cache();
                 self.details = kept;
                 self.loaded_at = Some(net::now());
                 self.loaded_clock = Some(self.clock);
@@ -1358,7 +1389,7 @@ impl App {
     fn load_local(&mut self, i: usize, again: bool) {
         let Some(r) = self.data.repos.get(i) else { return };
         let full = r.full_name.clone();
-        let Some(dir) = clones_shim::find(&full) else { return };
+        let Some(dir) = self.known_clone(&full) else { return };
         if !again && matches!(self.local.get(&full), Some(Load::Ready(_) | Load::Loading)) {
             return;
         }
@@ -1378,7 +1409,7 @@ impl App {
     fn load_changes(&mut self, i: usize) {
         let Some(r) = self.data.repos.get(i) else { return };
         let full = r.full_name.clone();
-        let Some(root) = clones_shim::find(&full) else { return };
+        let Some(root) = self.known_clone(&full) else { return };
         let Some(h) = self.handle.clone() else { return };
         if self.diff_of.as_ref() != Some(&diffs::DiffOf::Local(full.clone())) {
             self.diff.set_files(Vec::new());
@@ -1413,7 +1444,7 @@ impl App {
         }
         let Some(r) = self.data.repos.get(i) else { return };
         let full = r.full_name.clone();
-        let Some(root) = clones_shim::find(&full) else {
+        let Some(root) = self.known_clone(&full) else {
             // Say why nothing happens rather than doing nothing.
             self.notify_problem(format!("There's no local copy of {full} on this computer: pick its folder in the Terminal tab, or clone it there."));
             return;
@@ -1463,7 +1494,7 @@ impl App {
     fn preview_merge(&mut self, i: usize, branch: String) {
         let Some(r) = self.data.repos.get(i) else { return };
         let full = r.full_name.clone();
-        let Some(root) = clones_shim::find(&full) else { return };
+        let Some(root) = self.known_clone(&full) else { return };
         let Some(h) = self.handle.clone() else { return };
         let key = diffs::DiffOf::Merge(full, branch.clone());
         self.diff_of = Some(key.clone());
@@ -1629,7 +1660,8 @@ impl App {
             self.local_file = None;
             return;
         }
-        let Some(root) = self.data.repos.get(i).and_then(|r| clones_shim::find(&r.full_name)) else { return };
+        let Some(full) = self.data.repos.get(i).map(|r| r.full_name.clone()) else { return };
+        let Some(root) = self.known_clone(&full) else { return };
         let Some(h) = self.handle.clone() else { return };
         self.local_file = Some((path.clone(), Load::Loading));
         let p = path.clone();
@@ -1842,6 +1874,7 @@ impl App {
         };
         let sent = matches!(done, github::Done::Commented(_) | github::Done::Reviewed(..));
         self.apply_done_inner(repo, done);
+        self.data_gen = self.data_gen.wrapping_add(1);
         // The conversation on screen shows the change: read it again.
         if let Some(n) = about
             && let Some(t) = self.thread.as_mut().filter(|t| t.is(repo, n))
@@ -2023,6 +2056,7 @@ impl App {
                             s.data.pulls.push(p);
                         }
                     }
+                    s.data_gen = s.data_gen.wrapping_add(1);
                     s.sync_tray();
                 }
                 Err(e) => {
@@ -2065,6 +2099,7 @@ impl App {
                         }
                     }
                     s.data.issues.sort_by_key(|i| std::cmp::Reverse(i.created_at));
+                    s.data_gen = s.data_gen.wrapping_add(1);
                     s.sync_tray();
                 }
                 Err(e) => {
@@ -2080,10 +2115,13 @@ impl App {
             self.notify_problem("Writes are disabled on this server (set REPOHUB_ALLOW_WRITES=true).");
             return;
         }
-        let Some(r) = self.data.repos.get_mut(i) else { return };
-        let on = !r.starred;
-        r.starred = on;
-        r.stars = if on { r.stars + 1 } else { r.stars.saturating_sub(1) };
+        let Some((on, full)) = self.data.repos.get_mut(i).map(|r| {
+            let on = !r.starred;
+            r.starred = on;
+            r.stars = if on { r.stars + 1 } else { r.stars.saturating_sub(1) };
+            (on, r.full_name.clone())
+        }) else { return };
+        self.data_gen = self.data_gen.wrapping_add(1);
         if !self.cfg.live() || self.cfg.token.is_none() {
             if self.cfg.live() {
                 self.notify("Star changed here only: GITHUB_TOKEN is needed to save it on GitHub.");
@@ -2091,7 +2129,7 @@ impl App {
             return;
         }
         if let Some(h) = self.handle.clone() {
-            let (cfg, full) = (self.cfg.clone(), r.full_name.clone());
+            let cfg = self.cfg.clone();
             let key = full.clone();
             let epoch = self.load_gen;
             net::spawn(h, move || async move { github::set_star(&cfg, &full, on).await }, move |s: &mut App, res| {
@@ -2103,6 +2141,7 @@ impl App {
                         r.starred = !on;
                         r.stars = if on { r.stars.saturating_sub(1) } else { r.stars + 1 };
                     }
+                    s.data_gen = s.data_gen.wrapping_add(1);
                     s.notify_problem(format!("Couldn't change the star: {e}"));
                 }
             });
@@ -2381,7 +2420,7 @@ impl App {
         let prompt = prompt.trim().to_owned();
         let Some(r) = self.data.repos.get(i) else { return };
         let full = r.full_name.clone();
-        let Some(dir) = clones_shim::find(&full) else { return };
+        let Some(dir) = self.known_clone(&full) else { return };
         let Some(h) = self.handle.clone() else { return };
         let chat = self.chats.entry(full.clone()).or_default();
         if prompt.is_empty() || chat.run.is_busy() {
@@ -2622,7 +2661,7 @@ impl App {
         let running = self.data.repos.get(i).and_then(|r| self.terms.get(&r.full_name)).is_some_and(|t| t.is_running());
         if running {
             self.term_type(i, &line);
-        } else if let Some(dir) = self.data.repos.get(i).and_then(|r| clones_shim::find(&r.full_name)) {
+        } else if let Some(dir) = self.data.repos.get(i).map(|r| r.full_name.clone()).and_then(|full| self.known_clone(&full)) {
             if let Some(r) = self.data.repos.get(i) {
                 self.terms.remove(&r.full_name);
             }
@@ -2634,11 +2673,11 @@ impl App {
 
     /// Opens the terminal in the repository's known clone, if any.
     fn open_terminal(&mut self, i: usize) {
-        let Some(r) = self.data.repos.get(i) else { return };
-        if self.terms.get(&r.full_name).is_some_and(|t| t.is_running()) {
+        let Some(full) = self.data.repos.get(i).map(|r| r.full_name.clone()) else { return };
+        if self.terms.get(&full).is_some_and(|t| t.is_running()) {
             return;
         }
-        if let Some(dir) = clones_shim::find(&r.full_name) {
+        if let Some(dir) = self.known_clone(&full) {
             self.start_terminal(i, dir, None);
         }
     }
@@ -2648,11 +2687,14 @@ impl App {
     /// user says it is.
     fn use_lookalike(&mut self, i: usize) {
         let Some(full) = self.data.repos.get(i).map(|r| r.full_name.clone()) else { return };
-        let Some(dir) = clones_shim::lookalike(&full) else { return };
+        let Some(dir) = self.lookalike_clone(&full) else { return };
         match clones_shim::remember(&full, &dir) {
             Ok(()) => {
+                self.clone_dirs.borrow_mut().insert(full.clone(), Some(dir.clone()));
+                self.lookalike_dirs.borrow_mut().insert(full.clone(), None);
                 self.term_error = None;
                 self.notify(format!("Using {} for {full}", dir.display()));
+                self.load_local(i, true);
             }
             Err(e) => self.term_error = Some(e),
         }
@@ -2670,8 +2712,11 @@ impl App {
             self.term_error = Some(e);
             return;
         }
+        self.clone_dirs.borrow_mut().insert(full.clone(), Some(dir.clone()));
+        self.lookalike_dirs.borrow_mut().insert(full.clone(), None);
         self.clone_path.clear();
         self.terms.remove(&full);
+        self.load_local(i, true);
         // From the Claude tab the folder is all that's needed; the Terminal tab opens a shell there.
         if self.tab == RepoTab::Terminal {
             self.start_terminal(i, dir, None);
@@ -2682,7 +2727,7 @@ impl App {
     fn clone_repo(&mut self, i: usize) {
         let Some(r) = self.data.repos.get(i) else { return };
         let (full, name, url) = (r.full_name.clone(), r.name.clone(), r.url.clone());
-        let parent = clones_shim::default_parent();
+        let parent = self.default_clone_parent.clone();
         if let Err(e) = std::fs::create_dir_all(&parent) {
             self.term_error = Some(format!("Couldn't create {}: {e}", parent.display()));
             return;
@@ -2694,7 +2739,10 @@ impl App {
                 return;
             }
         };
-        let _ = clones_shim::remember(&full, &parent.join(&name));
+        let target = parent.join(&name);
+        let _ = clones_shim::remember(&full, &target);
+        self.clone_dirs.borrow_mut().insert(full.clone(), Some(target));
+        self.lookalike_dirs.borrow_mut().insert(full.clone(), None);
         self.terms.remove(&full);
         // The clone runs in the terminal, so show it.
         if self.tab != RepoTab::Terminal {
@@ -2834,6 +2882,13 @@ fn init() -> App {
         term_cell: [7.8, 17.0],
         term_grid: (24, 100),
         clone_path: TextEdit::new(""),
+        clone_dirs: std::cell::RefCell::new(HashMap::new()),
+        lookalike_dirs: std::cell::RefCell::new(HashMap::new()),
+        default_clone_parent: clones_shim::default_parent(),
+        plugins_folder: plugins_folder_init(),
+        repos_limit: pages::REPOS_PAGE,
+        data_gen: 0,
+        repo_cache: std::cell::RefCell::new(RepoCache::default()),
         acct_user: TextEdit::new(cfg.user.clone().unwrap_or_default()),
         acct_token: TextEdit::new(""),
         acct_error: None,
@@ -2990,6 +3045,24 @@ fn kit(dark: bool) -> Kit {
     k
 }
 
+fn plugins_folder_init() -> std::path::PathBuf {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        plugins::folder()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        std::path::PathBuf::new()
+    }
+}
+
+fn hash_stamp(f: impl FnOnce(&mut std::collections::hash_map::DefaultHasher)) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    f(&mut h);
+    h.finish()
+}
+
 fn nav(s: &App, k: &Kit, label: &str, icon: &'static rune::Icon, page: Page, badge: Option<String>) -> El {
     let selected = s.page == page || (page == Page::Repos && matches!(s.page, Page::Repo(_)));
     let target = page.clone();
@@ -2997,6 +3070,7 @@ fn nav(s: &App, k: &Kit, label: &str, icon: &'static rune::Icon, page: Page, bad
     let mut r = SidebarRow::new(label).icon(icon).height(32.0).selected(selected).on_select(move |s: &mut App, _| {
         if target == Page::Repos {
             s.owner = OwnerFilter::All;
+            s.repos_limit = pages::REPOS_PAGE;
         }
         s.go(target.clone())
     });
@@ -3008,22 +3082,204 @@ fn nav(s: &App, k: &Kit, label: &str, icon: &'static rune::Icon, page: Page, bad
 
 /// The organizations whose repositories are loaded, with how many each, most first.
 fn orgs(s: &App) -> Vec<(String, usize)> {
-    let me = &s.data.profile.login;
-    let mut out: Vec<(String, usize)> = Vec::new();
-    for r in s.data.repos.iter().filter(|r| !r.owner.eq_ignore_ascii_case(me)) {
-        match out.iter_mut().find(|(o, _)| o.eq_ignore_ascii_case(&r.owner)) {
-            Some((_, n)) => *n += 1,
-            None => out.push((r.owner.clone(), 1)),
-        }
-    }
-    out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase())));
-    out
+    s.ensure_orgs_cache();
+    s.repo_cache.borrow().orgs.clone()
 }
 
 impl App {
+    fn repos_stamp(&self) -> u64 {
+        use std::hash::Hash;
+        hash_stamp(|h| {
+            self.data_gen.hash(h);
+            self.data.repos.len().hash(h);
+            self.data.profile.login.hash(h);
+            if let Some(r) = self.data.repos.first() {
+                r.full_name.hash(h);
+                r.stars.hash(h);
+                r.pushed.hash(h);
+                r.private.hash(h);
+                r.fork.hash(h);
+            }
+            if let Some(r) = self.data.repos.last() {
+                r.full_name.hash(h);
+                r.stars.hash(h);
+                r.pushed.hash(h);
+                r.private.hash(h);
+                r.fork.hash(h);
+            }
+        })
+    }
+
+    fn pins_stamp(&self) -> u64 {
+        use std::hash::Hash;
+        hash_stamp(|h| {
+            self.repos_stamp().hash(h);
+            self.pins.hash(h);
+            self.cfg.pinned.hash(h);
+        })
+    }
+
+    fn ensure_orgs_cache(&self) {
+        let stamp = self.repos_stamp();
+        if self.repo_cache.borrow().orgs_stamp == Some(stamp) {
+            return;
+        }
+        let me = &self.data.profile.login;
+        let mut out: Vec<(String, usize)> = Vec::new();
+        let mut mine = 0usize;
+        for r in &self.data.repos {
+            if r.owner.eq_ignore_ascii_case(me) {
+                mine += 1;
+            } else {
+                match out.iter_mut().find(|(o, _)| o.eq_ignore_ascii_case(&r.owner)) {
+                    Some((_, n)) => *n += 1,
+                    None => out.push((r.owner.clone(), 1)),
+                }
+            }
+        }
+        out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase())));
+        let mut c = self.repo_cache.borrow_mut();
+        c.orgs = out;
+        c.mine_count = mine;
+        c.orgs_stamp = Some(stamp);
+    }
+
+    pub(crate) fn mine_repo_count(&self) -> usize {
+        self.ensure_orgs_cache();
+        self.repo_cache.borrow().mine_count
+    }
+
+    fn ensure_pins_cache(&self) {
+        let stamp = self.pins_stamp();
+        if self.repo_cache.borrow().pins_stamp == Some(stamp) {
+            return;
+        }
+        let repos = &self.data.repos;
+        let list: Vec<usize> = if let Some(pins) = &self.pins {
+            pins.iter().filter_map(|p| repos.iter().position(|r| r.full_name.eq_ignore_ascii_case(p))).collect()
+        } else if self.cfg.pinned.is_empty() {
+            (0..repos.len().min(3)).collect()
+        } else {
+            self.cfg.pinned.iter().filter_map(|p| repos.iter().position(|r| r.name.eq_ignore_ascii_case(p) || r.full_name.eq_ignore_ascii_case(p))).collect()
+        };
+        let set: std::collections::HashSet<usize> = list.iter().copied().collect();
+        let mut c = self.repo_cache.borrow_mut();
+        c.pinned = list;
+        c.pinned_set = set;
+        c.pins_stamp = Some(stamp);
+    }
+
+    /// Indices into `data.repos` matching the current owner, visibility/fork filter, search, and sort.
+    pub(crate) fn filtered_repos(&self) -> Vec<usize> {
+        use std::hash::Hash;
+        let stamp = hash_stamp(|h| {
+            self.repos_stamp().hash(h);
+            std::mem::discriminant(&self.owner).hash(h);
+            if let OwnerFilter::Org(o) = &self.owner {
+                o.hash(h);
+            }
+            self.filter.index().hash(h);
+            self.sort.index().hash(h);
+            self.search.text.hash(h);
+        });
+        if self.repo_cache.borrow().shown_stamp == Some(stamp) {
+            return self.repo_cache.borrow().shown.clone();
+        }
+        let q = self.search.text.trim().to_lowercase();
+        let all = &self.data.repos;
+        let login = &self.data.profile.login;
+        let mut shown: Vec<usize> = (0..all.len()).filter(|&i| {
+            let r = &all[i];
+            if !self.owner.matches(&r.owner, login) || !self.filter.matches(r.private, r.fork) {
+                return false;
+            }
+            if q.is_empty() {
+                return true;
+            }
+            let keys = r.keys();
+            keys.name_lower.contains(&q) || keys.desc_lower.contains(&q) || keys.topics_lower.iter().any(|t| t.contains(&q))
+        }).collect();
+        match self.sort {
+            RepoSort::Recent => {} // GitHub's order: most recently pushed first
+            RepoSort::Stars => shown.sort_by(|a, b| all[*b].stars.cmp(&all[*a].stars)),
+            RepoSort::Name => shown.sort_by(|a, b| all[*a].keys().name_lower.cmp(&all[*b].keys().name_lower)),
+        }
+        let mut c = self.repo_cache.borrow_mut();
+        c.shown = shown.clone();
+        c.shown_stamp = Some(stamp);
+        shown
+    }
+
+    /// Cheap fingerprint of everything [`palette::entries`] reads, so typing in the palette
+    /// reuses pre-indexed entries without rebuilding or re-lowercasing them.
+    pub(crate) fn palette_stamp(&self) -> u64 {
+        use std::hash::Hash;
+        hash_stamp(|h| {
+            self.pins_stamp().hash(h);
+            self.data.pulls.len().hash(h);
+            if let Some(p) = self.data.pulls.first() {
+                p.number.hash(h);
+                std::mem::discriminant(&p.state).hash(h);
+            }
+            self.data.issues.len().hash(h);
+            if let Some(x) = self.data.issues.first() {
+                x.number.hash(h);
+            }
+            std::mem::discriminant(&self.page).hash(h);
+            match &self.page {
+                Page::Repo(full) => {
+                    full.hash(h);
+                    self.local.contains_key(full).hash(h);
+                }
+                Page::Plugin(id) => id.hash(h),
+                _ => {}
+            }
+            self.tab.index().hash(h);
+            self.plugin_tab.hash(h);
+            std::mem::discriminant(&self.theme).hash(h);
+            self.shown_dark.get().hash(h);
+            self.looks.light.hash(h);
+            self.looks.dark.hash(h);
+            self.looks.all.len().hash(h);
+            self.assist.claude.hash(h);
+            self.assist.harnesses.len().hash(h);
+            self.plugins.list.len().hash(h);
+            std::mem::discriminant(&self.update).hash(h);
+            self.cfg.live().hash(h);
+            self.status.can_load().hash(h);
+        })
+    }
+
+    /// Cached local clone path for `full`, probing disk/remotes at most once until invalidated.
+    pub(crate) fn known_clone(&self, full: &str) -> Option<std::path::PathBuf> {
+        if let Some(cached) = self.clone_dirs.borrow().get(full) {
+            return cached.clone();
+        }
+        let found = clones_shim::find(full);
+        self.clone_dirs.borrow_mut().insert(full.to_owned(), found.clone());
+        found
+    }
+
+    /// Cached lookalike checkout path for `full`, probing disk/remotes at most once until invalidated.
+    pub(crate) fn lookalike_clone(&self, full: &str) -> Option<std::path::PathBuf> {
+        if let Some(cached) = self.lookalike_dirs.borrow().get(full) {
+            return cached.clone();
+        }
+        let found = clones_shim::lookalike(full);
+        self.lookalike_dirs.borrow_mut().insert(full.to_owned(), found.clone());
+        found
+    }
+
+    fn refresh_clone_cache(&mut self) {
+        self.clone_dirs.borrow_mut().clear();
+        self.lookalike_dirs.borrow_mut().clear();
+        self.default_clone_parent = clones_shim::default_parent();
+    }
+
     /// Whether repository `i` is in the sidebar's Pinned section.
     fn is_pinned(&self, i: usize) -> bool {
-        pinned(self).contains(&i)
+        self.ensure_pins_cache();
+        self.repo_cache.borrow().pinned_set.contains(&i)
     }
 
     /// Pins or unpins repository `i`. The first change starts from what the sidebar shows, so
@@ -3051,21 +3307,15 @@ impl App {
     fn show_owner(&mut self, owner: OwnerFilter) {
         state::trace("owner", &self.owner, &owner);
         self.owner = owner;
+        self.repos_limit = pages::REPOS_PAGE;
         self.go(Page::Repos);
     }
 }
 
 /// The pinned repositories: the names in REPOHUB_PINNED, else the three most recently pushed.
 pub(crate) fn pinned(s: &App) -> Vec<usize> {
-    let repos = &s.data.repos;
-    // Pins chosen in the app win; a repository that's no longer loaded is skipped.
-    if let Some(pins) = &s.pins {
-        return pins.iter().filter_map(|p| repos.iter().position(|r| r.full_name.eq_ignore_ascii_case(p))).collect();
-    }
-    if s.cfg.pinned.is_empty() {
-        return (0..repos.len().min(3)).collect();
-    }
-    s.cfg.pinned.iter().filter_map(|p| repos.iter().position(|r| r.name.eq_ignore_ascii_case(p) || r.full_name.eq_ignore_ascii_case(p))).collect()
+    s.ensure_pins_cache();
+    s.repo_cache.borrow().pinned.clone()
 }
 
 fn sidebar(s: &App, k: &Kit) -> El {
@@ -3597,6 +3847,7 @@ pub fn start() {
                 s.refresh();
             } else {
                 s.data = Data::sample();
+                s.data_gen = s.data_gen.wrapping_add(1);
                 s.set_status(Status::Sample);
             }
         });
@@ -6773,6 +7024,7 @@ mod fix62_tests {
             branch: "main".into(),
             topics: vec![],
             url: format!("https://github.com/{full}"),
+            ..model::Repo::default()
         }
     }
 
@@ -7225,3 +7477,164 @@ mod phone_sizes {
         assert_eq!(crate::terminal_page::term_h(&s), 240.0, "never smaller than a few lines");
     }
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod perf61_tests {
+    use std::time::Instant;
+    use rune::{Key, KeyEvent, Mods};
+    use crate::model::{Data, Issue, Pull, PullState, Repo, lang_hue};
+    use crate::{App, Page};
+
+    fn sample_500() -> Data {
+        let mut d = Data::sample_at(1_731_000_000);
+        let orgs = ["octo", "acme-cloud", "zeta-labs", "nimbus-io", "hyperion-dev", "aurora-sys"];
+        let langs = ["Rust", "TypeScript", "Python", "Go", "Java", "C++"];
+        d.repos.clear();
+        for i in 0..500 {
+            let owner = orgs[i % orgs.len()];
+            let lang = langs[i % langs.len()];
+            let name = format!("service-{owner}-{i:03}");
+            let r = Repo {
+                full_name: format!("{owner}/{name}"),
+                owner: owner.into(),
+                name: name.clone(),
+                description: format!("High-throughput distributed {lang} component #{i} for {owner} pipelines and telemetry"),
+                language: lang.into(),
+                hue: lang_hue(lang),
+                stars: ((i * 37) % 1200) as u32,
+                forks: ((i * 7) % 90) as u32,
+                issues: (i % 25) as u32,
+                pushed: 1_731_000_000 - (i as i64) * 3600,
+                private: i % 3 == 0,
+                fork: i % 7 == 0,
+                archived: i % 29 == 0,
+                branch: "main".into(),
+                topics: vec!["cloud".into(), "telemetry".into(), lang.to_lowercase(), format!("tier-{}", i % 5)],
+                url: format!("https://github.com/{owner}/{name}"),
+                starred: i % 5 == 0,
+                ..Repo::default()
+            };
+            r.precompute_keys();
+            d.repos.push(r);
+        }
+        for i in 0..80 {
+            let r = &d.repos[i % d.repos.len()];
+            d.pulls.push(Pull {
+                number: (100 + i) as u32,
+                title: format!("Optimize batching pipeline in {} ({i})", r.name),
+                repo: r.full_name.clone(),
+                author: "octo".into(),
+                state: if i % 4 == 0 { PullState::Draft } else { PullState::Open },
+                checks: None,
+                updated_at: 1_731_000_000 - (i as i64) * 600,
+                comments: (i % 8) as u32,
+                url: format!("{}/pull/{}", r.url, 100 + i),
+                labels: vec![("performance".into(), 40.0)],
+            });
+            d.issues.push(Issue {
+                number: (200 + i) as u32,
+                title: format!("Investigate latency spike on {} #{i}", r.name),
+                repo: r.full_name.clone(),
+                label: Some(("bug".into(), 20.0)),
+                created_at: 1_731_000_000 - (i as i64) * 900,
+                comments: (i % 5) as u32,
+                url: format!("{}/issues/{}", r.url, 200 + i),
+                labels: vec![("bug".into(), 20.0)],
+                assignees: Vec::new(),
+            });
+        }
+        d
+    }
+
+    #[test]
+    fn measure_500_repos_search_and_palette() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = crate::init();
+        s.data = sample_500();
+        s.pending_place = None;
+        s.page = Page::Repos;
+        let mut rt = rune::Runtime::new(s, crate::view, (1180.0, 760.0), rune::Env::new(true, 1.0));
+        rt.reduced_motion = true;
+        rt.on_key = Some(crate::on_key);
+        let mut t = 0.0;
+        rt.frame(t);
+
+        // Initial page renders REPOS_PAGE (60) cards and offers "Show more (440 left)".
+        let card_count = |rt: &rune::Runtime<App>| {
+            rt.elements().iter().filter(|e| e.key.as_deref().is_some_and(|k| k.starts_with("card-"))).count()
+        };
+        assert_eq!(card_count(&rt), crate::pages::REPOS_PAGE);
+        assert!(rt.find("repos-show-more").is_some(), "Show more button appears when >60 repos match");
+
+        // Focus search input on Repositories page.
+        let (sx, sy) = rt.find("search").expect("search input present");
+        rt.pointer_move(sx, sy);
+        rt.pointer_down(sx, sy);
+        rt.pointer_up(sx, sy);
+        t += 0.05;
+        rt.frame(t);
+
+        let mut search_ms = Vec::new();
+        for ch in "service-ze".chars() {
+            let t0 = Instant::now();
+            rt.key(KeyEvent { key: Key::Text(ch.to_string()), mods: Mods::default() });
+            t += 0.05;
+            rt.frame(t);
+            search_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
+        }
+
+        // Clear search so all 500 repos are eligible again, then open Palette and type.
+        rt.update(|s: &mut App, _| s.search.clear());
+        t += 0.05;
+        rt.frame(t);
+
+        let cmd = Mods { cmd: true, ..Mods::default() };
+        let t0_open = Instant::now();
+        rt.key(KeyEvent { key: Key::Command('k'), mods: cmd });
+        t += 0.05;
+        rt.frame(t);
+        let open_ms = t0_open.elapsed().as_secs_f64() * 1000.0;
+        assert!(rt.state.palette.is_some());
+
+        let mut palette_ms = Vec::new();
+        for ch in "service-ze".chars() {
+            let t0 = Instant::now();
+            rt.key(KeyEvent { key: Key::Text(ch.to_string()), mods: Mods::default() });
+            t += 0.05;
+            rt.frame(t);
+            palette_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
+        }
+
+        let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+        let max = |v: &[f64]| v.iter().copied().fold(0.0_f64, f64::max);
+        println!(
+            "PERF61_METRICS repos_search_mean={:.2}ms repos_search_max={:.2}ms palette_open={:.2}ms palette_type_mean={:.2}ms palette_type_max={:.2}ms",
+            mean(&search_ms), max(&search_ms), open_ms, mean(&palette_ms), max(&palette_ms)
+        );
+
+        #[cfg(not(debug_assertions))]
+        {
+            assert!(mean(&search_ms) < 16.0, "expected Repos search typing < 16 ms in release, got {:.2} ms", mean(&search_ms));
+            assert!(mean(&palette_ms) < 16.0, "expected Palette typing < 16 ms in release, got {:.2} ms", mean(&palette_ms));
+        }
+
+        // Close palette and verify clicking "Show more" expands to 120 cards, and changing search resets to 60.
+        rt.update(|s: &mut App, _| s.palette = None);
+        t += 0.05;
+        rt.frame(t);
+        rt.update(|s: &mut App, _| s.repos_limit += crate::pages::REPOS_PAGE);
+        t += 0.05;
+        rt.frame(t);
+        assert_eq!(card_count(&rt), crate::pages::REPOS_PAGE * 2);
+    }
+
+    #[test]
+    fn clone_cache_avoids_reprobing_disk_after_first_lookup() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let s = crate::init();
+        assert!(!s.clone_dirs.borrow().contains_key("nobody/nonexistent-repo-61"));
+        assert_eq!(s.known_clone("nobody/nonexistent-repo-61"), None);
+        assert_eq!(s.clone_dirs.borrow().get("nobody/nonexistent-repo-61"), Some(&None));
+    }
+}
+

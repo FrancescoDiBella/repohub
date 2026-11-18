@@ -382,7 +382,7 @@ impl Gh {
     fn repo(&self, v: &Value, starred: &HashSet<String>) -> Repo {
         let full = s(v, "full_name");
         let language = Some(s(v, "language")).filter(|l| !l.is_empty()).unwrap_or_else(|| "—".into());
-        Repo {
+        let r = Repo {
             owner: v.get("owner").map(|o| s(o, "login")).unwrap_or_default(),
             name: s(v, "name"),
             description: s(v, "description"),
@@ -400,7 +400,10 @@ impl Gh {
             url: s(v, "html_url"),
             starred: starred.contains(&full),
             full_name: full,
-        }
+            keys: std::sync::OnceLock::new(),
+        };
+        r.precompute_keys();
+        r
     }
 
     /// The account's repositories and those of its organizations (`cfg.orgs`), most recently

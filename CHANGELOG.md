@@ -86,6 +86,11 @@ The sections are **Added**, **Changed** and **Fixed**.
 - Docker image for amd64 and arm64.
 
 ### Changed
+- Faster **Repositories** page, **⌘K** command palette and **Terminal** on large accounts:
+  searching and filtering reuse pre-computed repository keys and cached lists, the repository
+  list shows 60 cards at a time with **Show more** and memoizes unchanged cards, local clone
+  paths are cached instead of probing the disk on every frame, and terminal lines merge
+  same-background runs and skip rebuilding between shell outputs.
 - Settings is split into sections, one on screen at a time: **Account**, **Appearance**,
   **Assistants**, **Plugins** and **About** (version, updates, keyboard shortcuts). The
   connection's environment variables and files are under **Show details**. The phone's tabs say
