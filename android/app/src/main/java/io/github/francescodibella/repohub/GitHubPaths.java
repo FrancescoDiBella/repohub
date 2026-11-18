@@ -120,7 +120,7 @@ final class GitHubPaths {
                         }
                         return true;
                     }
-                    if (rest.length == 3 && rest[0].equals("pulls") && number(rest[1]) && (rest[2].equals("files") || rest[2].equals("reviews"))) {
+                    if (rest.length == 3 && rest[0].equals("pulls") && number(rest[1]) && (rest[2].equals("files") || rest[2].equals("reviews") || rest[2].equals("comments"))) {
                         return true;
                     }
                     // One issue or pull request and its conversation.
@@ -143,7 +143,7 @@ final class GitHubPaths {
                 // Creating an issue, a pull request or a branch; commenting; reviewing a pull request.
                 return repo && ((rest.length == 1 && (rest[0].equals("issues") || rest[0].equals("pulls")))
                     || (rest.length == 2 && rest[0].equals("git") && rest[1].equals("refs"))
-                    || (rest.length == 3 && number(rest[1]) && ((rest[0].equals("issues") && rest[2].equals("comments")) || (rest[0].equals("pulls") && rest[2].equals("reviews")))));
+                    || (rest.length == 3 && number(rest[1]) && ((rest[0].equals("issues") && rest[2].equals("comments")) || (rest[0].equals("pulls") && (rest[2].equals("reviews") || rest[2].equals("comments"))))));
             case "PATCH":
                 // Closing or reopening an issue; marking one notification as read.
                 return (repo && rest.length == 2 && rest[0].equals("issues") && number(rest[1]))
