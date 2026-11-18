@@ -104,6 +104,11 @@ pub(crate) fn pick_folder(s: &App, k: &Kit, i: usize, found: bool) -> El {
         .child(if found { el() } else { row().child(clone) })
 }
 
+/// The terminal's height: 520 pt, or what a phone's screen leaves.
+pub(crate) fn term_h(s: &App) -> f32 {
+    if s.compact { (s.backdrop_size[1] - 300.0).clamp(240.0, 520.0) } else { 520.0 }
+}
+
 fn toolbar(s: &App, k: &Kit, i: usize, cwd: &str, running: bool) -> El {
     let mut cmds = row().gap(6.0).center_y().flex_wrap();
     for (n, h) in s.assist.shown() {
@@ -137,15 +142,14 @@ fn toolbar(s: &App, k: &Kit, i: usize, cwd: &str, running: bool) -> El {
         }).build(k).key("term-copy");
     let open = Button::new("Open folder").icon(&icons::FOLDER).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
         .on_press_tx(move |_: &mut App, tx| { let _ = tx.open_url(&folder); }).build(k).key("term-folder");
-    col().w_full().gap(8.0)
-        .child(row().w_full().gap(10.0).center_y()
-            .child(ui::ico(&icons::FOLDER, 14.0, k.c.info.icon))
-            .child(text(cwd.to_owned()).font(k.ty.mono).color(k.c.text_base).grow(1.0).shrink().max_lines(1))
-            .child(if running { ui::pill(k, "Running", k.c.success.icon) } else { ui::pill(k, "Exited", k.c.text_faint) })
-            .child(copy)
-            .child(open)
-            .child(restart))
-        .child(cmds)
+    let place = row().w_full().gap(10.0).center_y()
+        .child(ui::ico(&icons::FOLDER, 14.0, k.c.info.icon))
+        .child(text(cwd.to_owned()).font(k.ty.mono).color(k.c.text_base).grow(1.0).shrink().max_lines(1))
+        .child(if running { ui::pill(k, "Running", k.c.success.icon) } else { ui::pill(k, "Exited", k.c.text_faint) });
+    let buttons = row().gap(8.0).center_y().flex_wrap().child(copy).child(open).child(restart);
+    // On a phone the folder takes the line and the buttons go under it.
+    let top = if s.compact { col().w_full().gap(6.0).child(place).child(buttons) } else { col().w_full().child(place.child(buttons)) };
+    col().w_full().gap(8.0).key("term-toolbar").child(top).child(cmds)
 }
 
 fn view(s: &App, k: &Kit, i: usize, t: &terminal::Term, dark: bool) -> El {
@@ -172,7 +176,7 @@ fn view(s: &App, k: &Kit, i: usize, t: &terminal::Term, dark: bool) -> El {
                 s.term_cell = cell;
             }
         });
-    let mut area = col().key("terminal").w_full().h(520.0).padding(10.0).radius(k.radius.lg).fill(bg).border(1.0, k.c.border_weak)
+    let mut area = col().key("terminal").w_full().h(term_h(s)).padding(10.0).radius(k.radius.lg).fill(bg).border(1.0, k.c.border_weak)
         .clip_rounded(k.radius.lg).focusable(true).role("textbox").label("Terminal")
         .child(probe)
         .child(lines)

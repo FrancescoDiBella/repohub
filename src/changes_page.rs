@@ -112,7 +112,7 @@ pub fn changes_tab(s: &App, k: &Kit, i: usize) -> El {
                 .on_press(move |s: &mut App| s.commit(i, false)).build(k).key("commit"))
             .child(Button::new("Commit and push").variant(ButtonVariant::Submit).control_size(ControlSize::Small).disabled(busy || nothing)
                 .on_press(move |s: &mut App| s.commit(i, true)).build(k).key("commit-push")))
-        .child(text("Commits every change below (git add -A), new files included.").font(k.ty.text_small).color(k.c.text_muted));
+        .child(text("Commits every change below (git add -A), new files included.").font(k.ty.text_small).color(k.c.text_muted).wrap());
     if let Some(e) = &s.git_error {
         commit = commit.child(text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap());
     }

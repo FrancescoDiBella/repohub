@@ -329,7 +329,7 @@ pub fn repo_detail(s: &App, k: &Kit, i: usize, plugin: Option<El>) -> El {
             .child(col().gap(2.0)
                 .child(text(format!("{} /", r.owner)).font(k.ty.text_small).color(k.c.text_muted))
                 .child(row().gap(8.0).center_y().child(text(r.name.clone()).font(k.ty.body_medium).color(k.c.text_strong)).child(vis))))
-        .child(row().gap(8.0).flex_wrap()
+        .child(row().gap(8.0).flex_wrap().shrink().min_w(0.0)
             .child(open_button(k, "Open on GitHub", &r.url, "open-github"))
             .child(Button::new(format!("Fork · {}", r.forks)).icon(&icons::FORK).control_size(ControlSize::Small)
                 .on_press_tx({ let u = format!("{}/fork", r.url); move |_: &mut App, tx| { let _ = tx.open_url(&u); } }).build(k).key("fork"))
