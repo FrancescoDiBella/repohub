@@ -109,6 +109,11 @@ The sections are **Added**, **Changed** and **Fixed**.
 - A new look, with a more readable layout.
 
 ### Fixed
+- Screen readers and keyboard navigation: clickable workflow runs, compact repository rows and
+  repository card titles now announce their role and label; search, branch filter, new drawing and
+  local folder fields and the draft pull request switch are labelled; CI, pull request, issue and
+  git status marks carry accessible labels and distinct shapes instead of relying on colour or
+  hover tooltips alone.
 - On a phone: a repository's buttons (Open on GitHub, Fork, Pin, Star) wrap instead of running off
   the screen, the Changes tab's commit note wraps, the Terminal's buttons go under its folder, and
   the Terminal and the Claude chat are sized to the screen.

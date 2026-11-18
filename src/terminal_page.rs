@@ -75,7 +75,7 @@ impl<'a> Panel<'a> {
 /// Choosing the local folder, or cloning the repository.
 pub(crate) fn pick_folder(s: &App, k: &Kit, i: usize, found: bool) -> El {
     let r = &s.data.repos[i];
-    let field = TextInput::new(&s.clone_path).placeholder("Folder of your local copy, e.g. ~/Developer/repohub")
+    let field = TextInput::new(&s.clone_path).label("Local repository folder").placeholder("Folder of your local copy, e.g. ~/Developer/repohub")
         .on_edit(|s: &mut App| &mut s.clone_path).on_submit(move |s: &mut App, _| s.use_folder(i))
         .build(k).key("clone-path").grow(1.0).min_w(260.0);
     let use_it = Button::new("Use this folder").control_size(ControlSize::Small).disabled(s.clone_path.text.trim().is_empty())
