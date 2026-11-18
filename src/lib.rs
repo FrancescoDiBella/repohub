@@ -4891,6 +4891,39 @@ mod fix60_tests {
     }
 
     #[test]
+    fn ui_plus_on_a_diff_line_opens_a_comment_box() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = crate::init();
+        s.pending_place = None;
+        s.now = 1_700_000_000;
+        s.data = crate::model::Data::sample_at(s.now);
+        let repo_full = s.data.repos[0].full_name.clone();
+        s.open(0);
+        s.set_tab(0, crate::RepoTab::Pulls);
+        s.open_pull_diff(repo_full.clone(), 14);
+        let side = rune_kit::diff::Side::New;
+        s.start_line_comment(rune_kit::diff::LineRange::line(0, rune_kit::diff::LineRef::new(side, 12)));
+        assert!(s.pull_review.as_ref().and_then(|r| r.draft.as_ref()).is_some());
+
+        let mut rt = rune::Runtime::new(s, crate::view, (1180.0, 3000.0), rune::Env::new(true, 1.0));
+        rt.frame(0.0);
+        assert!(rt.find("line-draft-text").is_some(), "the box shows under the line");
+        let (x, y) = rt.find("line-draft-cancel").expect("Cancel shown");
+        rt.pointer_move(x, y);
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(0.0);
+        assert!(rt.state.pull_review.as_ref().is_some_and(|r| r.draft.is_none()), "Cancel drops the box");
+        assert!(rt.find("line-draft-text").is_none());
+
+        // Once GitHub has it, the box goes and the comment shows from GitHub's list.
+        let mut s = rt.state;
+        s.start_line_comment(rune_kit::diff::LineRange::line(0, rune_kit::diff::LineRef::new(side, 12)));
+        s.apply_done(&repo_full, crate::github::Done::LineCommented(14));
+        assert!(s.pull_review.as_ref().is_some_and(|r| r.draft.is_none()));
+    }
+
+    #[test]
     fn navigation_and_leave_tab_clears_pull_diff() {
         let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut s = crate::init();

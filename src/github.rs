@@ -1123,6 +1123,15 @@ pub async fn set_star(cfg: &Config, full: &str, on: bool) -> Result<(), String> 
 #[cfg(test)]
 mod tests {
     #[test]
+    fn line_comments_read_their_side_and_skip_outdated_ones() {
+        let v = serde_json::json!({"path": "src/a.rs", "line": 7, "side": "LEFT", "user": {"login": "bob"}, "body": "hm", "created_at": "2026-01-02T03:04:05Z"});
+        let c = super::parse_line_comment(&v).expect("on a line");
+        assert_eq!((c.path.as_str(), c.line, c.side, c.author.as_str()), ("src/a.rs", 7, rune_kit::diff::Side::Old, "bob"));
+        let gone = serde_json::json!({"path": "src/a.rs", "line": null, "side": "RIGHT", "user": null, "body": ""});
+        assert!(super::parse_line_comment(&gone).is_none(), "an outdated comment isn't on a line any more");
+    }
+
+    #[test]
     fn repo_name_from_url() {
         assert_eq!(super::repo_from_url("https://api.github.com/repos/octo/hello"), "octo/hello");
     }

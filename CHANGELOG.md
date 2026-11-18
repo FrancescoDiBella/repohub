@@ -10,6 +10,8 @@ The sections are **Added**, **Changed** and **Fixed**.
 ## Unreleased
 
 ### Added
+- **Comments on a pull request's lines**: the comments people left on its diff show under their
+  lines, and the **+** by a line number (or a dragged range of lines) opens a box to write one.
 - **Undo** after closing an issue (it's reopened and comes back to the list) and after deleting
   a theme (it comes back where it was, as your light or dark theme if it was one).
 - Keyboard: Esc closes what's open on top of the page (a merge confirmation, a form, a diff, a
