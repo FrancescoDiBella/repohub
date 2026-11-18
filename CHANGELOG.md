@@ -10,6 +10,9 @@ The sections are **Added**, **Changed** and **Fixed**.
 ## Unreleased
 
 ### Added
+- **Update channel** in Settings → About: **Stable** (numbered releases, the default for a
+  numbered build) or **Preview** (the Latest build, as before). The version shows there and in
+  the status-bar menu; a release tag must match `Cargo.toml`, or the release workflow stops.
 - The Pull requests page filters **Drafts** and **Failing checks**, and the status-bar menu
   shows how many notifications are unread (it opens the Notifications page).
 - A pull request's conversation shows its **checks** (the CI jobs on its last commit, with a

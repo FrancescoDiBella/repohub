@@ -463,16 +463,18 @@ fn account_panel(s: &App, k: &Kit) -> El {
 /// The app's build and its updates.
 fn version_panel(s: &App, k: &Kit) -> El {
     use crate::update::{self, Update};
+    let v = update::version();
     let build = match (update::build(), update::built_at()) {
-        (Some(b), Some(t)) => format!("{} · built {}", &b[..b.len().min(7)], crate::model::ago(t, s.now.max(t))),
-        (Some(b), None) => b[..b.len().min(7)].to_owned(),
-        (None, _) => format!("{} · built from source", env!("CARGO_PKG_VERSION")),
+        (Some(b), Some(t)) => format!("{v} · {} · built {}", &b[..b.len().min(7)], crate::model::ago(t, s.now.max(t))),
+        (Some(b), None) => format!("{v} · {}", &b[..b.len().min(7)]),
+        (None, _) => format!("{v} · built from source"),
     };
+    let what = s.update_channel.what();
     let (state, ink) = match &s.update {
         Update::Unavailable(why) => ((*why).to_owned(), k.c.text_muted),
         Update::Idle => ("Not checked yet.".into(), k.c.text_muted),
-        Update::Checking => ("Checking the Latest build on GitHub…".into(), k.c.text_muted),
-        Update::Current => ("Up to date with the Latest build.".into(), k.c.success.icon),
+        Update::Checking => (format!("Checking {what} on GitHub…"), k.c.text_muted),
+        Update::Current => (format!("Up to date with {what}."), k.c.success.icon),
         Update::Available(r) => (format!("A new version is ready: {} (built {}).", r.short(), crate::model::ago(r.published, s.now.max(r.published))), k.c.success.icon),
         Update::Downloading { percent, .. } => (format!("Downloading… {percent}%"), k.c.text_muted),
         Update::Installing => ("Installing; RepoHub restarts in a moment.".into(), k.c.text_muted),
@@ -493,6 +495,15 @@ fn version_panel(s: &App, k: &Kit) -> El {
     }
     panel(k).child(panel_head(k, "App version", Some(buttons))).child(rule(k))
         .child(info(k, "This build", build))
+        .child(rule(k))
+        .child(row().w_full().px(16.0).py(10.0).gap(16.0).center_y().flex_wrap()
+            .child(text("Channel").font(k.ty.small).color(k.c.text_muted).w(170.0))
+            .child(SegmentedControl::new(&update::Channel::LABELS, Some(s.update_channel.index())).label("Update channel").fit()
+                .on_pick(|s: &mut App, i, _| s.set_update_channel(update::Channel::ALL[i.min(1)])).build(k).key("update-channel"))
+            .child(text(match s.update_channel {
+                update::Channel::Stable => "Numbered releases, tested before they're published.",
+                update::Channel::Preview => "The Latest build: every change as soon as it's merged.",
+            }).font(k.ty.small).color(k.c.text_muted).grow(1.0).shrink().wrap()))
         .child(rule(k))
         .child(row().w_full().px(16.0).py(10.0).gap(16.0).center_y()
             .child(text("Updates").font(k.ty.small).color(k.c.text_muted).w(170.0))
