@@ -102,6 +102,8 @@ The sections are **Added**, **Changed** and **Fixed**.
 ### Fixed
 - Long pages, the command palette and the Claude chat show a scroll bar again, so you can see
   where you are (it follows the system's *Show scroll bars* setting).
+- macOS: coloured parts of the window no longer flicker when you type or move the pointer. The
+  app now draws with the Metal backend of wgpu.
 - Every action now says how it went: **Copy screen** in the Terminal confirms the copy, and
   Commit, Push or Pull on a repository with no local copy says so instead of doing nothing.
 - The command palette keeps the highlighted result in sight when you move past the first
