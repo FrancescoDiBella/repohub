@@ -64,6 +64,12 @@ REPOHUB_BLOCKING=1 target/release/repohub --snap out.png --size 1180x760 -- page
 Add `tab notes` (a section's name) after `page repo`, and `REPOHUB_TRACE=1` to print every state change.
 `REPOHUB_COMPACT=1` with `--size 390x844` starts in the phone layout.
 `thread 14` after `page pulls` (or `page issues`) opens that conversation.
+`diff 14` also opens that pull request's diff, and `section appearance` picks the Settings section.
+With `tab changes` and a clone found (`REPOHUB_REPOS_DIR`), its changes are read before the first frame.
+
+`scripts/screenshots.sh` regenerates the README's pictures in `docs/` from the sample data, with a
+throwaway data folder and a made-up clone. `docs/notes.png`, `docs/terminal.png` and
+`docs/claude.png` need a drawing, a shell and Claude Code, and are taken by hand.
 After `page repo tab notes`, `board Name` opens that drawing and `zoom 3` zooms it (the phone's full-screen editor in the phone layout).
 The Android app is described in [`android/README.md`](android/README.md).
 

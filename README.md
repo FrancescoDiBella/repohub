@@ -4,13 +4,30 @@ A dashboard for your own GitHub repositories, written in Rust with
 [Rune](https://github.com/anomalyco/rune) (a GPU-rendered UI framework) and `rune-kit`.
 
 It reads real data from the GitHub REST API: profile, repositories, files, README, languages,
-last commit, pull requests, issues, workflow runs and weekly commits. You can star and unstar
-repositories from the app, and keep **notes**: hand-drawn diagrams and sketches for each
-repository and branch, saved on your computer.
+last commit, pull requests, issues, notifications, workflow runs and weekly commits. From the
+app you can also:
+- **read and answer** issues and pull requests: comment, review, comment on diff lines, see the
+  checks, merge, close and reopen;
+- **filter** issues and pull requests, and go through your **notifications**;
+- work in a repository's **local clone** (desktop): its files, its changes as a diff, commit,
+  push and pull, a **Terminal** and **Claude**;
+- keep **notes**: hand-drawn diagrams and sketches for each repository and branch;
+- pick or make a **theme**, and add **plugins**.
 
 | | |
 | --- | --- |
 | ![Overview, dark theme](docs/overview.png) | ![Repository page, light theme](docs/repository.png) |
+| ![A pull request: its checks and its diff](docs/pull-diff.png) | ![Changes in the local clone, as a diff](docs/changes.png) |
+| ![The theme gallery, with Neon](docs/themes.png) | ![Pull requests on a phone](docs/mobile.png) |
+
+The pictures are made from the sample data by `scripts/screenshots.sh`.
+
+**Contents:** [Docker](#run-it-with-docker) · [Desktop app](#desktop-app) ·
+[Android app](#android-app) · [Themes](#themes) · [Working on GitHub](#working-on-github-from-the-app) ·
+[Files on your computer](#files-on-your-computer-desktop-app) · [Notes](#notes) ·
+[Status bar](#status-bar-desktop-app) · [Claude](#claude-desktop-app) · [Plugins](#plugins-desktop-app) ·
+[Terminal](#terminal-desktop-app) · [Configuration](#configuration) · [What it shows](#what-it-shows) ·
+[Development](#development)
 
 There are four ways to run it:
 
@@ -50,9 +67,10 @@ What this means for the token:
 - The token never leaves the container. The page never receives it: `config.json` only says
   whether a token is set.
 - The port is published on this computer only (`127.0.0.1:8080`).
-- The server forwards only the exact endpoints RepoHub uses: reads, starring, creating issues,
-  branches and pull requests, closing issues, and merging pull requests. Nothing that deletes or
-  rewrites repositories.
+- The server forwards only the exact endpoints RepoHub uses (`allowed()` in `server/src/main.rs`):
+  reads, starring, creating issues, branches and pull requests, comments and reviews, closing and
+  reopening issues and pull requests, merging pull requests, and marking notifications as read.
+  Nothing that deletes or rewrites repositories.
 - When `REPOHUB_ALLOW_WRITES` is off (the default whenever binding to a non-loopback address),
   all write methods (`POST`, `PUT`, `PATCH`, `DELETE`) are rejected with `403 Forbidden`.
 - The server compares the full `Origin` (scheme, host and port) against `Host`, requires `X-RepoHub: 1`
@@ -488,8 +506,9 @@ GitHub Enterprise.
 | Overview | totals, commits over the last 26 weeks, recent repositories, open pull requests | `/user` or `/users/{u}`, `/user/repos` or `/users/{u}/repos`, `/search/issues`, `/repos/{r}/stats/participation` |
 | Repositories | search by name, description and topic; public, private and fork filters; star | `/user/starred`, `PUT`/`DELETE /user/starred/{r}` |
 | Repository | root files, README, languages, last commit, copy clone URL, open on GitHub | `/repos/{r}/contents`, `/readme`, `/languages`, `/commits` |
-| Pull requests | pull requests you're involved in: open, draft, merged, closed; click to open | `/search/issues?q=is:pr involves:{u}` |
-| Issues | open issues in your repositories; click to open | `/search/issues?q=is:issue is:open user:{u}` |
+| Pull requests | pull requests you're involved in: open, draft, merged, closed; filters; click to read the conversation, its checks and its diff | `/search/issues?q=is:pr involves:{u}`, `/repos/{r}/pulls/{n}`, `/files`, `/reviews`, `/comments`, `/commits/{sha}/check-runs` |
+| Issues | open issues in your repositories; filters; click to read and answer | `/search/issues?q=is:issue is:open user:{u}`, `/repos/{r}/issues/{n}`, `/comments` |
+| Notifications | your unread notifications; mark as read | `/notifications`, `PATCH /notifications/threads/{id}` |
 | Actions | latest runs of the most recently pushed repositories | `/repos/{r}/actions/runs` |
 | Repository → Notes | drawings per branch: create, open, draw, delete | `/repos/{r}/branches` (the drawings stay on your computer) |
 | Settings | connection status, the configuration in use (the token is never shown) and where notes are kept | — |
@@ -498,8 +517,10 @@ How it behaves:
 - **Refresh** (toolbar icon, or ⌘R / Ctrl+R) reloads everything.
 - Requests run in the background, so the window stays responsive.
 - Errors (rejected token, rate limit, unknown user) show a banner with the reason and **Retry**.
-- RepoHub never creates, changes or deletes repositories. "New repository" and "Settings on
-  GitHub" open GitHub in the browser.
+- RepoHub never creates or deletes repositories, and never changes their settings: "New
+  repository" and "Settings on GitHub" open GitHub in the browser. What it does write (issues,
+  pull requests, comments, reviews, branches, stars) is listed under
+  [Working on GitHub from the app](#working-on-github-from-the-app).
 
 ## Development
 
