@@ -10,6 +10,10 @@ The sections are **Added**, **Changed** and **Fixed**.
 ## Unreleased
 
 ### Added
+- Actions: filter workflow runs by status (**All**, **Failed**, **Running**), repository and
+  workflow; click a run to inspect its jobs, steps and the last 200 lines of any job's log (with
+  **Copy log**), and re-run failed jobs or the whole workflow (**Actions: Read and write** /
+  `workflow` scope). The status-bar icon also flags your open pull requests with failing checks.
 - The Pull requests page filters **Drafts** and **Failing checks**, and the status-bar menu
   shows how many notifications are unread (it opens the Notifications page).
 - A pull request's conversation shows its **checks** (the CI jobs on its last commit, with a

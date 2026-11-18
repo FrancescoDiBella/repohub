@@ -87,12 +87,13 @@ public class BackendTest {
             "/users/octocat/repos", "/users/octocat/orgs", "/orgs/acme/repos", "/repos/o/r/actions/runs", "/repos/o/r/stats/participation",
             "/repos/o/r/contents", "/repos/o/r/readme", "/repos/o/r/languages", "/repos/o/r/commits", "/repos/o/r/branches", "/repos/o/r/issues",
             "/repos/o/r/git/ref/heads/feature/x", "/repos/o/r/pulls/12/files", "/repos/o/r/issues/7", "/repos/o/r/issues/7/comments",
-            "/repos/o/r/pulls/12", "/repos/o/r/pulls/12/reviews"}) {
+            "/repos/o/r/pulls/12", "/repos/o/r/pulls/12/reviews", "/repos/o/r/actions/runs/42/jobs", "/repos/o/r/actions/jobs/99/logs"}) {
             assertTrue(p, GitHubPaths.allowed("GET", p));
         }
         for (String p : new String[] {"/user/emails", "/user/keys", "/repos/o/r", "/repos/o/r/hooks", "/repos/o/r/pulls/x/files", "/gists",
             "/repos/o/r/actions/secrets", "/orgs/acme/members", "/repos/o/r/git/ref/heads/", "/repos/o/r/issues/x", "/repos/o/r/issues/7/events",
-            "/repos/o/r/pulls/12/commits", "/repos/o/r/pulls/12/reviews/3"}) {
+            "/repos/o/r/pulls/12/commits", "/repos/o/r/pulls/12/reviews/3", "/repos/o/r/actions/runs/x/jobs", "/repos/o/r/actions/jobs/x/logs",
+            "/repos/o/r/actions/runs/42/logs"}) {
             assertFalse(p, GitHubPaths.allowed("GET", p));
         }
         assertTrue(GitHubPaths.allowed("PUT", "/repos/o/r/pulls/3/merge"));
@@ -106,6 +107,11 @@ public class BackendTest {
         assertTrue(GitHubPaths.allowed("POST", "/repos/o/r/pulls/12/reviews"));
         assertTrue(GitHubPaths.allowed("GET", "/repos/o/r/pulls/12/comments"));
         assertTrue(GitHubPaths.allowed("POST", "/repos/o/r/pulls/12/comments"));
+        assertTrue(GitHubPaths.allowed("POST", "/repos/o/r/actions/runs/42/rerun"));
+        assertTrue(GitHubPaths.allowed("POST", "/repos/o/r/actions/runs/42/rerun-failed-jobs"));
+        assertFalse(GitHubPaths.allowed("POST", "/repos/o/r/actions/runs/x/rerun"));
+        assertFalse(GitHubPaths.allowed("POST", "/repos/o/r/actions/runs/42/cancel"));
+        assertFalse(GitHubPaths.allowed("DELETE", "/repos/o/r/actions/runs/42/logs"));
         assertFalse(GitHubPaths.allowed("POST", "/repos/o/r/pulls/12/comments/3/replies"));
         assertFalse(GitHubPaths.allowed("POST", "/repos/o/r/pulls/12/merge"));
         assertFalse(GitHubPaths.allowed("POST", "/repos/o/r/issues/x/comments"));
