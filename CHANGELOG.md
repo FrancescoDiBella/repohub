@@ -10,6 +10,18 @@ The sections are **Added**, **Changed** and **Fixed**.
 ## Unreleased
 
 ### Added
+- Triage in a conversation: a details block (beside it on a wide window, above it on a phone)
+  with **Labels**, **Assignees**, **Milestone** and, on pull requests, **Reviewers** (who is
+  asked, and who reviewed with their verdict). **Edit** opens a picker with a filter and the
+  repository's choices; **Apply** sends the change. Edit the **title** and the **description**
+  in place. The conversation and the lists follow at once; when GitHub refuses, it says so and
+  keeps the old values.
+- **New issue** takes optional labels and assignees.
+- **Review requested**: a chip on the Pull requests page, a **Waiting for your review** panel on
+  the Overview and a line in the status-bar menu ("2 pull requests wait for your review"). Rows
+  show up to three assignees.
+- The Pull requests and Issues filters are kept between visits and restarts; **Clear** resets
+  them.
 - Actions: filter workflow runs by status (**All**, **Failed**, **Running**), repository and
   workflow; click a run to inspect its jobs, steps and the last 200 lines of any job's log (with
   **Copy log**), and re-run failed jobs or the whole workflow (**Actions: Read and write** /
