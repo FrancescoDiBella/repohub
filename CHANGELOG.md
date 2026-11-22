@@ -93,6 +93,8 @@ The sections are **Added**, **Changed** and **Fixed**.
   now says so in a toast instead of failing silently, and a form you opened meanwhile is no
   longer closed or marked with the other one's result.
 - **Close pull request** offers **Undo** in its toast, as closing an issue does.
+- A repository's "open issues and pull requests" count didn't change when a pull request was
+  opened, merged, closed or reopened in RepoHub (only issues counted); it does now.
 - With only a token set, changing it outside the app to another person's showed the previous
   account's saved lists (private repositories included) until the whole first load finished,
   or for good if it failed; they're replaced as soon as the new account's profile arrives.

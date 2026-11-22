@@ -2288,6 +2288,10 @@ impl App {
                 if let Some(t) = self.data.open_pulls_total.as_mut() {
                     *t += 1;
                 }
+                // GitHub's count of a repository's open issues includes its pull requests.
+                if let Some(r) = self.data.repos.iter_mut().find(|r| r.full_name.eq_ignore_ascii_case(&full_name)) {
+                    r.issues += 1;
+                }
                 self.notify(format!("Opened pull request #{}", c.number));
             }
             github::Done::Closed(n) => {
@@ -2359,6 +2363,9 @@ impl App {
                     if let Some(t) = self.data.closed_pulls_total.as_mut() {
                         *t += 1;
                     }
+                    if let Some(r) = self.data.repos.iter_mut().find(|r| r.full_name.eq_ignore_ascii_case(&full_name)) {
+                        r.issues = r.issues.saturating_sub(1);
+                    }
                 }
                 self.notify(format!("Merged pull request #{n}"));
             }
@@ -2378,6 +2385,9 @@ impl App {
                     }
                     if let Some(t) = to.as_mut() {
                         *t += 1;
+                    }
+                    if let Some(r) = self.data.repos.iter_mut().find(|r| r.full_name.eq_ignore_ascii_case(&full_name)) {
+                        r.issues = if open { r.issues + 1 } else { r.issues.saturating_sub(1) };
                     }
                 }
                 if open {
@@ -5497,6 +5507,28 @@ mod fix66_tests {
         assert!(s.toast.as_ref().is_some_and(|t| t.text.contains("no local copy")), "it doesn't return silently");
         assert!(s.git_job.is_none());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A repository's "open issues and pull requests" count (GitHub's `open_issues_count`)
+    /// follows pull requests too, as it follows issues: opened, merged, closed, reopened.
+    #[test]
+    fn the_repositorys_open_count_follows_pull_requests_too() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = app();
+        let p = s.data.pulls.iter().find(|p| p.state == crate::model::PullState::Open).unwrap().clone();
+        let count = |s: &App| s.data.repos.iter().find(|r| crate::model::same_repo(&r.full_name, &p.repo)).unwrap().issues;
+        let before = count(&s);
+        s.pull_meta = Some(("New".into(), false));
+        s.apply_done(&p.repo, github::Done::Pull(github::Created { number: 900, url: String::new() }));
+        assert_eq!(count(&s), before + 1, "a new pull request");
+        s.apply_done(&p.repo, github::Done::Merged(900));
+        assert_eq!(count(&s), before, "merged");
+        s.apply_done(&p.repo, github::Done::PullOpen(p.number, false));
+        assert_eq!(count(&s), before - 1, "closed");
+        s.apply_done(&p.repo, github::Done::PullOpen(p.number, true));
+        assert_eq!(count(&s), before, "reopened");
+        s.apply_done(&p.repo, github::Done::Merged(900));
+        assert_eq!(count(&s), before, "merging again changes nothing");
     }
 
     /// Closing a pull request changes GitHub as closing an issue does: its toast offers Undo,
