@@ -16,7 +16,7 @@ on:
     paths-ignore: ["**.md", "docs/**"]
   workflow_dispatch:
   pull_request:
-    paths: ["src/**", "assets/**", "Cargo.toml", "Cargo.lock", "packaging/**", "android/**", "web/**", "scripts/android-web.sh", ".github/workflows/release.yml"]
+    paths: ["src/**", "assets/**", "Cargo.toml", "Cargo.lock", "packaging/**", "android/**", "web/**", "scripts/android-web.sh", "scripts/web-build.sh", "scripts/install-wasm-opt.sh", ".github/workflows/release.yml"]
 
 permissions:
   contents: write
@@ -82,6 +82,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: desktop-${{ matrix.name }}
+      # The packages are built with the `dist` profile (Cargo.toml): smaller, slower to link.
 
       - name: macOS app and disk image
         if: matrix.name == 'macos'
@@ -91,18 +92,18 @@ jobs:
         if: matrix.name == 'windows'
         shell: bash
         run: |
-          cargo build --release --bin repohub
+          cargo build --profile dist --bin repohub
           mkdir -p dist/RepoHub
-          cp target/release/repohub.exe dist/RepoHub/RepoHub.exe
+          cp target/dist/repohub.exe dist/RepoHub/RepoHub.exe
           cp .env.example dist/RepoHub/
           cd dist && 7z a "RepoHub-$VERSION-windows.zip" RepoHub
 
       - name: Linux archive
         if: matrix.name == 'linux'
         run: |
-          cargo build --release --bin repohub
+          cargo build --profile dist --bin repohub
           mkdir -p "dist/repohub-$VERSION"
-          cp target/release/repohub packaging/linux/repohub.desktop packaging/linux/repohub.png packaging/linux/install.sh "dist/repohub-$VERSION/"
+          cp target/dist/repohub packaging/linux/repohub.desktop packaging/linux/repohub.png packaging/linux/install.sh "dist/repohub-$VERSION/"
           tar -C dist -czf "dist/RepoHub-$VERSION-linux-x86_64.tar.gz" "repohub-$VERSION"
 
       - uses: actions/upload-artifact@v4
@@ -146,8 +147,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: android
-      - name: wasm-bindgen
-        run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
+      - name: wasm-bindgen and wasm-opt
+        run: |
+          cargo install wasm-bindgen-cli --version 0.2.129 --locked
+          scripts/install-wasm-opt.sh "$HOME/.local/bin" && echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: The page
         run: scripts/android-web.sh
       - uses: actions/setup-java@v4

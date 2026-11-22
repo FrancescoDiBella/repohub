@@ -24,19 +24,17 @@ jobs:
       - name: Toolchain
         run: rustup show active-toolchain && rustup target add wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      - name: wasm-bindgen
-        run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
-      - name: Build
-        env:
-          CARGO_PROFILE_RELEASE_OPT_LEVEL: s
-          CARGO_PROFILE_RELEASE_LTO: thin
-          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 1
+      - name: wasm-bindgen and wasm-opt
         run: |
-          cargo build --release --lib --target wasm32-unknown-unknown
-          wasm-bindgen --target web --out-dir web --out-name app target/wasm32-unknown-unknown/release/repohub.wasm
+          cargo install wasm-bindgen-cli --version 0.2.129 --locked
+          scripts/install-wasm-opt.sh "$HOME/.local/bin" && echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      # The same build as the Docker image and the Android app (scripts/web-build.sh). Pages
+      # compresses what it serves itself, so no .br or .gz copies.
+      - name: Build
+        run: scripts/web-build.sh _site
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: web
+          path: _site
   deploy:
     needs: build
     runs-on: ubuntu-latest
