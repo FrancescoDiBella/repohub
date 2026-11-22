@@ -1036,6 +1036,10 @@ impl App {
         }
         self.update_channel = channel;
         channel.save();
+        // A download from the other channel stops (unless it's already being installed).
+        if matches!(self.update, update::Update::Downloading { .. }) {
+            self.cancel_update();
+        }
         // What was found on the other channel doesn't count here.
         if !matches!(self.update, update::Update::Unavailable(_) | update::Update::Downloading { .. } | update::Update::Installing) {
             self.update = update::Update::Idle;
@@ -5604,6 +5608,29 @@ mod fix60_tests {
         // Once already Installing, cancel_update is a no-op.
         s.cancel_update();
         assert_eq!(s.update, crate::update::Update::Installing);
+    }
+
+    /// Switching where updates come from while one downloads stops that download (it's the
+    /// other channel's build) instead of installing it anyway; once installing, it's too late.
+    #[test]
+    fn switching_channel_mid_download_stops_the_other_channels_build() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _dir = crate::load_gen_tests::TempDataDir::new("update-channel");
+        let mut s = crate::init();
+        let rel = sample_release();
+        s.update_channel = crate::update::Channel::Preview;
+        let job = crate::UpdateJob::new();
+        s.update_cancel = Some(job.clone());
+        s.update = crate::update::Update::Downloading { release: rel.clone(), percent: 30 };
+        s.set_update_channel(crate::update::Channel::Stable);
+        assert!(job.was_cancelled() && !job.begin_install(), "the Latest build's download stops");
+        assert!(s.update_cancel.is_none());
+        assert!(matches!(s.update, crate::update::Update::Idle | crate::update::Update::Checking), "{:?}", s.update);
+        // Already installing: nothing changes but the channel.
+        s.update = crate::update::Update::Installing;
+        s.set_update_channel(crate::update::Channel::Preview);
+        assert_eq!(s.update, crate::update::Update::Installing);
+        crate::update::Channel::Stable.save();
     }
 
     #[test]
