@@ -3420,7 +3420,9 @@ fn init() -> App {
     // The sample data has no places of its own to go back to.
     if arg("page").is_none() && !s.data.sample {
         s.pending_place = prefs::get("place").as_ref().and_then(state::Place::from_json);
-        if !s.data.repos.is_empty() {
+        // Over the saved copy it's restored once the window is there (`start`): what the page
+        // reads needs the app's handle.
+        if !s.data.repos.is_empty() && !s.fresh.from_copy {
             s.restore_place();
         }
     }
@@ -4295,6 +4297,10 @@ pub fn start() {
         // What the first load found before the window opened.
         if let Some(m) = s.fresh.early.take() {
             m.attach(h2.clone());
+        }
+        // The place of last time, over the saved copy (before the first frame).
+        if !s.data.repos.is_empty() {
+            s.restore_place();
         }
         s.start_tray();
         #[cfg(not(target_arch = "wasm32"))]
