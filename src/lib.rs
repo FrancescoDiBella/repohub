@@ -3159,6 +3159,54 @@ impl App {
         }
     }
 
+    /// Esc: closes what's open on top of the page, the most recent first (a question, a picker,
+    /// an editor, then a form, a conversation…). Only what's on screen: a form left on another
+    /// repository's page stays. True when it closed something.
+    pub(crate) fn escape(&mut self, tx: &mut Tx) -> bool {
+        let form_shown = matches!(&self.page, Page::Repo(full) if self.form.as_ref().is_some_and(|f| f.repo.eq_ignore_ascii_case(full)));
+        let thread_edit = self.thread.as_mut().map(|t| &mut t.edit);
+        if self.confirm_merge.is_some() {
+            self.confirm_merge = None;
+        } else if self.confirm_delete.is_some() {
+            self.confirm_delete = None;
+        } else if self.picker.is_some() {
+            self.picker = None;
+        } else if let Some(e) = thread_edit.filter(|e| e.picker.is_some() || e.title.is_some() || e.body.is_some()) {
+            // A picker, or the title or description being edited: closed without saving.
+            if e.picker.is_some() {
+                e.picker = None;
+            } else if e.title.is_some() {
+                e.title = None;
+            } else {
+                e.body = None;
+            }
+        } else if form_shown && self.issue_picks.picker.is_some() {
+            self.issue_picks.picker = None;
+        } else if form_shown {
+            self.form = None;
+            self.issue_picks = Default::default();
+        } else if self.release_escape() {
+            // The publish question, GitHub's notes on offer, or the release form.
+        } else if self.pull_diff_of.is_some() {
+            self.close_pull_diff();
+        } else if self.thread.is_some() {
+            self.thread = None;
+        } else if self.open_run.is_some() {
+            self.open_run = None;
+        } else if self.commits.open.is_some() {
+            self.close_commit(Some(tx));
+        } else if self.commits.compare.is_some() {
+            self.close_compare();
+        } else if self.local_file.is_some() && matches!(self.page, Page::Repo(_)) {
+            self.local_file = None;
+        } else if self.toast.is_some() {
+            self.toast = None;
+        } else {
+            return false;
+        }
+        true
+    }
+
     fn starred_count(&self) -> u32 {
         self.data.repos.iter().map(|r| r.stars).sum()
     }
@@ -4244,30 +4292,7 @@ fn shortcuts(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
     }
     // Esc closes what's open on top of the page, the most recent first.
     if ev.key == rune::Key::Escape && ev.mods == rune::Mods::default() {
-        if s.confirm_merge.is_some() {
-            s.confirm_merge = None;
-        } else if s.form.is_some() {
-            s.form = None;
-        } else if s.release_escape() {
-            // The publish question, GitHub's notes on offer, or the release form.
-        } else if s.pull_diff_of.is_some() {
-            s.close_pull_diff();
-        } else if s.thread.is_some() {
-            s.thread = None;
-        } else if s.open_run.is_some() {
-            s.open_run = None;
-        } else if s.commits.open.is_some() {
-            s.close_commit(Some(tx));
-        } else if s.commits.compare.is_some() {
-            s.close_compare();
-        } else if s.local_file.is_some() {
-            s.local_file = None;
-        } else if s.toast.is_some() {
-            s.toast = None;
-        } else {
-            return false;
-        }
-        return true;
+        return s.escape(tx);
     }
     // ⌘/Ctrl+1…5 jump to the main pages, ⌘/Ctrl+, to Settings.
     for (c, page) in [('1', Page::Overview), ('2', Page::Repos), ('3', Page::Pulls), ('4', Page::Issues), ('5', Page::Actions), (',', Page::Settings)] {
@@ -5298,6 +5323,64 @@ mod fix69_tests {
         rt.frame(2.0);
         key(&mut rt, Key::Command('['), cmd, &mut t);
         assert!(rt.state.thread.is_none() && rt.state.page == Page::Repos, "and out of a conversation");
+    }
+
+    /// Esc closes what's on top first (a picker, an editor, a question), and never a form that
+    /// isn't on screen: an issue being written on a repository's page stays when Esc closes a
+    /// conversation on another page.
+    #[test]
+    fn esc_closes_pickers_and_editors_first_and_never_a_form_out_of_sight() {
+        use crate::state::{BranchSlot, Compose, Facet};
+        use crate::triage::Host;
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut rt = app(Page::Pulls);
+        let mut t = 0.0;
+        let pr = rt.state.data.pulls.iter().find(|p| p.number == 14).unwrap().clone();
+        rt.update(|s, _| s.open_thread(&pr.repo, 14, true));
+        rt.frame(0.1);
+        rt.update(|s, _| s.open_picker(Host::Thread, Facet::Labels));
+        rt.frame(0.2);
+        key(&mut rt, Key::Escape, Mods::default(), &mut t);
+        assert!(rt.state.picker(Host::Thread).is_none(), "the labels picker closes");
+        assert!(rt.state.thread.is_some(), "the conversation under it stays");
+        for edit in ["title", "body"] {
+            rt.update(|s, _| if edit == "title" { s.edit_title() } else { s.edit_body() });
+            rt.frame(t + 0.01);
+            key(&mut rt, Key::Escape, Mods::default(), &mut t);
+            let e = &rt.state.thread.as_ref().expect("the conversation stays").edit;
+            assert!(e.title.is_none() && e.body.is_none(), "the {edit} editor closes");
+        }
+        assert!(rt.state.choices.sent.is_empty(), "nothing was sent");
+        key(&mut rt, Key::Escape, Mods::default(), &mut t);
+        assert!(rt.state.thread.is_none(), "then the conversation");
+
+        // An issue being written on a repository's page, left for another page.
+        rt.update(|s, _| {
+            s.open(0);
+            s.open_form(0, Compose::Issue);
+            s.form.as_mut().unwrap().title = rune::TextEdit::new("Half-written issue");
+            s.go(Page::Pulls);
+            s.open_thread(&pr.repo, 14, true);
+        });
+        rt.frame(t + 0.01);
+        key(&mut rt, Key::Escape, Mods::default(), &mut t);
+        assert!(rt.state.thread.is_none(), "Esc closes the conversation on screen");
+        assert_eq!(rt.state.form.as_ref().map(|f| f.title.text.as_str()), Some("Half-written issue"), "not the issue on the repository's page");
+        // Back there: the branch picker, then the form's labels picker, then the form.
+        rt.update(|s, _| {
+            let full = s.data.repos[0].full_name.clone();
+            s.go(Page::Repo(full));
+            s.picker = Some(BranchSlot::View);
+        });
+        rt.frame(t + 0.01);
+        key(&mut rt, Key::Escape, Mods::default(), &mut t);
+        assert!(rt.state.picker.is_none() && rt.state.form.is_some(), "the branch picker first");
+        rt.update(|s, _| s.open_picker(Host::Form, Facet::Labels));
+        rt.frame(t + 0.01);
+        key(&mut rt, Key::Escape, Mods::default(), &mut t);
+        assert!(rt.state.picker(Host::Form).is_none() && rt.state.form.is_some(), "the form's picker next");
+        key(&mut rt, Key::Escape, Mods::default(), &mut t);
+        assert!(rt.state.form.is_none(), "then the form");
     }
 }
 
