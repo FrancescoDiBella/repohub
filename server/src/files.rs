@@ -62,10 +62,11 @@ pub(crate) fn choose(file: &Path, root: &Path, accept: Option<&str>) -> (PathBuf
         let mut name = file.as_os_str().to_owned();
         name.push(".");
         name.push(suffix);
-        if let Ok(copy) = std::fs::canonicalize(PathBuf::from(name)) {
-            if copy.starts_with(root) && copy.is_file() {
-                return (copy, Some(coding));
-            }
+        if let Ok(copy) = std::fs::canonicalize(PathBuf::from(name))
+            && copy.starts_with(root)
+            && copy.is_file()
+        {
+            return (copy, Some(coding));
         }
     }
     (file.to_owned(), None)

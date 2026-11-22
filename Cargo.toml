@@ -14,7 +14,7 @@ path = "src/main.rs"
 [dependencies]
 # Rune's default features without two: `embedded-fonts`, Rune's own copy of Inter and IBM Plex Mono
 # for the web build, which would sit next to the same fonts RepoHub registers (`FONTS` in
-# src/lib.rs); and `ogg-audio`, audio decoders for macOS that RepoHub never uses.
+# src/app/frame.rs); and `ogg-audio`, audio decoders for macOS that RepoHub never uses.
 rune = { git = "https://github.com/anomalyco/rune", rev = "39301f6793266450a057f270da06b048a689be96", default-features = false, features = ["accessibility", "dbus", "metal-backend", "svg"] }
 rune-kit = { git = "https://github.com/anomalyco/rune", rev = "39301f6793266450a057f270da06b048a689be96", features = ["markdown"] }
 
