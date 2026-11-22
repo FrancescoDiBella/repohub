@@ -4,7 +4,7 @@ use rune_kit::{Button, ButtonVariant, ControlSize, Kit, TextInput};
 
 use crate::terminal::{self, Screen};
 use crate::ui::{self, panel};
-use crate::{App, clones_shim, icons};
+use crate::{App, icons};
 
 const FONT: TextStyle = TextStyle { family: Family::Mono, ..TextStyle::new(13.0, 400.0) };
 
@@ -22,7 +22,7 @@ pub fn terminal_tab(s: &App, k: &Kit, i: usize, dark: bool) -> El {
     }
     let r = &s.data.repos[i];
     let term = s.terms.get(&r.full_name);
-    let known = clones_shim::find(&r.full_name);
+    let known = s.known_clone(&r.full_name);
     let mut out = col().w_full().gap(10.0);
     if let Some(e) = &s.term_error {
         out = out.child(text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap());
@@ -75,12 +75,13 @@ impl<'a> Panel<'a> {
 /// Choosing the local folder, or cloning the repository.
 pub(crate) fn pick_folder(s: &App, k: &Kit, i: usize, found: bool) -> El {
     let r = &s.data.repos[i];
-    let field = TextInput::new(&s.clone_path).label("Local repository folder").placeholder("Folder of your local copy, e.g. ~/Developer/repohub")
+    let field = TextInput::new(&s.clone_path).placeholder("Folder of your local copy, e.g. ~/Developer/repohub")
+        .label("Local repository folder")
         .on_edit(|s: &mut App| &mut s.clone_path).on_submit(move |s: &mut App, _| s.use_folder(i))
         .build(k).key("clone-path").grow(1.0).min_w(260.0);
     let use_it = Button::new("Use this folder").control_size(ControlSize::Small).disabled(s.clone_path.text.trim().is_empty())
         .on_press(move |s: &mut App| s.use_folder(i)).build(k).key("use-folder");
-    let parent = clones_shim::default_parent();
+    let parent = &s.default_clone_parent;
     let clone = Button::new(format!("Clone into {}", parent.join(&r.name).display())).icon(&icons::BRANCH).control_size(ControlSize::Small)
         .on_press(move |s: &mut App| s.clone_repo(i)).build(k).key("clone-repo");
     let mut p = panel(k).padding(20.0).gap(12.0);
@@ -90,7 +91,7 @@ pub(crate) fn pick_folder(s: &App, k: &Kit, i: usize, found: bool) -> El {
                 .font(k.ty.small).color(k.c.text_muted).wrap());
         // A folder with the repository's name that is another repository: say so, and let the
         // user decide (it may be a fork, or the repository was renamed).
-        if let Some(dir) = clones_shim::lookalike(&r.full_name) {
+        if let Some(dir) = s.lookalike_clone(&r.full_name) {
             p = p.child(col().w_full().padding(12.0).gap(8.0).radius(k.radius.md).fill(k.c.warning.icon.alpha(0.10)).border(1.0, k.c.warning.icon.alpha(0.45)).key("lookalike")
                 .child(text(format!("Found {}, but it looks like another repository: none of its remotes is {}. RepoHub won't commit, merge or run commands there unless you say it's the one.", dir.display(), r.full_name))
                     .font(k.ty.small).color(k.c.text_base).wrap())
@@ -153,21 +154,29 @@ fn toolbar(s: &App, k: &Kit, i: usize, cwd: &str, running: bool) -> El {
 }
 
 fn view(s: &App, k: &Kit, i: usize, t: &terminal::Term, dark: bool) -> El {
-    let screen: Screen = t.screen(dark);
     let [_, lh] = s.term_cell;
     let (bg, fg) = if dark { (rune::color::hex("#0d1117").unwrap_or(Color::BLACK), rune::color::hex("#e6edf3").unwrap_or(Color::WHITE)) } else { (Color::WHITE, rune::color::hex("#1f2328").unwrap_or(Color::BLACK)) };
-    let mut lines = col().w_full().gap(0.0);
-    for runs in &screen.rows {
-        let mut line = row().h(lh).w_full().clip_rounded(0.0);
-        for run in runs {
-            let mut e = text(run.text.clone()).font(if run.bold { TextStyle { weight: 650.0, ..FONT } } else { FONT }).color(run.fg.unwrap_or(fg)).h(lh);
-            if let Some(b) = run.bg {
-                e = e.fill(b);
+    let scrolled = t.scroll > 0;
+    let lines = rune::memo(
+        format!("term-lines-{}", s.data.repos[i].full_name),
+        (t.generation(), dark, lh.to_bits()),
+        || {
+            let screen: Screen = t.screen(dark);
+            let mut lines = col().w_full().gap(0.0);
+            for runs in &screen.rows {
+                let mut line = row().h(lh).w_full().clip_rounded(0.0);
+                for run in runs {
+                    let mut e = text(run.text.clone()).font(if run.bold { TextStyle { weight: 650.0, ..FONT } } else { FONT }).color(run.fg.unwrap_or(fg)).h(lh);
+                    if let Some(b) = run.bg {
+                        e = e.fill(b);
+                    }
+                    line = line.child(e);
+                }
+                lines = lines.child(line);
             }
-            line = line.child(e);
-        }
-        lines = lines.child(line);
-    }
+            lines
+        },
+    );
     // An invisible probe measures the font's cell size, so rows and columns match the shell's.
     let probe = text("0123456789").font(FONT).opacity(0.0).absolute(0.0, 0.0)
         .on_layout_tx(|s: &mut App, [_, _, w, h], _| {
@@ -211,7 +220,7 @@ fn view(s: &App, k: &Kit, i: usize, t: &terminal::Term, dark: bool) -> El {
             }
             true
         });
-    if screen.scrolled {
+    if scrolled {
         area = area.child(text("Scrolled back · type to return").font(k.ty.text_small).color(k.c.text_muted)
             .px(8.0).py(3.0).radius(8.0).fill(k.c.bg_base).pin(None, Some(8.0), Some(12.0), None));
     }

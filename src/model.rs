@@ -17,6 +17,13 @@ pub enum Checks {
 }
 
 #[derive(Clone, Debug, Default)]
+pub struct RepoKeys {
+    pub name_lower: String,
+    pub desc_lower: String,
+    pub topics_lower: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct Repo {
     pub full_name: String,
     pub owner: String,
@@ -36,11 +43,27 @@ pub struct Repo {
     pub topics: Vec<String>,
     pub url: String,
     pub starred: bool,
+    #[doc(hidden)]
+    pub keys: std::sync::OnceLock<RepoKeys>,
 }
 
 impl Repo {
     pub fn updated_ago(&self, now: i64) -> String {
         fmt_ago(self.pushed, now)
+    }
+
+    /// Lowercase name, description and topics for filtering and sorting, computed once per `Repo`.
+    pub fn keys(&self) -> &RepoKeys {
+        self.keys.get_or_init(|| RepoKeys {
+            name_lower: self.name.to_lowercase(),
+            desc_lower: self.description.to_lowercase(),
+            topics_lower: self.topics.iter().map(|t| t.to_lowercase()).collect(),
+        })
+    }
+
+    /// Warms [`Repo::keys`] off the UI thread when loading data.
+    pub fn precompute_keys(&self) {
+        let _ = self.keys();
     }
 }
 
@@ -373,24 +396,29 @@ impl Data {
     pub fn sample_at(now: i64) -> Data {
         const HOUR: i64 = 3600;
         const DAY: i64 = 86400;
-        let repo_of = |owner: &str, name: &str, desc: &str, lang: &str, stars, forks, issues, age_secs: i64, private, fork, branch: &str, topics: &[&str], starred| Repo {
-            full_name: format!("{owner}/{name}"),
-            owner: owner.into(),
-            name: name.into(),
-            description: desc.into(),
-            language: lang.into(),
-            hue: lang_hue(lang),
-            stars,
-            forks,
-            issues,
-            pushed: now - age_secs,
-            private,
-            fork,
-            archived: false,
-            branch: branch.into(),
-            topics: topics.iter().map(|t| t.to_string()).collect(),
-            url: format!("https://github.com/{owner}/{name}"),
-            starred,
+        let repo_of = |owner: &str, name: &str, desc: &str, lang: &str, stars, forks, issues, age_secs: i64, private, fork, branch: &str, topics: &[&str], starred| {
+            let r = Repo {
+                full_name: format!("{owner}/{name}"),
+                owner: owner.into(),
+                name: name.into(),
+                description: desc.into(),
+                language: lang.into(),
+                hue: lang_hue(lang),
+                stars,
+                forks,
+                issues,
+                pushed: now - age_secs,
+                private,
+                fork,
+                archived: false,
+                branch: branch.into(),
+                topics: topics.iter().map(|t| t.to_string()).collect(),
+                url: format!("https://github.com/{owner}/{name}"),
+                starred,
+                keys: std::sync::OnceLock::new(),
+            };
+            r.precompute_keys();
+            r
         };
         let repo = |name: &str, desc: &str, lang: &str, stars, forks, issues, age_secs: i64, private, fork, branch: &str, topics: &[&str], starred|
             repo_of("francescodibella", name, desc, lang, stars, forks, issues, age_secs, private, fork, branch, topics, starred);

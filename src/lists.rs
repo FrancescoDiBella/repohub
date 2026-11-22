@@ -90,7 +90,6 @@ pub fn run_row(k: &Kit, r: &Run, now: i64, compact: bool) -> El {
         Some(when.w(140.0))
     };
     let mut e = row().w_full().px(16.0).py(11.0).gap(12.0).center_y().hover(k.c.hover).press(k.c.pressed)
-        .key(format!("run-{}-{}-{}", r.repo, r.workflow, r.updated_at))
         .child(ui::checks(k, r.checks))
         .child(col().grow(1.0).shrink().gap(3.0)
             .child(text(r.workflow.clone()).font(k.ty.ui_medium).color(k.c.text_base).wrap())
