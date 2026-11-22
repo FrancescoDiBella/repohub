@@ -66,6 +66,10 @@ The first numbered release.
 - Themes: nine ready-made themes, plus your own. You choose a colour for each part of the
   window, a background (a pattern or a picture), a glow on buttons, corner roundness and accent
   buttons. Pick one for the light appearance and one for the dark one.
+- Contrast checks in the theme editor: colours that are hard to read show their WCAG contrast
+  ratio and a **Fix contrast** button that adjusts their lightness, main buttons pick readable
+  ink in every theme, and issue label chips reach at least 4.5:1 contrast on light and dark
+  panels.
 - Release notes. This changelog is now published as the notes of each release and of the Latest
   build. When a new version is ready, the app can show **What's new**.
 - Pinned repositories: pin or unpin any repository from its card, its page or ⌘K. Your pins are
