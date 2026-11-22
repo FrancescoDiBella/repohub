@@ -25,6 +25,10 @@ pub fn pull_row(k: &Kit, p: &Pull, now: i64, compact: bool) -> El {
         PullState::Closed => meta = meta.child(ui::pill(k, "Closed", k.c.danger.icon)),
         _ => {}
     }
+    if p.review_requested && matches!(p.state, PullState::Open | PullState::Draft) {
+        meta = meta.child(ui::pill(k, "Review requested", k.c.text_accent));
+    }
+    meta = meta.children(crate::triage_page::assignees(k, &p.assignees));
     let mut r = row().w_full().px(16.0).py(11.0).gap(12.0).center_y().hover(k.c.hover).press(k.c.pressed)
         .child(ui::pull_icon(k, p.state))
         .child(col().grow(1.0).shrink().gap(3.0)
@@ -58,11 +62,12 @@ pub fn issue_row(k: &Kit, i: &Issue, now: i64) -> El {
     if i.labels.len() > 3 {
         title = title.child(text(format!("+{}", i.labels.len() - 3)).font(k.ty.text_small).color(k.c.text_faint));
     }
+    title = title.children(crate::triage_page::assignees(k, &i.assignees));
     let r = row().w_full().px(16.0).py(11.0).gap(12.0).center_y().hover(k.c.hover).press(k.c.pressed)
         .child(ui::ico(&icons::ISSUE, 16.0, k.c.success.icon).label("Open issue"))
         .child(col().grow(1.0).shrink().gap(3.0)
             .child(title)
-            .child(text(format!("#{} · {} · opened {}", i.number, i.repo, i.age_ago(now))).font(k.ty.text_small).color(k.c.text_muted)))
+            .child(text(format!("#{} · {} · opened {}", i.number, i.repo, i.age_ago(now))).font(k.ty.text_small).color(k.c.text_muted).wrap()))
         .child(ui::stat(k, &icons::COMMENT, i.comments.to_string()));
     let (repo, number) = (i.repo.clone(), i.number);
     r.key(format!("issue-{}-{}", i.repo, i.number))
@@ -113,6 +118,10 @@ pub fn run_row(k: &Kit, r: &Run, now: i64, compact: bool) -> El {
 
 fn listing(s: &App, k: &Kit, rows: Vec<El>, empty: &str, retry_key: &str) -> El {
     if rows.is_empty() {
+        // Only the repositories are in yet: this list is still on its way.
+        if s.lists_loading() {
+            return ui::skeleton_list(k, 5, "skeleton-list");
+        }
         if s.data.is_empty() {
             if s.status.is_busy() {
                 return ui::skeleton_list(k, 5, "skeleton-list");
@@ -185,7 +194,7 @@ pub fn pulls(s: &App, k: &Kit) -> El {
         .child(heading(k, "Pull requests", &sub, action_el))
         .children(crate::changes_page::pull_panel(s, k))
         .child(SegmentedControl::new(&PR_LABELS, PR_STATES.iter().position(|p| *p == s.pr_filter)).label("State").fit()
-            .on_pick(|s: &mut App, i, _| s.pr_filter = PR_STATES[i.min(3)]).build(k).key("pr-filter"))
+            .on_pick(|s: &mut App, i, _| { s.pr_filter = PR_STATES[i.min(3)]; s.save_filters(); }).build(k).key("pr-filter"))
         .child(crate::filters::bar(s, k, crate::filters::Which::Pulls, filter_repos, filter_labels))
         .child(listing(s, k, rows, empty, "retry-pulls"))
 }
@@ -389,7 +398,7 @@ pub fn settings(s: &App, k: &Kit) -> El {
         Section::Appearance => ("Light, dark or the system's, and the themes.", vec![appearance]),
         Section::Assistants => ("Claude and the other coding assistants the Terminal starts.", vec![assistants]),
         Section::Plugins => ("Sections and pages others wrote for RepoHub.", vec![plugins]),
-        Section::About => ("This version of RepoHub, its updates and the keyboard shortcuts.", vec![version, keys]),
+        Section::About => ("This version of RepoHub, its updates, the data it saves and the keyboard shortcuts.", vec![version, crate::cache_page::panel_of(s, k), keys]),
     };
     col().w_full().gap(16.0).max_w(760.0)
         .child(heading(k, "Settings", subtitle, None))

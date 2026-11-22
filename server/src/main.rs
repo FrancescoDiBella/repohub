@@ -560,9 +560,10 @@ fn compare_spec(spec: &str) -> bool {
 }
 
 /// Which proxied API calls are allowed: the exact read endpoints RepoHub uses, starring, and the few
-/// writes the app makes (create an issue, a branch or a pull request, close an issue, merge a
-/// pull request, and board sync's writes to one board file in the notes repository). Nothing that
-/// deletes repositories or branches, rewrites, or exposes administrative repository data.
+/// writes the app makes (create an issue, a branch, a pull request or a release, close an issue,
+/// merge a pull request, publish a draft release, triage an issue, and board sync's writes to
+/// one board file in the notes repository). Nothing that deletes repositories, branches, releases
+/// or tags, rewrites, uploads, or exposes administrative repository data.
 fn allowed(method: &Method, path: &str) -> bool {
     let p = path.split('?').next().unwrap_or("");
     let seg: Vec<&str> = p.trim_start_matches('/').split('/').collect();
@@ -604,7 +605,15 @@ fn allowed(method: &Method, path: &str) -> bool {
                     | ["languages"]
                     | ["commits"]
                     | ["branches"]
-                    | ["issues"] => return true,
+                    | ["issues"]
+                    // The releases, the tags, and the latest release (not one release by id or tag).
+                    | ["releases"]
+                    | ["releases", "latest"]
+                    | ["tags"] => return true,
+                    // A repository's labels, assignable people and milestones (triage pickers).
+                    | ["labels"]
+                    | ["assignees"]
+                    | ["milestones"] => return true,
                     _ => {}
                 }
                 if rest.len() >= 4 && rest[0] == "git" && rest[1] == "ref" && rest[2] == "heads" && rest[3..].iter().all(|s| !s.is_empty()) {
@@ -642,15 +651,22 @@ fn allowed(method: &Method, path: &str) -> bool {
             false
         }
         Method::Put if repo && rest.len() == 3 && rest[0] == "pulls" && number(rest[1]) && rest[2] == "merge" => true,
+        // Triage also edits an issue's labels, assignees, milestone, title and description (the
+        // PATCH below) and asks for reviews (POST). Taking back a review request on one pull
+        // request is the only DELETE in a repository.
+        Method::Delete if repo && rest.len() == 3 && rest[0] == "pulls" && number(rest[1]) && rest[2] == "requested_reviewers" => true,
         // Board sync writes one board, under boards/ and ending in .excalidraw, nothing else.
         Method::Put | Method::Delete if repo && board_file(rest) => true,
         Method::Put | Method::Delete => seg.len() == 4 && seg[0] == "user" && seg[1] == "starred" && !seg[2].is_empty() && !seg[3].is_empty(),
-        // Creating an issue, a pull request or a branch; commenting; reviewing a pull request; re-running a workflow.
-        Method::Post => repo && (matches!(rest, ["issues"] | ["pulls"] | ["git", "refs"])
-            || (rest.len() == 3 && number(rest[1]) && matches!((rest[0], rest[2]), ("issues", "comments") | ("pulls", "reviews") | ("pulls", "comments")))
+        // Creating an issue, a pull request, a branch or a release (and its generated notes);
+        // commenting; reviewing a pull request; asking for a review; re-running a workflow.
+        Method::Post => repo && (matches!(rest, ["issues"] | ["pulls"] | ["git", "refs"] | ["releases"] | ["releases", "generate-notes"])
+            || (rest.len() == 3 && number(rest[1]) && matches!((rest[0], rest[2]), ("issues", "comments") | ("pulls", "reviews") | ("pulls", "comments") | ("pulls", "requested_reviewers")))
             || (rest.len() == 4 && rest[0] == "actions" && rest[1] == "runs" && number(rest[2]) && matches!(rest[3], "rerun" | "rerun-failed-jobs"))),
-        // Closing or reopening an issue; marking one notification as read.
-        Method::Patch => (repo && rest.len() == 2 && rest[0] == "issues" && number(rest[1]))
+        // Closing or reopening an issue, and editing its labels, assignees, milestone, title and
+        // description (pull requests too); saving or publishing a draft release (by its number);
+        // marking one notification as read.
+        Method::Patch => (repo && rest.len() == 2 && (rest[0] == "issues" || rest[0] == "releases") && number(rest[1]))
             || (seg.len() == 3 && seg[0] == "notifications" && seg[1] == "threads" && number(seg[2])),
         _ => false,
     }
@@ -724,6 +740,19 @@ fn serve_static(cfg: &Cfg, req: Request) {
     files::respond(req, &canon_file, &canon_web, mime(&canon_file));
 }
 
+/// The `If-None-Match` of a GET forwarded to GitHub: entity tags only (`"…"` or `W/"…"`,
+/// comma-separated, printable ASCII, at most 512 bytes); anything else isn't sent.
+fn conditional_tag(method: &str, value: Option<&str>) -> Option<String> {
+    let v = value?.trim();
+    let tag = |t: &str| {
+        let t = t.trim();
+        let inner = t.strip_prefix("W/").unwrap_or(t);
+        inner.len() >= 2 && inner.starts_with('"') && inner.ends_with('"') && !inner[1..inner.len() - 1].contains('"')
+    };
+    let ok = method == "GET" && !v.is_empty() && v.len() <= 512 && v.bytes().all(|b| (0x20..0x7f).contains(&b)) && v.split(',').all(tag);
+    ok.then(|| v.to_owned())
+}
+
 fn proxy(cfg: &Cfg, mut req: Request) {
     let full_path = req.url()["/gh".len()..].to_owned();
     if full_path.chars().any(|c| c.is_control() || c == '\0') {
@@ -756,6 +785,11 @@ fn proxy(cfg: &Cfg, mut req: Request) {
     if let Some(t) = &cfg.token {
         r = r.set("Authorization", &format!("Bearer {t}"));
     }
+    // A conditional read: GitHub answers 304 (not counted against the rate limit) when the
+    // app's copy is still current.
+    if let Some(tag) = conditional_tag(&method, header(&req, "If-None-Match").as_deref()) {
+        r = r.set("If-None-Match", &tag);
+    }
     // Writes carry a JSON body; a body-less PUT (starring) still needs a length.
     let result = if !body.is_empty() {
         r.set("Content-Type", "application/json").send_bytes(&body)
@@ -773,7 +807,7 @@ fn proxy(cfg: &Cfg, mut req: Request) {
     };
     let status = resp.status();
     let mut headers = vec![h("Cache-Control", "no-store")];
-    for name in ["Content-Type", "x-ratelimit-remaining", "x-ratelimit-reset", "x-ratelimit-limit", "retry-after", "link"] {
+    for name in ["Content-Type", "x-ratelimit-remaining", "x-ratelimit-reset", "x-ratelimit-limit", "retry-after", "link", "etag"] {
         if let Some(v) = resp.header(name) {
             headers.push(h(name, v));
         }
@@ -1068,6 +1102,18 @@ mod tests {
         assert!(!allowed(&Method::Get, "/repos/owner/repo/actions/runs/bad/jobs"));
         assert!(!allowed(&Method::Get, "/repos/owner/repo/actions/jobs/bad/logs"));
         assert!(!allowed(&Method::Get, "/repos/owner/repo/actions/runs/42/logs"));
+        // Releases and tags: the list, the latest, the tags; nothing by id, tag or asset.
+        assert!(allowed(&Method::Get, "/repos/owner/repo/releases"));
+        assert!(allowed(&Method::Get, "/repos/owner/repo/releases?per_page=20&page=2"));
+        assert!(allowed(&Method::Get, "/repos/owner/repo/releases/latest"));
+        assert!(allowed(&Method::Get, "/repos/owner/repo/tags?per_page=50"));
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/releases/42"));
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/releases/tags/v1.0.0"));
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/releases/42/assets"));
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/releases/assets/7"));
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/releases/latest/assets"));
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/tags/v1.0.0"));
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/git/tags/0123abc"));
     }
 
     #[test]
@@ -1081,6 +1127,26 @@ mod tests {
         assert!(allowed(&Method::Put, "/repos/owner/repo/pulls/7/merge"));
         assert!(allowed(&Method::Post, "/repos/owner/repo/actions/runs/42/rerun"));
         assert!(allowed(&Method::Post, "/repos/owner/repo/actions/runs/42/rerun-failed-jobs"));
+        // Releases: create one, generate its notes, save or publish a draft by its number.
+        assert!(allowed(&Method::Post, "/repos/owner/repo/releases"));
+        assert!(allowed(&Method::Post, "/repos/owner/repo/releases/generate-notes"));
+        assert!(allowed(&Method::Patch, "/repos/owner/repo/releases/42"));
+        assert!(!allowed(&Method::Patch, "/repos/owner/repo/releases/latest"));
+        assert!(!allowed(&Method::Patch, "/repos/owner/repo/releases/4a2"));
+        assert!(!allowed(&Method::Patch, "/repos/owner/repo/releases/-1"));
+        assert!(!allowed(&Method::Patch, "/repos/owner/repo/releases/42/assets"));
+        assert!(!allowed(&Method::Patch, "/repos/owner/repo/releases"));
+        assert!(!allowed(&Method::Post, "/repos/owner/repo/releases/42"));
+        assert!(!allowed(&Method::Post, "/repos/owner/repo/releases/42/assets"));
+        assert!(!allowed(&Method::Post, "/repos/owner/repo/releases/generate-notes/x"));
+        assert!(!allowed(&Method::Put, "/repos/owner/repo/releases/42"));
+        // Releases, their files and tags are never deleted, and no tag object is made.
+        assert!(!allowed(&Method::Delete, "/repos/owner/repo/releases/42"));
+        assert!(!allowed(&Method::Delete, "/repos/owner/repo/releases/assets/7"));
+        assert!(!allowed(&Method::Delete, "/repos/owner/repo/releases/42/assets/7"));
+        assert!(!allowed(&Method::Post, "/repos/owner/repo/git/tags"));
+        assert!(!allowed(&Method::Delete, "/repos/owner/repo/git/refs/tags/v1.0.0"));
+        assert!(!allowed(&Method::Patch, "/repos/owner/repo/git/refs/tags/v1.0.0"));
         // Marking one notification as read, not all of them, and no unsubscribing.
         assert!(allowed(&Method::Patch, "/notifications/threads/12"));
         assert!(!allowed(&Method::Patch, "/notifications/threads/abc"));
@@ -1111,6 +1177,55 @@ mod tests {
         assert!(!allowed(&Method::Post, "/repos/owner/repo/actions/runs/bad/rerun"));
         assert!(!allowed(&Method::Post, "/repos/owner/repo/actions/runs/42/cancel"));
         assert!(!allowed(&Method::Delete, "/repos/owner/repo/actions/runs/42/logs"));
+    }
+
+    #[test]
+    fn proxy_triage_allowlist() {
+        // The pickers' choices: exactly these three lists, nothing under them, and only read.
+        for p in ["/repos/owner/repo/labels", "/repos/owner/repo/labels?per_page=100", "/repos/owner/repo/assignees?per_page=100",
+            "/repos/owner/repo/milestones?state=open&per_page=100"] {
+            assert!(allowed(&Method::Get, p), "{p}");
+        }
+        for p in ["/repos/owner/repo/labels/bug", "/repos/owner/repo/assignees/alice", "/repos/owner/repo/milestones/3",
+            "/repos/owner/repo/milestones/3/labels", "/repos/owner/repo/collaborators", "/repos/owner/repo/issues/7/labels", "/labels"] {
+            assert!(!allowed(&Method::Get, p), "{p}");
+        }
+        // `/repos/owner/labels` is the repository named "labels" (read for board sync), not a list.
+        assert!(allowed(&Method::Get, "/repos/owner/labels"));
+        assert!(!allowed(&Method::Get, "/repos/owner/labels/labels/bug"));
+        for m in [Method::Post, Method::Put, Method::Patch, Method::Delete] {
+            assert!(!allowed(&m, "/repos/owner/repo/labels"), "{m:?} labels: creating labels is out of scope");
+            assert!(!allowed(&m, "/repos/owner/repo/milestones"), "{m:?} milestones");
+            assert!(!allowed(&m, "/repos/owner/repo/labels/bug"), "{m:?} one label");
+        }
+        // Labels, assignees, milestone, title and description: one PATCH on the issue.
+        assert!(allowed(&Method::Patch, "/repos/owner/repo/issues/7"));
+        assert!(!allowed(&Method::Patch, "/repos/owner/repo/pulls/7"), "a pull request's own fields aren't edited");
+        assert!(!allowed(&Method::Post, "/repos/owner/repo/issues/7/labels"));
+        assert!(!allowed(&Method::Delete, "/repos/owner/repo/issues/7/labels/bug"));
+        assert!(!allowed(&Method::Post, "/repos/owner/repo/issues/7/assignees"));
+        assert!(!allowed(&Method::Delete, "/repos/owner/repo/issues/7/assignees"));
+        // Asking for a review and taking the request back: digits for the number, nothing next to it.
+        assert!(allowed(&Method::Post, "/repos/owner/repo/pulls/7/requested_reviewers"));
+        assert!(allowed(&Method::Delete, "/repos/owner/repo/pulls/7/requested_reviewers"));
+        assert!(allowed(&Method::Get, "/repos/owner/repo/pulls/7"), "read with the conversation");
+        for p in ["/repos/owner/repo/pulls/x/requested_reviewers", "/repos/owner/repo/pulls/7a/requested_reviewers", "/repos/owner/repo/pulls//requested_reviewers",
+            "/repos/owner/repo/pulls/7/requested_reviewers/alice", "/repos/owner/repo/pulls/7/requested_reviewer", "/repos/owner/repo/issues/7/requested_reviewers",
+            "/repos/owner/repo/requested_reviewers", "/repos/owner/repo/pulls/requested_reviewers"] {
+            assert!(!allowed(&Method::Post, p), "POST {p}");
+            assert!(!allowed(&Method::Delete, p), "DELETE {p}");
+        }
+        assert!(!allowed(&Method::Put, "/repos/owner/repo/pulls/7/requested_reviewers"));
+        assert!(!allowed(&Method::Patch, "/repos/owner/repo/pulls/7/requested_reviewers"));
+        // DELETE anywhere else in a repository stays refused.
+        for p in ["/repos/owner/repo", "/repos/owner/repo/pulls/7", "/repos/owner/repo/issues/7", "/repos/owner/repo/pulls/7/reviews/1",
+            "/repos/owner/repo/pulls/7/merge", "/repos/owner/repo/issues/7/comments", "/repos/owner/repo/labels", "/repos/owner/repo/milestones/3",
+            "/repos/owner/repo/git/refs/heads/main", "/repos/owner/repo/branches/main"] {
+            assert!(!allowed(&Method::Delete, p), "DELETE {p}");
+        }
+        // Encoded slashes or dots never reach the allowlist.
+        assert!(validate_and_decode_path("/repos/owner/repo/pulls/7%2frequested_reviewers").is_none());
+        assert!(validate_and_decode_path("/repos/owner/repo/pulls/7/%2e%2e/requested_reviewers").is_none());
     }
 
     #[test]
@@ -1634,5 +1749,84 @@ mod tests {
         server.unblock();
         mock_upstream.unblock();
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn conditional_tags_are_entity_tags_on_reads_only() {
+        assert_eq!(conditional_tag("GET", Some("\"abc\"")), Some("\"abc\"".into()));
+        assert_eq!(conditional_tag("GET", Some(" W/\"6f1c\" ")), Some("W/\"6f1c\"".into()));
+        assert_eq!(conditional_tag("GET", Some("W/\"a\", \"b\"")), Some("W/\"a\", \"b\"".into()));
+        for bad in ["*", "abc", "\"", "\"a\"b\"", "W/abc", "\"a\"\u{7}", "\"\u{e9}\"", ""] {
+            assert_eq!(conditional_tag("GET", Some(bad)), None, "{bad:?}");
+        }
+        assert_eq!(conditional_tag("GET", Some(&format!("\"{}\"", "a".repeat(600)))), None, "too long");
+        assert_eq!(conditional_tag("PATCH", Some("\"abc\"")), None, "reads only");
+        assert_eq!(conditional_tag("GET", None), None);
+    }
+
+    /// The app's `If-None-Match` reaches GitHub and GitHub's `ETag` and 304 come back, so an
+    /// unchanged list costs no rate limit through the proxy either.
+    #[test]
+    fn the_proxy_forwards_conditional_requests() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let upstream = std::sync::Arc::new(Server::http("127.0.0.1:0").unwrap());
+        let upstream_addr = format!("http://{}", upstream.server_addr());
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Option<String>>::new()));
+        let (up, seen_up) = (upstream.clone(), seen.clone());
+        std::thread::spawn(move || {
+            for req in up.incoming_requests() {
+                let inm = req.headers().iter().find(|h| h.field.as_str().as_str().eq_ignore_ascii_case("If-None-Match")).map(|h| h.value.as_str().to_owned());
+                seen_up.lock().unwrap().push(inm.clone());
+                let resp = if inm.as_deref() == Some("W/\"v1\"") {
+                    Response::from_data(Vec::new()).with_status_code(304)
+                } else {
+                    Response::from_string("{\"login\":\"octo\"}").with_status_code(200).with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
+                };
+                let _ = req.respond(resp.with_header(Header::from_bytes("ETag", "W/\"v1\"").unwrap()).with_header(Header::from_bytes("x-ratelimit-remaining", "4999").unwrap()));
+            }
+        });
+        let server = std::sync::Arc::new(Server::http("127.0.0.1:0").unwrap());
+        let addr = format!("{}", server.server_addr());
+        let temp_dir = std::env::temp_dir().join(format!("repohub-etag-{}", std::process::id()));
+        let cfg = std::sync::Arc::new(Cfg {
+            token: Some("gh_token_etag".into()),
+            api: upstream_addr,
+            web_dir: temp_dir.join("web"),
+            data_dir: temp_dir.join("data"),
+            allowed_hosts: vec!["127.0.0.1".into()],
+            public_json: "{}".into(),
+            agent: ureq::AgentBuilder::new().try_proxy_from_env(false).build(),
+            secret: None,
+            allow_writes: true,
+            notes_max_bytes: 100,
+        });
+        let (srv, c) = (server.clone(), cfg.clone());
+        std::thread::spawn(move || {
+            for req in srv.incoming_requests() {
+                handle(&c, req);
+            }
+        });
+        let client = ureq::AgentBuilder::new().try_proxy_from_env(false).build();
+        let origin = format!("http://{addr}");
+        let get = |inm: Option<&str>| {
+            let mut r = client.get(&format!("http://{addr}/gh/user")).set("Origin", &origin);
+            if let Some(v) = inm {
+                r = r.set("If-None-Match", v);
+            }
+            match r.call() {
+                Ok(resp) | Err(ureq::Error::Status(_, resp)) => (resp.status(), resp.header("etag").map(str::to_owned), resp.into_string().unwrap_or_default()),
+                Err(e) => panic!("{e}"),
+            }
+        };
+        let (status, etag, body) = get(None);
+        assert_eq!((status, etag.as_deref()), (200, Some("W/\"v1\"")), "the tag comes back");
+        assert!(body.contains("octo"));
+        let (status, etag, body) = get(Some("W/\"v1\""));
+        assert_eq!((status, etag.as_deref(), body.as_str()), (304, Some("W/\"v1\""), ""), "unchanged: 304, no body");
+        let (status, _, _) = get(Some("*"));
+        assert_eq!(status, 200, "a value that isn't a tag isn't sent");
+        assert_eq!(*seen.lock().unwrap(), vec![None, Some("W/\"v1\"".to_owned()), None]);
+        server.unblock();
+        upstream.unblock();
     }
 }

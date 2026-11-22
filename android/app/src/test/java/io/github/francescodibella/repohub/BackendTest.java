@@ -36,10 +36,12 @@ public class BackendTest {
         final List<String> sent = new ArrayList<>();
 
         @Override
-        public Backend.Reply send(String method, String url, String accept, String token, String body) {
-            sent.add(method + " " + url + " token=" + token + " body=" + body);
-            Backend.Reply r = new Backend.Reply(200, "{\"ok\":true}");
+        public Backend.Reply send(String method, String url, String accept, String token, String body, String ifNoneMatch) {
+            sent.add(method + " " + url + " token=" + token + " body=" + body + (ifNoneMatch == null ? "" : " if-none-match=" + ifNoneMatch));
+            // Like GitHub: the same tag back means nothing changed.
+            Backend.Reply r = "W/\"v1\"".equals(ifNoneMatch) ? new Backend.Reply(304, "") : new Backend.Reply(200, "{\"ok\":true}");
             r.remaining = "4999";
+            r.etag = "W/\"v1\"";
             return r;
         }
     }
@@ -137,7 +139,68 @@ public class BackendTest {
         assertFalse(GitHubPaths.allowed("POST", "/user/repos"));
         assertTrue(GitHubPaths.allowed("PATCH", "/repos/o/r/issues/7"));
         assertFalse(GitHubPaths.allowed("PATCH", "/repos/o/r"));
+        // Releases and tags, as the server allows them: read, create, generate notes, save or
+        // publish a draft by its number; never delete, upload or make a tag object.
+        for (String p : new String[] {"/repos/o/r/releases", "/repos/o/r/releases?per_page=20&page=2", "/repos/o/r/releases/latest", "/repos/o/r/tags?per_page=50"}) {
+            assertTrue(p, GitHubPaths.allowed("GET", p));
+        }
+        for (String p : new String[] {"/repos/o/r/releases/42", "/repos/o/r/releases/tags/v1.0.0", "/repos/o/r/releases/42/assets",
+            "/repos/o/r/releases/assets/7", "/repos/o/r/releases/latest/assets", "/repos/o/r/tags/v1.0.0", "/repos/o/r/git/tags/0123abc"}) {
+            assertFalse(p, GitHubPaths.allowed("GET", p));
+        }
+        assertTrue(GitHubPaths.allowed("POST", "/repos/o/r/releases"));
+        assertTrue(GitHubPaths.allowed("POST", "/repos/o/r/releases/generate-notes"));
+        assertTrue(GitHubPaths.allowed("PATCH", "/repos/o/r/releases/42"));
+        for (String p : new String[] {"/repos/o/r/releases/latest", "/repos/o/r/releases/4a2", "/repos/o/r/releases/-1", "/repos/o/r/releases/42/assets", "/repos/o/r/releases"}) {
+            assertFalse(p, GitHubPaths.allowed("PATCH", p));
+        }
+        for (String p : new String[] {"/repos/o/r/releases/42", "/repos/o/r/releases/42/assets", "/repos/o/r/releases/generate-notes/x", "/repos/o/r/git/tags"}) {
+            assertFalse(p, GitHubPaths.allowed("POST", p));
+        }
+        for (String p : new String[] {"/repos/o/r/releases/42", "/repos/o/r/releases/assets/7", "/repos/o/r/releases/42/assets/7", "/repos/o/r/git/refs/tags/v1.0.0"}) {
+            assertFalse(p, GitHubPaths.allowed("DELETE", p));
+        }
+        assertFalse(GitHubPaths.allowed("PUT", "/repos/o/r/releases/42"));
         assertFalse(GitHubPaths.allowed("TRACE", "/user"));
+    }
+
+    @Test
+    public void triagePathsMatchTheServers() {
+        for (String p : new String[] {"/repos/o/r/labels", "/repos/o/r/labels?per_page=100", "/repos/o/r/assignees?per_page=100",
+            "/repos/o/r/milestones?state=open&per_page=100"}) {
+            assertTrue(p, GitHubPaths.allowed("GET", p));
+        }
+        for (String p : new String[] {"/repos/o/r/labels/bug", "/repos/o/r/assignees/alice", "/repos/o/r/milestones/3", "/repos/o/r/collaborators",
+            "/repos/o/r/issues/7/labels", "/labels"}) {
+            assertFalse(p, GitHubPaths.allowed("GET", p));
+        }
+        // "/repos/o/labels" is the repository named "labels" (read for board sync), not a list.
+        assertTrue(GitHubPaths.allowed("GET", "/repos/o/labels"));
+        assertFalse(GitHubPaths.allowed("GET", "/repos/o/labels/labels/bug"));
+        for (String m : new String[] {"POST", "PUT", "PATCH", "DELETE"}) {
+            assertFalse(m, GitHubPaths.allowed(m, "/repos/o/r/labels"));
+            assertFalse(m, GitHubPaths.allowed(m, "/repos/o/r/milestones"));
+        }
+        assertTrue(GitHubPaths.allowed("PATCH", "/repos/o/r/issues/7"));
+        assertFalse(GitHubPaths.allowed("PATCH", "/repos/o/r/pulls/7"));
+        assertFalse(GitHubPaths.allowed("POST", "/repos/o/r/issues/7/labels"));
+        assertFalse(GitHubPaths.allowed("DELETE", "/repos/o/r/issues/7/labels/bug"));
+        assertTrue(GitHubPaths.allowed("POST", "/repos/o/r/pulls/7/requested_reviewers"));
+        assertTrue(GitHubPaths.allowed("DELETE", "/repos/o/r/pulls/7/requested_reviewers"));
+        for (String p : new String[] {"/repos/o/r/pulls/x/requested_reviewers", "/repos/o/r/pulls/7a/requested_reviewers", "/repos/o/r/pulls//requested_reviewers",
+            "/repos/o/r/pulls/7/requested_reviewers/alice", "/repos/o/r/pulls/7/requested_reviewer", "/repos/o/r/issues/7/requested_reviewers",
+            "/repos/o/r/requested_reviewers", "/repos/o/r/pulls/requested_reviewers"}) {
+            assertFalse(p, GitHubPaths.allowed("POST", p));
+            assertFalse(p, GitHubPaths.allowed("DELETE", p));
+        }
+        assertFalse(GitHubPaths.allowed("PUT", "/repos/o/r/pulls/7/requested_reviewers"));
+        assertFalse(GitHubPaths.allowed("PATCH", "/repos/o/r/pulls/7/requested_reviewers"));
+        // DELETE anywhere else in a repository stays refused.
+        for (String p : new String[] {"/repos/o/r", "/repos/o/r/pulls/7", "/repos/o/r/issues/7", "/repos/o/r/pulls/7/reviews/1", "/repos/o/r/pulls/7/merge",
+            "/repos/o/r/issues/7/comments", "/repos/o/r/labels", "/repos/o/r/git/refs/heads/main"}) {
+            assertFalse(p, GitHubPaths.allowed("DELETE", p));
+        }
+        assertNull(GitHubPaths.decode("/repos/o/r/pulls/7%2frequested_reviewers"));
     }
 
     @Test
@@ -252,6 +315,34 @@ public class BackendTest {
         account.token = null;
         backend.handle("POST", "gh/repos/o/r/issues", "", "{\"title\":\"x\"}");
         assertEquals("POST https://api.github.com/repos/o/r/issues token=null body={\"title\":\"x\"}", http.sent.get(1));
+    }
+
+    @Test
+    public void conditionalReadsReachGitHubAndTheirTagsComeBack() {
+        account.token = "ghp_secret";
+        Backend.Reply first = backend.handle("GET", "gh/user/repos?per_page=100", "application/vnd.github+json", "", null);
+        assertEquals(200, first.status);
+        assertEquals("W/\"v1\"", first.etag);
+        Backend.Reply again = backend.handle("GET", "gh/user/repos?per_page=100", "application/vnd.github+json", "", "W/\"v1\"");
+        assertEquals(304, again.status);
+        assertEquals("", again.body);
+        assertEquals("GET https://api.github.com/user/repos?per_page=100 token=ghp_secret body= if-none-match=W/\"v1\"", http.sent.get(1));
+        // Only entity tags on reads go on.
+        backend.handle("GET", "gh/user", "", "", "*");
+        backend.handle("GET", "gh/user", "", "", "\"a\"\r\nX-Evil: 1");
+        backend.handle("PATCH", "gh/notifications/threads/12", "", "", "\"a\"");
+        for (int i = 2; i < http.sent.size(); i++) {
+            assertFalse(http.sent.get(i), http.sent.get(i).contains("if-none-match"));
+        }
+        assertEquals("W/\"a\", \"b\"", Backend.conditionalTag("GET", " W/\"a\", \"b\" "));
+        assertNull(Backend.conditionalTag("GET", "abc"));
+        assertNull(Backend.conditionalTag("GET", "\"" + "a".repeat(600) + "\""));
+        assertNull(Backend.conditionalTag("GET", "\"\u00e9\""));
+        assertNull(Backend.conditionalTag("POST", "\"a\""));
+        // Refused paths still don't reach GitHub, conditional or not.
+        int before = http.sent.size();
+        assertEquals(403, backend.handle("GET", "gh/user/emails", "", "", "\"a\"").status);
+        assertEquals(before, http.sent.size());
     }
 
     @Test

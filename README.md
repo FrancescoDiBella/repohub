@@ -11,6 +11,8 @@ app you can also:
 - **filter** issues and pull requests, and go through your **notifications**;
 - read a branch's **commits**, open one to see what it changed, and **compare** two branches
   before opening a pull request;
+- read a repository's **releases** and tags, draft a release with GitHub's generated notes and
+  publish it;
 - work in a repository's **local clone** (desktop): its files, its changes as a diff, commit,
   push and pull, a **Terminal** and **Claude**;
 - keep **notes**: hand-drawn diagrams and sketches for each repository and branch, on every
@@ -26,7 +28,7 @@ app you can also:
 The pictures are made from the sample data by `scripts/screenshots.sh`.
 
 **Contents:** [Docker](#run-it-with-docker) · [Desktop app](#desktop-app) ·
-[Android app](#android-app) · [Themes](#themes) · [Working on GitHub](#working-on-github-from-the-app) · [Commits](#commits) ·
+[Android app](#android-app) · [Themes](#themes) · [Working on GitHub](#working-on-github-from-the-app) · [Commits](#commits) · [Releases](#releases) ·
 [Files on your computer](#files-on-your-computer-desktop-app) · [Notes](#notes) ·
 [Status bar](#status-bar-desktop-app) · [Claude](#claude-desktop-app) · [Plugins](#plugins-desktop-app) ·
 [Terminal](#terminal-desktop-app) · [Configuration](#configuration) · [What it shows](#what-it-shows) ·
@@ -257,6 +259,9 @@ owner filter. It waits for the repositories to load before opening a repository;
 repository is gone it shows the Repositories page, and if you move first, your move wins. A page
 on the command line (`-- page …`, used by scripts) wins too.
 
+The filters of the Pull requests and Issues pages are kept too: between visits, and between
+runs (with the place, in the preferences). **Clear** resets them. The sample data keeps none.
+
 ## Organizations
 
 The repositories of the organizations you belong to show next to yours, ordered by last push.
@@ -290,6 +295,40 @@ requests an hour. A refresh that fails is tried again after the next interval.
 "Updated 3 minutes ago" shows on the Overview, in the refresh button's tooltip, in the status-bar
 menu and in Settings, which also says when the next refresh is due. ⌘R (Ctrl+R) refreshes now.
 
+**Opening at once.** After each load RepoHub saves a copy of the lists (and of the repository
+pages you opened), and the next start shows it in the first frame with "Updating…" until GitHub
+answers. If GitHub can't be reached, the copy stays and the banner says how old it is.
+- Desktop: `<data dir>/cache/<host>-<account>.json` (`~/.local/share/repohub` on Linux,
+  `~/Library/Application Support/RepoHub` on macOS, `%APPDATA%\RepoHub` on Windows), readable by
+  you only. Web and Android: the browser's storage, when it fits (the largest parts are left out
+  first).
+- Never your token. Removed when you sign out or switch accounts, and with **Settings → About →
+  Clear saved data**, which also says where it is, how large and from when. At most 12 MB.
+- `REPOHUB_CACHE=off` turns it off (desktop).
+
+**Lighter refreshes.** RepoHub keeps each answer's tag (`ETag`) and asks "changed since?"
+(`If-None-Match`). When nothing changed GitHub answers `304 Not Modified`, which doesn't count
+against the rate limit, so a refresh with nothing new costs almost nothing: only the four
+searches (pull requests, review requests, issues) are read again, as GitHub's search has no tags.
+The tags are saved with the copy, so the first refresh after a start is light too.
+`repohub-server` and the Android app pass both headers on.
+
+**Loading in parallel.** The parts of a load that don't need each other run side by side, at most
+four requests at a time: repositories next to pull requests, then issues, runs and activity. On
+a first start the profile and the repositories show as soon as they're in, and pull requests,
+issues and runs fill in when they arrive. Repository pages, branch lists, labels and
+conversations already read in this session show at once when opened again, and are read again
+behind them.
+
+Measured against a mock GitHub that answers every request after 150 ms (200 repositories;
+`scripts/bench-load.sh`, times from the start of the app):
+
+| | before: first content | before: complete | now: first content | now: complete | requests answered 200 / 304 (before → now) | sent by GitHub |
+| --- | --- | --- | --- | --- | --- | --- |
+| first start | 3.5 s | 3.5 s | 0.64 s | 1.27 s | 18 / 0 → 18 / 0 | 1.3 MB → 1.3 MB |
+| next start | 3.4 s | 3.4 s | 0.01 s (the saved copy) | 1.13 s | 18 / 0 → 4 / 14 | 1.3 MB → 0.2 MB |
+| refresh, nothing changed | — | 3.3 s | — | 1.10 s | 18 / 0 → 4 / 14 | 1.3 MB → 0.2 MB |
+
 ## Search and commands
 
 **⌘K** (Ctrl+K on Windows and Linux), or the search button in the toolbar, opens a palette over the
@@ -297,8 +336,9 @@ window. Type a few letters (they can be the start of any word, or just letters i
 finds `repohub`) and press Enter:
 
 - any page, repository, open pull request or issue;
-- for the repository on screen: New issue, New pull request, New branch, Ask Claude, Open a
-  terminal, Open on GitHub, Copy the clone URL, Commits of it, and its other sections;
+- for the repository on screen: New issue, New pull request, New branch, New release, Ask
+  Claude, Open a terminal, Open on GitHub, Copy the clone URL, Commits of it, Releases of it, and
+  its other sections;
 - Refresh and the theme.
 
 ↑ ↓ move through the results, Esc or a click outside closes it.
@@ -311,20 +351,28 @@ With a token that has write access, the everyday changes happen in RepoHub:
 | --- | --- |
 | Code tab | **Branch picker** (the branch button): files, last commit and README follow the branch you pick, and so does the Notes tab. **New branch** starts one from the branch on screen. |
 | Code or Pull requests tab | **New pull request**: pick its branch and the one it goes into, title, description, draft. |
-| Issues tab | **New issue**: title and Markdown description. |
+| Issues tab | **New issue**: title, Markdown description, and optional **Labels** and **Assignees** (the same pickers as in a conversation), sent with the issue. |
 | Issue and pull request rows | Click one to **read its conversation**: the description, comments and reviews, as formatted text. Write a **comment** there. On a pull request, its **checks**, **Approve**, **Request changes**, **Close** or **Reopen** and **See the changes** (the diff), with the comments left on its lines; the **+** by a line number comments on that line. On an issue, **Close issue** or **Reopen issue**. **Open on GitHub** is still there. |
+| A conversation's details | Beside the conversation on a wide window, above it on a phone: **Labels**, **Assignees**, **Milestone** and, on a pull request, **Reviewers** (who is asked, and who reviewed with their verdict). **Edit** opens a picker in place: a filter and the repository's choices as a checklist (labels with their colour, people with their avatar; one milestone, or **No milestone**). **Apply** sends one change, **Cancel** drops it. The choices load when a picker first opens and are kept for the repository. |
+| A conversation's title and description | **Edit** (when it's yours, or in one of your or your organizations' repositories): the title in a field, the description in the Markdown editor, **Save** or **Cancel**. What you typed stays if saving fails. |
 | Issue rows | **Close**. |
 | Notifications page | Your unread GitHub notifications, grouped by repository, with why you got each. Click one to open its conversation; it's marked as read. **Mark as read** does only that. Needs a classic token with the `notifications` or `repo` scope: GitHub doesn't give notifications to fine-grained tokens. |
-| Pull requests and Issues pages | **Filters**: search by title or number, pick a repository or a label, **Opened by me**, **Drafts** and **Failing checks** (pull requests) or **Assigned to me** (issues). They narrow what's already loaded, as you type. |
+| Pull requests and Issues pages | **Filters**: search by title or number, pick a repository or a label, **Opened by me**, **Review requested**, **Drafts** and **Failing checks** (pull requests) or **Assigned to me** (issues). They narrow what's already loaded, as you type, and are kept between visits and runs. Rows show up to three assignees' avatars, and pull requests that wait for your review say so. |
+| Overview | **Waiting for your review**: the open pull requests where your review is requested, above the open pull requests, when there are any. |
 | Pull request rows | **Files** shows what it changes as a diff, unified or side by side, with syntax colours and word changes. From there **Merge** with a merge commit, **Squash** or **Rebase**. **Merge** on the row asks first. |
 | Changes tab (desktop, with a local clone) | What changed since the last commit, as a diff, new files included. **Commit** or **Commit and push** everything with a message. **Push**, **Pull** (fast-forward only), and **New pull request** from the branch. |
 | Notes tab | With a notes repository chosen (Settings → Account → Boards), each change to a board is one commit to `boards/…/<name>.excalidraw` there, and a board deleted here is deleted there. See [Boards on every device](#boards-on-every-device). |
+| Releases tab | **New release**: a tag (the next versions are offered), the branch a new tag is made from, title, Markdown notes with **Generate notes**, pre-release. **Save draft**, or **Publish release** after a question. On a draft: **Edit** and **Publish** (it asks first). |
 | Changes tab: merging | **Merge a branch** into the one checked out: pick it to preview its commits and the diff it brings, then merge. If there are conflicts, it lists the files and offers **Abort merge**. Fix them in your editor or the Terminal, then **Commit** finishes the merge. Commit refuses files that still have conflict markers. |
 
 What GitHub creates shows at once; the lists catch up on the next refresh. GitHub's error, if
-any, shows in the form (for example "A pull request already exists").
+any, shows in the form (for example "A pull request already exists"). A label, assignee,
+milestone, reviewer, title or description change updates the conversation and the list rows
+without a reload, with a message; when GitHub refuses (the token may only read the
+repository), the details say so once and keep the old values.
 
-RepoHub still doesn't delete repositories or branches or rewrite history: those stay on GitHub.
+RepoHub still doesn't delete repositories, branches, releases or tags, upload files to a release,
+or rewrite history: those stay on GitHub.
 Commit, push and pull run the `git` installed on your computer, in the clone, with your own
 credentials.
 In Docker the same actions go through `repohub-server`, which forwards only these writes.
@@ -357,6 +405,37 @@ compared with (the default branch). The result says how far apart they are ("3 c
 ahead and no pull request is open for it, **New pull request** opens the form with both branches
 filled in; when one is open, a button opens it. Identical branches, a branch with nothing new and
 branches with no history in common get a sentence instead.
+
+## Releases
+
+A repository's **Releases** section (after Actions) lists its releases, newest first, 20 at a time
+with **Load more**. Each shows its title, its tag, a word for its state (**Latest**,
+**Pre-release** or **Draft**), who published it and when, and its notes as formatted text; notes
+longer than a dozen lines end with **Show all**. Its files are listed with their size and how
+many times they were downloaded: click one to download it in the browser (GitHub's source
+archives aren't listed). The arrow opens the release on GitHub. Drafts show only to people who
+can push to the repository: GitHub decides. Under the list, **Tags without a release** lists the
+tags no release uses, each with **Draft a release**.
+
+The repository's header shows the latest release's tag next to Public or Private; clicking it
+opens the section.
+
+**New release** opens a form:
+- **Tag**: type one, or pick one of the next versions offered after the newest tag that looks
+  like a version (`v1.2.3` offers `v1.2.4`, `v1.3.0` and `v2.0.0`; a repository with none offers
+  `v0.1.0`). It says whether the release uses an existing tag or creates it, and from which
+  branch (the branch picker; the default branch at first). A tag follows the rules of a branch
+  name, and one that another release uses is refused before anything is sent.
+- **Title** (the tag when left empty) and **Notes** in Markdown. **Generate notes** asks GitHub
+  for the notes since the previous release; if you typed notes, it asks before replacing them.
+- **Pre-release**, then **Save draft** or **Publish release**. Publishing creates the tag,
+  notifies the repository's watchers and can start workflows, so it asks first ("Publish v0.2.0
+  from main? This creates the tag and can't be undone from RepoHub."). Saving a draft doesn't.
+
+A draft has **Edit** (the same form, filled in) and **Publish** (it asks first). RepoHub doesn't
+upload files: **Add files on GitHub** opens the draft there. After a save the list and the header
+show it at once. When GitHub refuses (for example a tag that already has a release, or a token
+without the Contents permission), the form keeps what you typed and says why.
 
 ## Files on your computer (desktop app)
 
@@ -457,7 +536,9 @@ RepoHub puts an icon in the macOS menu bar and the Windows notification area (an
 where one runs). Its menu has:
 
 - **Open RepoHub**; how many pull requests and issues are open and how many runs failed, each
-  opening its page; how many notifications are unread (with a classic token);
+  opening its page; how many pull requests wait for your review ("2 pull requests wait for your
+  review", hidden at zero), opening the list narrowed to them; how many notifications are unread
+  (with a classic token);
 - the pinned repositories, each opening in RepoHub;
 - **New issue in …** for the repository on screen (or the first pinned one);
 - **Refresh** and **Quit RepoHub**.
@@ -581,25 +662,29 @@ GitHub Enterprise.
 
 | Page | Data and actions | API |
 | --- | --- | --- |
-| Overview | totals, commits over the last 26 weeks, recent repositories, open pull requests | `/user` or `/users/{u}`, `/user/repos` or `/users/{u}/repos`, `/search/issues`, `/repos/{r}/stats/participation` |
+| Overview | totals, commits over the last 26 weeks, recent repositories, what waits for your review, open pull requests | `/user` or `/users/{u}`, `/user/repos` or `/users/{u}/repos`, `/search/issues` (with `review-requested:{u}`), `/repos/{r}/stats/participation` |
 | Repositories | search by name, description and topic; public, private and fork filters; star | `/user/starred`, `PUT`/`DELETE /user/starred/{r}` |
 | Repository | root files, README, languages, last commit, copy clone URL, open on GitHub | `/repos/{r}/contents`, `/readme`, `/languages`, `/commits` |
 | Repository → Commits | a branch's history (30 at a time), one commit with its diff, two branches compared and whether a pull request is open between them | `/repos/{r}/commits?sha={branch}&per_page=30&page={n}`, `/repos/{r}/commits/{sha}`, `/repos/{r}/compare/{base}...{head}`, `/search/issues?q=is:pr is:open repo:{r} head:{head} base:{base}` |
-| Pull requests | pull requests you're involved in: open, draft, merged, closed; filters; click to read the conversation, its checks and its diff | `/search/issues?q=is:pr involves:{u}`, `/repos/{r}/pulls/{n}`, `/files`, `/reviews`, `/comments`, `/commits/{sha}/check-runs` |
-| Issues | open issues in your repositories; filters; click to read and answer | `/search/issues?q=is:issue is:open user:{u}`, `/repos/{r}/issues/{n}`, `/comments` |
+| Repository → Releases | releases (20 at a time) with notes and files, the latest release (also in the header), tags without a release; draft, edit and publish a release, generated notes | `/repos/{r}/releases?per_page=20&page={n}`, `/repos/{r}/releases/latest`, `/repos/{r}/tags?per_page=50`, `POST /repos/{r}/releases`, `POST /repos/{r}/releases/generate-notes`, `PATCH /repos/{r}/releases/{id}` |
+| Pull requests | pull requests you're involved in or whose review is asked of you: open, draft, merged, closed; filters; click to read the conversation, its checks and its diff | `/search/issues?q=is:pr involves:{u}`, `/search/issues?q=is:pr is:open review-requested:{u}`, `/repos/{r}/pulls/{n}`, `/files`, `/reviews`, `/comments`, `/commits/{sha}/check-runs` |
+| Issues | open issues in your repositories; filters; click to read and answer; new issue with labels and assignees | `/search/issues?q=is:issue is:open user:{u}`, `/repos/{r}/issues/{n}`, `/comments`, `POST /repos/{r}/issues` |
+| Conversation details | labels, assignees, milestone, reviewers; edit them, the title and the description | the repository's choices: `/repos/{r}/labels`, `/assignees`, `/milestones?state=open` (the first 100 of each; it says when there are more); changes: `PATCH /repos/{r}/issues/{n}` (`labels`, `assignees`, `milestone`, `title`, `body`), `POST` and `DELETE /repos/{r}/pulls/{n}/requested_reviewers` |
 | Notifications | your unread notifications; mark as read | `/notifications`, `PATCH /notifications/threads/{id}` |
 | Actions | latest runs of the most recently pushed repositories | `/repos/{r}/actions/runs` |
 | Repository → Notes | drawings per branch: create, open, draw, delete, export, import; sync state | `/repos/{r}/branches` |
 | Notes sync | boards on every device through your notes repository `{n}` | `/repos/{n}`, `/repos/{n}/git/trees/{branch}?recursive=1`, `GET`/`PUT`/`DELETE /repos/{n}/contents/boards/…/<name>.excalidraw` |
-| Settings | connection status, the configuration in use (the token is never shown), where notes are kept and the notes repository | — |
+| Settings | connection status, the configuration in use (the token is never shown), where notes are kept and the notes repository; About: the saved copy of the last load and **Clear saved data** | — (every `GET` above but searches is asked again with `If-None-Match`) |
 
 How it behaves:
-- **Refresh** (toolbar icon, or ⌘R / Ctrl+R) reloads everything.
+- **Refresh** (toolbar icon, or ⌘R / Ctrl+R) reloads everything; what didn't change costs a
+  `304`.
 - Requests run in the background, so the window stays responsive.
 - Errors (rejected token, rate limit, unknown user) show a banner with the reason and **Retry**.
 - RepoHub never creates or deletes repositories, and never changes their settings: "New
   repository" and "Settings on GitHub" open GitHub in the browser. What it does write (issues,
-  pull requests, comments, reviews, branches, stars, and boards in your notes repository) is listed under
+  pull requests, comments, reviews, branches, releases, stars, labels, assignees, milestones,
+  review requests, titles and descriptions, and boards in your notes repository) is listed under
   [Working on GitHub from the app](#working-on-github-from-the-app).
 
 ## Development

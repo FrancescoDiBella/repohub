@@ -5,10 +5,16 @@ to their code). A state that makes no sense can't be written, and every change g
 method. Run with `REPOHUB_TRACE=1` to see each change on stderr:
 
 ```
+state: shown "nothing" -> "saved copy"
+state: time "saved copy shown" -> "4 ms"
 state: status "starting" -> "loading"
+state: time "first frame" -> "90 ms"
 state: page Overview -> Repo(0)
 state: tab Code -> Notes
 ```
+
+`time` lines say how long since the process started: the saved copy shown, the first frame, the
+profile and repositories shown, the load done, the copy written.
 
 ## Data source: `Status`
 
@@ -27,6 +33,18 @@ stateDiagram-v2
 
 `refresh()` only starts from `Starting`, `Ready` or `Failed` (`Status::can_load`), so two loads
 never run together.
+
+What is on screen meanwhile (`cache::Fresh`, beside `Status`):
+
+| | Nothing saved (first start) | Saved copy (`from_copy`) | Loaded in this session |
+| --- | --- | --- | --- |
+| `Starting`, `Loading` | skeletons, then the profile and repositories with the other lists loading (`partial`) | the copy, "Updating…" | the lists, "Updating…" |
+| `Ready` | — | — (the copy is replaced) | "Updated 3 minutes ago" |
+| `Failed` | the error with **Retry** | the copy, the error and "The lists show what was saved 2 hours ago" | the lists and the error |
+
+A load's results carry the account generation (`load_gen`): a load or a part of one that started
+before a sign-out or an account switch is dropped, and the copy it would have saved is never
+written (`cache::forget_all` stops writes still on their way).
 
 ## Something fetched once: `Load<T>`
 
@@ -151,6 +169,30 @@ The history (`History`), the open commit (`Open`) and the comparison (`Compare`)
 commit or comparison, or a reload since) is dropped, as is one for another account (`load_gen`).
 Leaving the section closes the commit and the comparison; the history stays for next time.
 
+## The Releases section: `releases::Releases`
+
+```mermaid
+stateDiagram-v2
+    [*] --> List: set_tab(Releases)
+    List --> Form: New release / Draft a release / Edit (a draft)
+    Form --> Asking: Publish release
+    Asking --> Form: Cancel / Esc
+    Asking --> Sending: Publish
+    Form --> Sending: Save draft
+    Sending --> List: saved (the list and the header follow)
+    Sending --> Form: GitHub refuses (what was typed stays)
+    Form --> List: × / Cancel / Esc
+    List --> DraftAsking: Publish (on a draft)
+    DraftAsking --> List: Cancel / Esc, or published
+```
+
+The list (`List`) holds a `Load` and the epoch of the request it waits for; an answer for another
+repository, a reload since, or another account is dropped. Generate notes waits the same way, and
+its answer waits for a yes (`Form::offered`) when the notes field has something you typed.
+Publishing happens only from the question (`Form::confirm`, `Releases::confirm`); leaving the
+section drops the question and keeps the form. Each repository's latest release (`latest`) is
+read when its page opens, for the header.
+
 ## The Terminal tab: `terminal_page::Panel`
 
 ```mermaid
@@ -173,7 +215,10 @@ stateDiagram-v2
 | `PullState` | `Open`, `Draft`, `Merged`, `Closed` | also the Pull requests page's filter |
 | `Account` | `Locked`, `SignedOut`, `SignedIn` | `App::account()`; drives the form in Settings |
 | `Toast` | none → shown (`Done` / `Problem`) → none | its timer hides only its own message |
+| `Facet` | `Labels`, `Assignees`, `Milestone`, `Reviewers` | the open triage picker (one at a time, or none); Apply sends one `triage::Change` |
 | `markdown::Block` | `Text`, `Fence`, `Comment` | the README pass, line by line |
+| `releases::TagUse` | `Invalid`, `Taken`, `Existing`, `New` | what the form's tag does: refused, another release's, used as it is, or created from the target branch |
+| `releases::NotesJob` | `Idle`, `Asking`, `Failed` | Generate notes |
 
 ## For agents and scripts
 

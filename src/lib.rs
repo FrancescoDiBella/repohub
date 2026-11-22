@@ -16,6 +16,8 @@ use rune_kit::{ControlSize, IconButton, IconButtonVariant, Kit, PaletteSeed};
 
 mod actions;
 mod board;
+mod cache;
+mod cache_page;
 mod claude;
 mod claude_page;
 #[cfg(not(target_arch = "wasm32"))]
@@ -30,6 +32,7 @@ mod icons;
 mod inbox;
 mod lists;
 mod diffs;
+mod etag;
 mod filters;
 mod local;
 mod local_page;
@@ -49,6 +52,8 @@ mod plugins;
 mod plugins;
 mod plugins_page;
 mod prefs;
+mod releases;
+mod releases_page;
 mod state;
 mod review;
 mod runs_page;
@@ -59,6 +64,8 @@ mod board_file;
 mod terminal;
 mod thread;
 mod thread_page;
+mod triage;
+mod triage_page;
 mod terminal_page;
 mod themes;
 mod themes_page;
@@ -219,14 +226,29 @@ pub struct App {
     pub(crate) runs_filter: runs_page::RunsFilter,
     /// The Commits section: the branch's history, the commit open and the comparison.
     commits: commits::Commits,
+    /// The Releases section (its list, the form, questions waiting for a yes) and each
+    /// repository's latest release for the header.
+    releases: releases::Releases,
+    /// The section bar scrolls the section on screen into view on the next frame (`poll`).
+    reveal_tab: bool,
     /// The issue or pull request whose conversation is on screen, in place of the page.
     thread: Option<thread::Open>,
     /// Counts conversation loads (see [`thread::Open::epoch`]).
     thread_epoch: u64,
+    /// The repositories' labels, assignable people and milestones, kept once loaded (triage).
+    choices: triage::Cache,
+    /// The labels and assignees picked in the New issue form.
+    issue_picks: triage::Picks,
+    /// The list filters last saved in the preferences (`filters::Saved`), so they're written only
+    /// when they change.
+    saved_filters: Option<String>,
     /// The workflow run whose jobs and log are on screen, in place of the page.
     pub(crate) open_run: Option<runs_page::OpenRun>,
     /// Counts workflow run detail loads (see [`runs_page::OpenRun::epoch`]).
     run_epoch: u64,
+    /// Where the lists on screen come from (the saved copy, part of a load) and what's kept to
+    /// show at once when opened again (see `cache`).
+    fresh: cache::Fresh,
     /// Rows with a write running (`owner/repo#12`), so their buttons wait.
     busy: std::collections::HashSet<String>,
     /// The title (and draft flag) of the item a form is creating, for showing it once created.
@@ -425,6 +447,7 @@ impl App {
             prefs::set("place", self.place().to_json());
         }
         self.save_layout();
+        self.save_filters();
     }
 
     /// The sidebar and the list's sort and owner, saved when they changed.
@@ -478,6 +501,7 @@ impl App {
         self.open_run = None;
         self.close_pull_diff();
         self.commits.leave();
+        self.releases.leave();
     }
 
     /// How many unread notifications are loaded.
@@ -555,7 +579,19 @@ impl App {
         self.confirm_merge = None;
         self.open_run = None;
         self.thread_epoch = self.thread_epoch.wrapping_add(1);
-        self.thread = Some(thread::Open { repo: repo.to_owned(), number, pull, load: Load::Loading, reply: TextEdit::new(""), sending: false, epoch: self.thread_epoch });
+        // The one being left is kept as it is now (with what was written in it).
+        if let Some(t) = self.thread.take()
+            && let Load::Ready(read) = t.load
+            && !self.data.sample
+        {
+            self.remember_thread(&t.repo, t.number, read);
+        }
+        // One read before in this session shows at once, and is read again behind it.
+        let load = match self.remembered_thread(repo, number) {
+            Some(t) if !self.data.sample => Load::Ready(t),
+            _ => Load::Loading,
+        };
+        self.thread = Some(thread::Open { repo: repo.to_owned(), number, pull, load, reply: TextEdit::new(""), sending: false, epoch: self.thread_epoch, edit: Default::default() });
         self.load_thread();
     }
 
@@ -577,11 +613,16 @@ impl App {
                 self.data.issues.iter().find(|x| x.number == number && same_repo(&x.repo, &repo))
                     .map(|x| (x.title.clone(), self.data.profile.login.clone(), thread::Standing::Open))
             }.unwrap_or_else(|| (format!("#{number}"), self.data.profile.login.clone(), thread::Standing::Open));
-            t.load = Load::Ready(thread::sample(&title, &author, pull, standing, self.now));
+            let mut sample = thread::sample(&title, &author, pull, standing, self.now);
+            triage::sample_thread(&mut sample, &self.data, &repo, number, pull);
+            t.load = Load::Ready(sample);
             return;
         }
         let Some(h) = self.handle.clone() else {
-            t.load = Load::Failed("The app isn't ready to load this yet: try again in a moment.".into());
+            // One read before stays on screen.
+            if !matches!(t.load, Load::Ready(_)) {
+                t.load = Load::Failed("The app isn't ready to load this yet: try again in a moment.".into());
+            }
             return;
         };
         if !matches!(t.load, Load::Ready(_)) {
@@ -594,6 +635,9 @@ impl App {
             // Another account, another conversation, or this one closed meanwhile: not ours.
             if s.load_gen != account {
                 return;
+            }
+            if let Ok(read) = &r {
+                s.remember_thread(&repo, number, read.clone());
             }
             let Some(t) = s.thread.as_mut().filter(|t| t.epoch == epoch) else { return };
             t.load = match r {
@@ -806,6 +850,7 @@ impl App {
             self.leave_tab();
         }
         self.tab = tab;
+        self.reveal_tab = true;
         self.save_place();
         match tab {
             RepoTab::Notes => {
@@ -815,6 +860,7 @@ impl App {
             RepoTab::Terminal => self.open_terminal(i),
             RepoTab::Changes => self.load_changes(i),
             RepoTab::Commits => self.load_history(i, false),
+            RepoTab::Releases => self.load_releases(i, false),
             _ => {}
         }
     }
@@ -834,10 +880,10 @@ impl App {
         w.max(m).map(|d| d.max(0))
     }
 
-    /// "Updated 3 minutes ago", once GitHub's data has loaded.
+    /// "Updated 3 minutes ago", once GitHub's data has loaded ("Updating…" while it loads
+    /// again, "Data from 2 hours ago" for the saved copy).
     fn freshness(&self) -> Option<String> {
-        let age = self.since(self.loaded_at, self.loaded_clock)?;
-        Some(format!("Updated {}", model::ago(self.now - age, self.now)))
+        self.freshness_words(self.since(self.loaded_at, self.loaded_clock))
     }
 
     /// Seconds until the next automatic refresh (negative: overdue), if they're on. The
@@ -861,6 +907,7 @@ impl App {
             self.refresh();
         }
         self.save_layout();
+        self.save_filters();
         // A new Latest build is looked for every 6 hours, unless one is already waiting.
         if self.update.available().is_none() && self.update_checked.is_some_and(|c| self.clock - c >= 6.0 * 3600.0) {
             self.check_update(false);
@@ -1067,6 +1114,7 @@ impl App {
                 self.pull_filter.mine = true;
                 self.pull_filter.failing = true;
             }
+            tray::Action::ReviewRequested => self.show_review_requested(),
             tray::Action::OpenRepo(full) => if let Some(i) = repo(self, &full) { self.open(i) },
             tray::Action::NewIssue(full) => if let Some(i) = repo(self, &full) {
                 if !matches!(&self.page, Page::Repo(f) if f.eq_ignore_ascii_case(&full)) {
@@ -1119,6 +1167,8 @@ impl App {
     fn reset_account_state(&mut self) {
         self.load_gen = self.load_gen.wrapping_add(1);
         self.board_load_gen = self.board_load_gen.wrapping_add(1);
+        // The saved copy and the tagged answers were the other account's.
+        self.forget_copy();
         // Drawings are files on this computer (or the server's notes folder), not account data:
         // writes in flight and queued ones still finish, so no edit is lost on an account switch.
         self.leave_tab();
@@ -1127,6 +1177,8 @@ impl App {
         // Another account has other repositories and labels.
         self.pull_filter.clear();
         self.issue_filter.clear();
+        self.choices.clear();
+        self.issue_picks = triage::Picks::default();
         self.runs_filter.clear();
         self.data = Data::default();
         self.data_gen = self.data_gen.wrapping_add(1);
@@ -1159,6 +1211,7 @@ impl App {
         self.diff_load = None;
         self.close_pull_diff();
         self.commits = commits::Commits::default();
+        self.releases = releases::Releases::default();
         self.changes = None;
         self.commit_msg.clear();
         self.git_error = None;
@@ -1318,7 +1371,7 @@ impl App {
             self.close_commit(None);
         } else if self.commits.compare.is_some() {
             self.close_compare();
-        } else {
+        } else if !self.release_escape() {
             match self.page {
                 Page::Overview => net::leave_app(),
                 Page::Repo(_) => self.go(Page::Repos),
@@ -1469,6 +1522,7 @@ impl App {
         self.set_tab(i, RepoTab::Code);
         self.load_branches(i, true);
         self.load_detail(i);
+        self.load_latest_release(i, false);
     }
 
     /// Reloads everything from GitHub in the background.
@@ -1480,10 +1534,23 @@ impl App {
         self.last_load = Some(net::now());
         self.load_clock = Some(self.clock);
         self.set_status(Status::Loading);
-        if let Some(h) = self.handle.clone() {
-            let cfg = self.cfg.clone();
-            let epoch = self.load_gen;
-            net::spawn(h, move || async move { github::load_all(&cfg).await }, move |s: &mut App, r| s.apply(epoch, r));
+        // Before the window exists, the first load reports to a mailbox (see `init`).
+        let to = match (self.handle.clone(), &self.fresh.early) {
+            (Some(h), _) => net::To::Now(h),
+            (None, Some(m)) => net::To::Later(m.clone()),
+            (None, None) => return,
+        };
+        let cfg = self.cfg.clone();
+        let epoch = self.load_gen;
+        // The profile and the repositories show as soon as they're in (on a first start).
+        let early = to.clone();
+        let work = move || async move { github::load_all_with(&cfg, move |d| early.post(move |s: &mut App| s.apply_early(epoch, d))).await };
+        let done = move |s: &mut App, r| s.apply(epoch, r);
+        #[cfg(not(target_arch = "wasm32"))]
+        net::spawn_to(to, work, done);
+        #[cfg(target_arch = "wasm32")]
+        if let net::To::Now(h) = to {
+            net::spawn(h, work, done);
         }
     }
 
@@ -1494,17 +1561,12 @@ impl App {
         match result {
             Ok(d) => {
                 self.retry_after = d.retry_after;
-                // Details of repositories nobody pushed to since stay: no new requests for them.
-                let same = |full: &str| {
-                    let pushed = |data: &Data| data.repos.iter().find(|r| r.full_name == full).map(|r| r.pushed);
-                    pushed(&self.data).is_some_and(|p| Some(p) == pushed(&d))
-                };
-                let kept: HashMap<_, _> = std::mem::take(&mut self.details).into_iter()
-                    .filter(|((full, _), v)| match v {
-                        Load::Ready(detail) => detail.error.is_none() && detail.readme_error.is_none() && same(full),
-                        _ => false,
-                    }).collect();
-                self.branches.clear();
+                // Details of repositories nobody pushed to since stay as they are; those of
+                // repositories pushed to stay on screen and are read again when opened. Branch
+                // lists stay too: opening a repository reads its list again behind it.
+                let kept = cache::keep_details(&self.data, &d, std::mem::take(&mut self.details), &mut self.fresh.stale);
+                self.fresh.from_copy = false;
+                self.fresh.partial = false;
                 self.data = d;
                 self.data_gen = self.data_gen.wrapping_add(1);
                 self.refresh_clone_cache();
@@ -1529,6 +1591,7 @@ impl App {
                             self.sync_tray();
                         }
                         self.load_detail(i);
+                        self.load_branches(i, true);
                         if self.tab == RepoTab::Commits {
                             self.load_history(i, true);
                         }
@@ -1546,10 +1609,14 @@ impl App {
                 {
                     self.go(Page::Overview);
                 }
+                self.releases_refreshed(self.repo_index());
                 self.restore_place();
                 // With the lists, what's waiting for you.
                 self.load_inbox();
                 self.sync_after_load();
+                cache::trace_time("loaded");
+                // For the next start.
+                self.save_copy();
             }
             Err(e) => {
                 if let Some(ra) = e.retry_after {
@@ -1566,7 +1633,9 @@ impl App {
     }
 
     fn apply_detail(&mut self, epoch: u64, key: (String, String), d: Detail) {
-        if epoch == self.load_gen {
+        // Read again behind a page on screen: a failure keeps the page.
+        let shown = matches!(self.details.get(&key), Some(Load::Ready(_)));
+        if epoch == self.load_gen && !(shown && (d.error.is_some() || d.readme_error.is_some())) {
             let load = if let Some(e) = &d.error
                 && d.files.is_empty()
                 && d.readme.is_none()
@@ -1594,14 +1663,24 @@ impl App {
         }
         self.load_branches(i, false);
         self.load_local(i, false);
+        let mut behind = false;
         if let Some(load) = self.details.get(&key) {
             match load {
                 Load::Loading => return,
-                Load::Ready(d) if d.error.is_none() && d.readme_error.is_none() => return,
+                // Read before a refresh, or from the saved copy: it stays on screen while it's read
+                // again (cheaply: GitHub answers "not modified" when nothing changed).
+                Load::Ready(d) if d.error.is_none() && d.readme_error.is_none() => {
+                    if !self.fresh.stale.remove(&key) {
+                        return;
+                    }
+                    behind = true;
+                }
                 _ => {}
             }
         }
-        self.details.insert(key.clone(), Load::Loading);
+        if !behind {
+            self.details.insert(key.clone(), Load::Loading);
+        }
         if let Some(h) = self.handle.clone() {
             let cfg = self.cfg.clone();
             let at = key.1.clone();
@@ -1992,6 +2071,7 @@ impl App {
             BranchSlot::Head => if let Some(f) = self.form.as_mut() { f.from = branch },
             BranchSlot::Base => if let Some(f) = self.form.as_mut() { f.into = branch },
             BranchSlot::CompareBase | BranchSlot::CompareHead => self.pick_compare(slot, branch),
+            BranchSlot::ReleaseTarget => self.pick_release_target(branch),
         }
     }
 
@@ -2005,6 +2085,7 @@ impl App {
         } else {
             self.branches.get(&full).and_then(Load::ready).and_then(|b| b.iter().find(|n| **n != default).cloned()).unwrap_or(shown.clone())
         };
+        self.issue_picks = triage::Picks::for_repo(&full);
         self.form = Some(actions::Form {
             repo: full,
             kind,
@@ -2033,6 +2114,7 @@ impl App {
         }
         let Some(f) = self.form.as_mut() else { return };
         let Ok(w) = f.write() else { return };
+        let w = triage::with_picks(w, &self.issue_picks);
         if !f.submit.start() {
             return;
         }
@@ -2076,9 +2158,15 @@ impl App {
             github::Write::RerunRun { run_id, .. } => Some(*run_id),
             _ => None,
         };
-        let key = match rerun_id {
-            Some(run_id) => runs_page::run_busy_key(&full, run_id),
-            None => actions::busy_key(repo, number),
+        // A triage change: what it's about, and whether it takes several requests.
+        let triage = match &w {
+            github::Write::Triage { change, .. } => Some((change.part(), change.requests(&full, number).len() > 1)),
+            _ => None,
+        };
+        let key = match (rerun_id, triage) {
+            (Some(run_id), _) => runs_page::run_busy_key(&full, run_id),
+            (None, Some(_)) => triage::busy_key(repo, number),
+            (None, None) => actions::busy_key(repo, number),
         };
         if !self.busy.insert(key.clone()) {
             return;
@@ -2095,7 +2183,11 @@ impl App {
             s.busy.remove(&key);
             // What was typed stays in the box when sending fails.
             if let Some(t) = s.thread.as_mut().filter(|t| t.is(&full_cb, number)) {
-                t.sending = false;
+                if triage.is_some() {
+                    t.edit.saving = None;
+                } else {
+                    t.sending = false;
+                }
             }
             if s.pull_diff_of.as_ref().is_some_and(|(f, n)| *n == number && same_repo(f, &full_cb))
                 && let Some(d) = s.pull_review.as_mut().and_then(|r| r.draft.as_mut())
@@ -2104,6 +2196,8 @@ impl App {
             }
             match r {
                 Ok(done) => s.apply_done(&full_cb, done),
+                // A refused triage change is said where it was made, once.
+                Err(e) if triage.is_some_and(|(part, partial)| s.triage_failed(&full_cb, number, part, partial, &e)) => {}
                 Err(e) => {
                     if let Some(run_id) = rerun_id
                         && let Some(o) = s.open_run.as_mut().filter(|o| o.run_id == run_id && same_repo(&o.repo, &full_cb))
@@ -2146,7 +2240,8 @@ impl App {
         match done {
             github::Done::Issue(c) => {
                 let title = self.form_title.take().unwrap_or_default();
-                self.data.issues.insert(0, model::Issue { labels: Vec::new(), assignees: Vec::new(), number: c.number, title, repo: full_name.clone(), label: None, created_at: self.now, comments: 0, url: c.url });
+                let (labels, assignees) = self.picked_for_new_issue(&full_name);
+                self.data.issues.insert(0, model::Issue { label: labels.first().cloned(), labels, assignees, number: c.number, title, repo: full_name.clone(), created_at: self.now, comments: 0, url: c.url });
                 if let Some(r) = self.data.repos.iter_mut().find(|r| r.full_name.eq_ignore_ascii_case(&full_name)) {
                     r.issues += 1;
                 }
@@ -2170,7 +2265,7 @@ impl App {
                 self.commits.pull_opened(&full_name, c.number, &c.url);
                 let (title, draft) = self.pull_meta.take().unwrap_or_default();
                 let author = self.data.profile.login.clone();
-                self.data.pulls.insert(0, model::Pull { labels: Vec::new(),
+                self.data.pulls.insert(0, model::Pull { labels: Vec::new(), assignees: Vec::new(), review_requested: false,
                     number: c.number, title, repo: full_name.clone(), author,
                     state: if draft { PullState::Draft } else { PullState::Open },
                     checks: None, updated_at: self.now, comments: 0, url: c.url,
@@ -2272,6 +2367,8 @@ impl App {
                 }
                 self.notify(format!("{} pull request #{n}", if open { "Reopened" } else { "Closed" }));
             }
+            github::Done::Release(r) => self.release_done(&full_name, *r),
+            github::Done::Triaged { number, change, applied } => self.apply_triaged(&full_name, number, change, applied),
             github::Done::Reran { run_id, failed_only } => {
                 for r in self.data.runs.iter_mut().filter(|r| r.id == run_id && same_repo(&r.repo, &full_name)) {
                     r.checks = model::Checks::Running;
@@ -3065,6 +3162,7 @@ impl App {
 }
 
 fn init() -> App {
+    cache::trace_time("");
     let args = rune::extra_args();
     let arg = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     let cfg = Arc::new(Config::load());
@@ -3143,10 +3241,16 @@ fn init() -> App {
         issue_filter: filters::ListFilter::default(),
         runs_filter: runs_page::RunsFilter::default(),
         commits: commits::Commits::default(),
+        releases: releases::Releases::default(),
+        reveal_tab: false,
         thread: None,
         thread_epoch: 0,
+        choices: triage::Cache::default(),
+        issue_picks: triage::Picks::default(),
+        saved_filters: None,
         open_run: None,
         run_epoch: 0,
+        fresh: cache::Fresh::default(),
         busy: std::collections::HashSet::new(),
         form_title: None,
         pull_meta: None,
@@ -3207,7 +3311,17 @@ fn init() -> App {
     };
     // `REPOHUB_BLOCKING=1` loads synchronously before the first frame (headless snapshots).
     #[cfg(not(target_arch = "wasm32"))]
-    if live && std::env::var("REPOHUB_BLOCKING").is_ok_and(|v| v == "1") {
+    let blocking = live && std::env::var("REPOHUB_BLOCKING").is_ok_and(|v| v == "1");
+    // Otherwise the lists of last time show at once, and the first load starts now, before
+    // the window opens (what it finds waits for the window in a mailbox).
+    #[cfg(not(target_arch = "wasm32"))]
+    if live && !blocking {
+        s.show_saved_copy();
+        s.fresh.early = Some(net::Mailbox::default());
+        s.refresh();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if blocking {
         s.set_status(Status::Loading);
         let r = pollster::block_on(github::load_all(&s.cfg));
         let epoch = s.load_gen;
@@ -3259,6 +3373,10 @@ fn init() -> App {
             s.open_thread(&repo, number, false);
         }
     }
+    // `-- picker labels` (assignees, milestone, reviewers) opens that picker in the conversation
+    // (on a repository's page without one: the New issue form's), `-- edit title` (or `body`) the
+    // title's or the description's editor (headless stills).
+    s.triage_still(arg("picker"), arg("edit"));
     // `-- section appearance` picks the Settings page's section.
     if let Some(sec) = arg("section")
         && let Some(n) = state::SettingsSection::LABELS.iter().position(|l| l.eq_ignore_ascii_case(&sec))
@@ -3289,6 +3407,9 @@ fn init() -> App {
     if let Some(state) = arg("sync") {
         s.sync_still(&state, arg("notes-repo"));
     }
+    // `-- tab releases` reads the releases before the first frame; `-- release new` (or `notes`,
+    // `edit`, `publish`) opens the form. Any repository page reads its latest release.
+    s.releases_still(arg("release"));
     // `-- board Name` opens a drawing of that section (for headless stills); `zoom 2` zooms it.
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(name) = arg("board")
@@ -3312,10 +3433,16 @@ fn init() -> App {
         s.owner = l.owner.clone();
         s.saved_layout = Some(l);
     }
+    // The list filters of last time (an account's own: the sample data starts with none).
+    if !s.data.sample {
+        s.restore_filters();
+    }
     // The sample data has no places of its own to go back to.
     if arg("page").is_none() && !s.data.sample {
         s.pending_place = prefs::get("place").as_ref().and_then(state::Place::from_json);
-        if !s.data.repos.is_empty() {
+        // Over the saved copy it's restored once the window is there (`start`): what the page
+        // reads needs the app's handle.
+        if !s.data.repos.is_empty() && !s.fresh.from_copy {
             s.restore_place();
         }
     }
@@ -3803,8 +3930,11 @@ fn list_shows_failed(s: &App) -> bool {
 /// A banner above the page for loading, errors and sample data.
 fn banner(s: &App, k: &Kit) -> Option<El> {
     let (msg, tint, action) = match &s.status {
+        // Over lists already on screen a load says "Updating…" where "Updated … ago" was.
+        Status::Starting | Status::Loading if !s.data.is_empty() => return None,
         Status::Starting | Status::Loading => ("Loading data from GitHub…".to_owned(), k.c.info.icon, false),
         Status::Failed(_) if list_shows_failed(s) => return None,
+        Status::Failed(e) if s.fresh.from_copy => (format!("{e}{} {}", if e.ends_with(['.', '!', '?']) { "" } else { "." }, cache_page::shown_copy(s)), k.c.danger.icon, true),
         Status::Failed(e) => (e.clone(), k.c.danger.icon, true),
         Status::Ready if !s.data.warnings.is_empty() => (s.data.warnings.join(" · "), k.c.warning.icon, true),
         Status::Sample if !s.cfg.demo && !s.cfg.account_locked => ("This is sample data. Connect your GitHub account to see your repositories.".to_owned(), k.c.warning.icon, false),
@@ -4008,6 +4138,10 @@ fn starts_compact() -> bool {
 /// asks Rune to wake for the next one, also while the window is closed. No timer thread.
 fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
     const EVERY: f64 = 30.0;
+    static FIRST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+    if FIRST.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        cache::trace_time("first frame");
+    }
     #[cfg(not(target_arch = "wasm32"))]
     let plugins_ran = {
         if s.plugins.list.iter().any(|p| p.running()) {
@@ -4024,6 +4158,9 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
     #[cfg(target_arch = "wasm32")]
     let plugins_ran = false;
     s.clock = clock;
+    if std::mem::take(&mut s.reveal_tab) {
+        pages::reveal_tab(s, tx);
+    }
     let due = clock - s.tick_at >= EVERY;
     if due {
         s.tick_at = clock;
@@ -4108,6 +4245,8 @@ fn shortcuts(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
             s.confirm_merge = None;
         } else if s.form.is_some() {
             s.form = None;
+        } else if s.release_escape() {
+            // The publish question, GitHub's notes on offer, or the release form.
         } else if s.pull_diff_of.is_some() {
             s.close_pull_diff();
         } else if s.thread.is_some() {
@@ -4175,11 +4314,19 @@ pub fn start() {
     if tray::keeps_running() {
         app = app.keep_running().on_close(on_close);
     }
-    let app = app.on_quit(|s: &mut App, _| s.save_layout());
+    let app = app.on_quit(|s: &mut App, _| { s.save_layout(); s.save_filters(); });
     let handle = app.handle();
     let h2 = handle.clone();
     handle.update(move |s: &mut App, _| {
         s.handle = Some(h2.clone());
+        // What the first load found before the window opened.
+        if let Some(m) = s.fresh.early.take() {
+            m.attach(h2.clone());
+        }
+        // The place of last time, over the saved copy (before the first frame).
+        if !s.data.repos.is_empty() {
+            s.restore_place();
+        }
         s.start_tray();
         #[cfg(not(target_arch = "wasm32"))]
         s.plugins.start(&h2);
@@ -4205,6 +4352,7 @@ pub fn start() {
                 s.cfg = Arc::new(cfg);
             }
             if live {
+                s.show_saved_copy();
                 s.refresh();
             } else {
                 s.data = Data::sample();
@@ -4217,6 +4365,9 @@ pub fn start() {
     });
     app.run();
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod load_tests;
 
 #[cfg(test)]
 mod pin_tests {
@@ -4264,8 +4415,10 @@ mod cache_tests {
         next.repos[1].pushed += 60;
         let epoch = s.load_gen;
         s.apply(epoch, Ok(next));
-        assert!(s.details.contains_key(&(a, "main".into())), "not pushed since: kept");
-        assert!(!s.details.contains_key(&(b, "main".into())), "pushed since: loaded again");
+        assert!(s.details.contains_key(&(a.clone(), "main".into())), "not pushed since: kept");
+        assert!(!s.fresh.stale.contains(&(a, "main".into())), "and not read again");
+        // Pushed since: it stays on screen and is read again when it's opened (#126).
+        assert!(s.details.contains_key(&(b.clone(), "main".into())) && s.fresh.stale.contains(&(b, "main".into())), "pushed since: read again when opened");
         assert!(!s.details.contains_key(&("gone/repo".into(), "main".into())));
     }
 }
@@ -5319,7 +5472,7 @@ mod fix60_tests {
         // 40 mixed PRs (12 open + 28 merged) shows "12+" on Overview and Sidebar; 39 shows "12".
         rt.update(|s, _| {
             s.page = crate::Page::Overview;
-            s.data.pulls = (0..crate::model::SEARCH_CAP).map(|i| crate::model::Pull { labels: Vec::new(),
+            s.data.pulls = (0..crate::model::SEARCH_CAP).map(|i| crate::model::Pull { labels: Vec::new(), assignees: Vec::new(), review_requested: false,
                 number: i as u32 + 1,
                 title: format!("PR #{i}"),
                 repo: "a/b".into(),
@@ -5473,7 +5626,7 @@ mod fix60_tests {
         s.data.repos[0].issues = 5;
 
         // Add a pull request and an issue belonging to external repo other-org/app
-        s.data.pulls.insert(0, crate::model::Pull { labels: Vec::new(),
+        s.data.pulls.insert(0, crate::model::Pull { labels: Vec::new(), assignees: Vec::new(), review_requested: false,
             number: 42,
             title: "External PR".into(),
             repo: "other-org/app".into(),
@@ -5754,7 +5907,7 @@ mod fix60_tests {
         // Generate enough PRs so the list extends well beyond a 720px viewport
         let mut prs = Vec::new();
         for i in 1..=20 {
-            prs.push(crate::model::Pull { labels: Vec::new(),
+            prs.push(crate::model::Pull { labels: Vec::new(), assignees: Vec::new(), review_requested: false,
                 number: i,
                 title: format!("Pull request #{i} with long description to take space"),
                 repo: "francescodibella.github.io".into(),
@@ -6794,6 +6947,7 @@ mod fix58_tests {
             reset: None,
             retry_after: None,
             link: None,
+            etag: None,
         };
         let msg_403 = gh.explain(&resp_403);
         assert!(msg_403.contains("rate limit"), "must explain rate limit: {msg_403}");
@@ -6807,6 +6961,7 @@ mod fix58_tests {
             reset: None,
             retry_after: Some(40),
             link: None,
+            etag: None,
         };
         let msg_429 = gh.explain(&resp_429);
         assert!(msg_429.contains("40 s") || msg_429.contains("40"), "must mention retry duration: {msg_429}");
@@ -6821,6 +6976,7 @@ mod fix58_tests {
             reset: None,
             retry_after: None,
             link: None,
+            etag: None,
         };
         let msg_generic_403 = gh.explain(&resp_generic_403);
         assert!(msg_generic_403.contains("The token needs write access"), "generic 403 must explain write access: {msg_generic_403}");
@@ -6833,6 +6989,7 @@ mod fix58_tests {
             reset: Some(crate::net::now() + 600),
             retry_after: None,
             link: None,
+            etag: None,
         };
         let msg_primary_403 = gh.explain(&resp_primary_403);
         assert!(msg_primary_403.contains("API rate limit reached."), "must start with API rate limit reached.: {msg_primary_403}");
@@ -6971,12 +7128,13 @@ mod fix58_tests {
         s.data.sample = false;
         let repo_full = s.data.repos[0].full_name.clone();
 
-        // 1. Branches are cleared on refresh
+        // 1. A refresh keeps the branch lists on screen (#126): opening a repository reads its
+        // list again behind it (step 3), as does a refresh while it's open.
         s.branches.insert(repo_full.clone(), Load::Ready(vec!["main".into(), "feature".into()]));
         assert!(!s.branches.is_empty());
         let epoch = s.load_gen;
         s.apply(epoch, Ok(s.data.clone()));
-        assert!(s.branches.is_empty(), "branches must be cleared on apply(refresh)");
+        assert!(matches!(s.branches.get(&repo_full), Some(Load::Ready(_))), "kept through a refresh, no skeleton");
 
         // 2. Retrying Load::Failed in load_branches
         s.branches.insert(repo_full.clone(), Load::Failed("network timeout".into()));
@@ -7145,7 +7303,7 @@ mod fix58_tests {
         // When there are 0 open PRs, but closed_pulls_total has 200, prs_capped() must be false!
         let data = Data {
             pulls: vec![
-                model::Pull { labels: Vec::new(),
+                model::Pull { labels: Vec::new(), assignees: Vec::new(), review_requested: false,
                     number: 1,
                     title: "Closed PR".into(),
                     repo: "alice/repo1".into(),
@@ -8095,6 +8253,8 @@ mod fix67_tests {
             updated_at: s.now,
             comments: 0,
             labels: Vec::new(),
+            assignees: Vec::new(),
+            review_requested: false,
             url: "https://github.com/alice/app/pull/12".into(),
         }];
         s.open_run = Some(crate::runs_page::OpenRun {
@@ -8191,6 +8351,8 @@ mod perf61_tests {
                 comments: (i % 8) as u32,
                 url: format!("{}/pull/{}", r.url, 100 + i),
                 labels: vec![("performance".into(), 40.0)],
+                assignees: Vec::new(),
+                review_requested: false,
             });
             d.issues.push(Issue {
                 number: (200 + i) as u32,

@@ -10,6 +10,29 @@ The sections are **Added**, **Changed** and **Fixed**.
 ## Unreleased
 
 ### Added
+- RepoHub opens at once: the lists of the last load show in the first frame, with "Updating…"
+  until GitHub answers. If it can't, the lists stay and the banner says how old they are. The
+  copy never holds your token, is removed when you sign out or switch accounts, and **Settings →
+  About → Clear saved data** removes it; `REPOHUB_CACHE=off` turns it off.
+- **Releases** on a repository's page: its releases with their notes, files and download counts,
+  20 at a time with **Load more**, marked **Latest**, **Pre-release** or **Draft**, and the tags
+  that have no release. **New release** offers the next versions as the tag, picks the branch a
+  new tag is made from, and fills the notes with **Generate notes**; save it as a draft, or
+  publish it after a question. Drafts have **Edit** and **Publish**. The repository's header
+  shows the latest release's tag, and the palette has "Releases of …" and "New release in …".
+  RepoHub doesn't delete releases or tags or upload files.
+- Triage in a conversation: a details block (beside it on a wide window, above it on a phone)
+  with **Labels**, **Assignees**, **Milestone** and, on pull requests, **Reviewers** (who is
+  asked, and who reviewed with their verdict). **Edit** opens a picker with a filter and the
+  repository's choices; **Apply** sends the change. Edit the **title** and the **description**
+  in place. The conversation and the lists follow at once; when GitHub refuses, it says so and
+  keeps the old values.
+- **New issue** takes optional labels and assignees.
+- **Review requested**: a chip on the Pull requests page, a **Waiting for your review** panel on
+  the Overview and a line in the status-bar menu ("2 pull requests wait for your review"). Rows
+  show up to three assignees.
+- The Pull requests and Issues filters are kept between visits and restarts; **Clear** resets
+  them.
 - **Boards on every device:** choose a private repository of yours in Settings → Account →
   Boards (for example `repohub-notes`), and boards sync through it: draw on the phone, open the
   computer, and the board is there. Changes made on two devices are merged, so both sets of
@@ -41,6 +64,16 @@ The sections are **Added**, **Changed** and **Fixed**.
   the first visit downloads 2.4 MB (brotli) or 3.5 MB (gzip) instead of 16.8 MB, and the browser
   keeps the files until the next version instead of downloading them again on every visit. The
   Android app's APK is several megabytes smaller: its page is now compressed inside it.
+- Loading is about 2.5 times faster: the parts of a load run side by side (at most four requests
+  at a time), and on a first start your repositories show before pull requests, issues and runs
+  are in.
+- A refresh with nothing new costs almost none of GitHub's rate limit: RepoHub asks "changed
+  since?" and reuses what it has when GitHub answers "not modified". Through `repohub-server`
+  and the Android app too.
+- Repository pages, branch lists, labels and conversations already read show at once when opened
+  again, and are read again behind them, instead of a skeleton.
+- A refresh over lists already on screen no longer shows the "Loading data from GitHub…" banner:
+  "Updating…" shows where "Updated … ago" was.
 - A deleted drawing goes to a trash folder next to the drawings and stays there 30 days.
 - Drawing on a board saved from excalidraw.com keeps the elements RepoHub doesn't draw (images,
   frames) in the file.
