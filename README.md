@@ -292,6 +292,40 @@ requests an hour. A refresh that fails is tried again after the next interval.
 "Updated 3 minutes ago" shows on the Overview, in the refresh button's tooltip, in the status-bar
 menu and in Settings, which also says when the next refresh is due. ⌘R (Ctrl+R) refreshes now.
 
+**Opening at once.** After each load RepoHub saves a copy of the lists (and of the repository
+pages you opened), and the next start shows it in the first frame with "Updating…" until GitHub
+answers. If GitHub can't be reached, the copy stays and the banner says how old it is.
+- Desktop: `<data dir>/cache/<host>-<account>.json` (`~/.local/share/repohub` on Linux,
+  `~/Library/Application Support/RepoHub` on macOS, `%APPDATA%\RepoHub` on Windows), readable by
+  you only. Web and Android: the browser's storage, when it fits (the largest parts are left out
+  first).
+- Never your token. Removed when you sign out or switch accounts, and with **Settings → About →
+  Clear saved data**, which also says where it is, how large and from when. At most 12 MB.
+- `REPOHUB_CACHE=off` turns it off (desktop).
+
+**Lighter refreshes.** RepoHub keeps each answer's tag (`ETag`) and asks "changed since?"
+(`If-None-Match`). When nothing changed GitHub answers `304 Not Modified`, which doesn't count
+against the rate limit, so a refresh with nothing new costs almost nothing: only the four
+searches (pull requests, review requests, issues) are read again, as GitHub's search has no tags.
+The tags are saved with the copy, so the first refresh after a start is light too.
+`repohub-server` and the Android app pass both headers on.
+
+**Loading in parallel.** The parts of a load that don't need each other run side by side, at most
+four requests at a time: repositories next to pull requests, then issues, runs and activity. On
+a first start the profile and the repositories show as soon as they're in, and pull requests,
+issues and runs fill in when they arrive. Repository pages, branch lists, labels and
+conversations already read in this session show at once when opened again, and are read again
+behind them.
+
+Measured against a mock GitHub that answers every request after 150 ms (200 repositories;
+`scripts/bench-load.sh`, times from the start of the app):
+
+| | before: first content | before: complete | now: first content | now: complete | requests answered 200 / 304 (before → now) | sent by GitHub |
+| --- | --- | --- | --- | --- | --- | --- |
+| first start | 3.5 s | 3.5 s | 0.64 s | 1.27 s | 18 / 0 → 18 / 0 | 1.3 MB → 1.3 MB |
+| next start | 3.4 s | 3.4 s | 0.01 s (the saved copy) | 1.13 s | 18 / 0 → 4 / 14 | 1.3 MB → 0.2 MB |
+| refresh, nothing changed | — | 3.3 s | — | 1.10 s | 18 / 0 → 4 / 14 | 1.3 MB → 0.2 MB |
+
 ## Search and commands
 
 **⌘K** (Ctrl+K on Windows and Linux), or the search button in the toolbar, opens a palette over the
@@ -602,10 +636,11 @@ GitHub Enterprise.
 | Actions | latest runs of the most recently pushed repositories | `/repos/{r}/actions/runs` |
 | Repository → Notes | drawings per branch: create, open, draw, delete, export, import; sync state | `/repos/{r}/branches` |
 | Notes sync | boards on every device through your notes repository `{n}` | `/repos/{n}`, `/repos/{n}/git/trees/{branch}?recursive=1`, `GET`/`PUT`/`DELETE /repos/{n}/contents/boards/…/<name>.excalidraw` |
-| Settings | connection status, the configuration in use (the token is never shown), where notes are kept and the notes repository | — |
+| Settings | connection status, the configuration in use (the token is never shown), where notes are kept and the notes repository; About: the saved copy of the last load and **Clear saved data** | — (every `GET` above but searches is asked again with `If-None-Match`) |
 
 How it behaves:
-- **Refresh** (toolbar icon, or ⌘R / Ctrl+R) reloads everything.
+- **Refresh** (toolbar icon, or ⌘R / Ctrl+R) reloads everything; what didn't change costs a
+  `304`.
 - Requests run in the background, so the window stays responsive.
 - Errors (rejected token, rate limit, unknown user) show a banner with the reason and **Retry**.
 - RepoHub never creates or deletes repositories, and never changes their settings: "New

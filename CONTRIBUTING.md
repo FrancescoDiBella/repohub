@@ -10,8 +10,11 @@
 | `src/ui.rs`, `src/icons.rs` | Small building blocks and the icon set |
 | `src/state.rs` | The state machines: where data comes from, loading, saving, theme, tabs, filters. Drawn in [`docs/STATE.md`](docs/STATE.md) |
 | `src/model.rs` | Data model, sample data, date and colour helpers |
-| `src/github.rs` | GitHub REST client: async, shared by the desktop and web builds |
-| `src/net.rs` | Transport: blocking `ureq` on the desktop, `fetch` to the `/gh` proxy on the web; `spawn` runs work in the background and reports to the UI |
+| `src/github.rs` | GitHub REST client: async, shared by the desktop and web builds. Every GET goes through `Gh::fetch` (conditional, see `etag`); `load_all_with` runs the parts of a load side by side and reports the profile and repositories early |
+| `src/net.rs` | Transport: blocking `ureq` on the desktop, `fetch` to the `/gh` proxy on the web, both sending `If-None-Match` and reading `ETag`; `spawn` runs work in the background and reports to the UI; `join`/`join_all` (scoped threads on the desktop, polled futures on the web), `Gate` (at most N requests at once), `Mailbox` (the first load, started before the window) |
+| `src/etag.rs` | Conditional requests: each GET's ETag with its answer, shared by the process, cleared on sign-out; searches left out |
+| `src/cache.rs`, `src/cache_page.rs` | The saved copy of the last load: its format (versioned), where it lives, the size cap, writing it in the background and removing it; showing it at start, the first part of a load, what's kept to show at once (`Fresh`); Settings → About → Saved data |
+| `src/load_tests.rs` | A mock GitHub on localhost: the parallel load equals the sequential one, 304s reuse kept answers, at most four at once; the saved copy in the app |
 | `src/config.rs` | `.env` parsing (desktop: the project file and the app's own settings file, where Settings saves the account) and `config.json` (web) |
 | `src/board.rs` | The Notes whiteboard: model, hand-drawn rendering, gestures, undo/redo, `.excalidraw` read/write |
 | `src/actions.rs` | The branch picker, the New issue / branch / pull request forms, Close and Merge on rows |
@@ -65,7 +68,9 @@ REPOHUB_BLOCKING=1 target/release/repohub --snap out.png --size 1180x760 -- page
 # pages: overview (default), repos, repo, pulls, issues, actions, settings
 ```
 
-`REPOHUB_BLOCKING=1` loads the data before the first frame, so the snapshot shows it.
+`REPOHUB_BLOCKING=1` loads the data before the first frame, so the snapshot shows it (and skips
+the saved copy). Without it, a live run shows the saved copy of the last load, if there is one,
+and loads behind it; `REPOHUB_CACHE=off` turns the copy off.
 Add `tab notes` (a section's name) after `page repo`, and `REPOHUB_TRACE=1` to print every state change.
 `REPOHUB_COMPACT=1` with `--size 390x844` starts in the phone layout.
 `thread 14` after `page pulls` (or `page issues`) opens that conversation; `picker labels` (or
@@ -111,6 +116,23 @@ The server reads its settings from the environment, using the same variables as 
 
 Set `GITHUB_API_URL` to a local server that answers like the GitHub API. Everything else stays
 the same; the clients bypass HTTP proxies for `localhost` and `NO_PROXY` hosts.
+
+`scripts/mock_github.py PORT` is one: 200 repositories with pull requests, issues, runs and
+activity, ETags and 304s, a delay on every answer (`MOCK_DELAY_MS`, default 150), slower
+searches (`MOCK_SEARCH_DELAY_MS`, to watch the lists arrive one by one), `MOCK_DOWN=1` to see a
+failed refresh, and `/_stats` and `/_log` with what was asked.
+
+### Measuring how it loads
+
+```sh
+scripts/bench-load.sh [target/release/repohub] [delay-ms]
+```
+
+starts the mock, runs the app headless three times against it (a first start, the next start from
+the saved copy, and a refresh with nothing changed) and prints, for each, the time to the first
+content and to the end of the load, the requests (answered 200 and 304), the kilobytes GitHub
+sent and the most requests at once. It reads the app's `REPOHUB_TRACE=1` lines, so an older build
+works too (without its first-frame time). Times include the headless renderer's start-up.
 
 ### Notes on the whiteboard
 
@@ -170,6 +192,12 @@ the same; the clients bypass HTTP proxies for `localhost` and `NO_PROXY` hosts.
 - The repository lists, the pinned set and the palette's entries are cached between frames and
   rebuilt when `App::data_gen` moves. Code that changes `data` in place (a count, a star, a
   state) calls `App::data_changed()`; `apply_done` does it for every finished write.
+- What RepoHub keeps on disk besides your settings and drawings: the saved copy of the last load
+  (`cache`), never the token or anything made from it (it's built from `Data`, not `Config`).
+  Change `cache::FORMAT` whenever what it writes changes meaning.
+- A new GitHub read goes through `Gh::get` / `get_resp` (so it's conditional) unless it's a
+  search; a new part of `load_all_with` keeps the lists and warnings in the order the sequential
+  load gave (`load_tests` checks it).
 - Timing tests only guard against a return to the old cost on shared runners. To check the
   one-frame target on a quiet machine: `REPOHUB_PERF_ASSERT=1 cargo test --release measure_500`.
 - Plugins see the app only through `@repohub` (`plugins::context` and the actions in

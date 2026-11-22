@@ -10,6 +10,10 @@ The sections are **Added**, **Changed** and **Fixed**.
 ## Unreleased
 
 ### Added
+- RepoHub opens at once: the lists of the last load show in the first frame, with "Updating…"
+  until GitHub answers. If it can't, the lists stay and the banner says how old they are. The
+  copy never holds your token, is removed when you sign out or switch accounts, and **Settings →
+  About → Clear saved data** removes it; `REPOHUB_CACHE=off` turns it off.
 - Triage in a conversation: a details block (beside it on a wide window, above it on a phone)
   with **Labels**, **Assignees**, **Milestone** and, on pull requests, **Reviewers** (who is
   asked, and who reviewed with their verdict). **Edit** opens a picker with a filter and the
@@ -48,6 +52,16 @@ The sections are **Added**, **Changed** and **Fixed**.
   panels.
 
 ### Changed
+- Loading is about 2.5 times faster: the parts of a load run side by side (at most four requests
+  at a time), and on a first start your repositories show before pull requests, issues and runs
+  are in.
+- A refresh with nothing new costs almost none of GitHub's rate limit: RepoHub asks "changed
+  since?" and reuses what it has when GitHub answers "not modified". Through `repohub-server`
+  and the Android app too.
+- Repository pages, branch lists, labels and conversations already read show at once when opened
+  again, and are read again behind them, instead of a skeleton.
+- A refresh over lists already on screen no longer shows the "Loading data from GitHub…" banner:
+  "Updating…" shows where "Updated … ago" was.
 - A deleted drawing goes to a trash folder next to the drawings and stays there 30 days.
 - Drawing on a board saved from excalidraw.com keeps the elements RepoHub doesn't draw (images,
   frames) in the file.

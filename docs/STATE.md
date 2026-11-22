@@ -5,10 +5,16 @@ to their code). A state that makes no sense can't be written, and every change g
 method. Run with `REPOHUB_TRACE=1` to see each change on stderr:
 
 ```
+state: shown "nothing" -> "saved copy"
+state: time "saved copy shown" -> "4 ms"
 state: status "starting" -> "loading"
+state: time "first frame" -> "90 ms"
 state: page Overview -> Repo(0)
 state: tab Code -> Notes
 ```
+
+`time` lines say how long since the process started: the saved copy shown, the first frame, the
+profile and repositories shown, the load done, the copy written.
 
 ## Data source: `Status`
 
@@ -27,6 +33,18 @@ stateDiagram-v2
 
 `refresh()` only starts from `Starting`, `Ready` or `Failed` (`Status::can_load`), so two loads
 never run together.
+
+What is on screen meanwhile (`cache::Fresh`, beside `Status`):
+
+| | Nothing saved (first start) | Saved copy (`from_copy`) | Loaded in this session |
+| --- | --- | --- | --- |
+| `Starting`, `Loading` | skeletons, then the profile and repositories with the other lists loading (`partial`) | the copy, "Updating…" | the lists, "Updating…" |
+| `Ready` | — | — (the copy is replaced) | "Updated 3 minutes ago" |
+| `Failed` | the error with **Retry** | the copy, the error and "The lists show what was saved 2 hours ago" | the lists and the error |
+
+A load's results carry the account generation (`load_gen`): a load or a part of one that started
+before a sign-out or an account switch is dropped, and the copy it would have saved is never
+written (`cache::forget_all` stops writes still on their way).
 
 ## Something fetched once: `Load<T>`
 

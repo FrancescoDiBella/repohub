@@ -3912,7 +3912,7 @@ fn banner(s: &App, k: &Kit) -> Option<El> {
         Status::Starting | Status::Loading if !s.data.is_empty() => return None,
         Status::Starting | Status::Loading => ("Loading data from GitHub…".to_owned(), k.c.info.icon, false),
         Status::Failed(_) if list_shows_failed(s) => return None,
-        Status::Failed(e) if s.fresh.from_copy => (format!("{e} {}", cache_page::shown_copy(s)), k.c.danger.icon, true),
+        Status::Failed(e) if s.fresh.from_copy => (format!("{e}{} {}", if e.ends_with(['.', '!', '?']) { "" } else { "." }, cache_page::shown_copy(s)), k.c.danger.icon, true),
         Status::Failed(e) => (e.clone(), k.c.danger.icon, true),
         Status::Ready if !s.data.warnings.is_empty() => (s.data.warnings.join(" · "), k.c.warning.icon, true),
         Status::Sample if !s.cfg.demo && !s.cfg.account_locked => ("This is sample data. Connect your GitHub account to see your repositories.".to_owned(), k.c.warning.icon, false),
