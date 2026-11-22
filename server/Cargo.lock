@@ -270,7 +270,7 @@ dependencies = [
 
 [[package]]
 name = "repohub-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "tiny_http",
  "ureq",
