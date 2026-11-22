@@ -205,6 +205,12 @@ impl Gh {
         }
     }
 
+    /// One request through the same transport, answered as it came (board sync reads the
+    /// status itself: a 409 there means "changed meanwhile", not a failure).
+    pub async fn send(&self, method: &str, path: &str, accept: &str, body: &str) -> Result<Resp, String> {
+        self.t.send_body(method, path, accept, body).await
+    }
+
     /// Sends a JSON body and returns the JSON answer (writes: POST, PATCH, PUT).
     async fn write(&self, method: &str, path: &str, body: Value) -> Result<Value, String> {
         let r = self.t.send_body(method, path, JSON, &body.to_string()).await?;

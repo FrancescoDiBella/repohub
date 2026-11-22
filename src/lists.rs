@@ -353,7 +353,7 @@ pub fn settings(s: &App, k: &Kit) -> El {
     // Five segments don't fit a phone: the row scrolls sideways there.
     let picker = if s.compact { row().w_full().scroll_x().child(picker) } else { row().w_full().child(picker) };
     let (subtitle, body): (&str, Vec<El>) = match section {
-        Section::Account => ("Your profile, the GitHub account and the connection.", vec![profile, account, conn]),
+        Section::Account => ("Your profile, the GitHub account, the connection and where boards sync.", vec![profile, account, conn, crate::sync_page::settings_block(s, k)]),
         Section::Appearance => ("Light, dark or the system's, and the themes.", vec![appearance]),
         Section::Assistants => ("Claude and the other coding assistants the Terminal starts.", vec![assistants]),
         Section::Plugins => ("Sections and pages others wrote for RepoHub.", vec![plugins]),

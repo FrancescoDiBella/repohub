@@ -74,7 +74,10 @@ pub fn notes_tab(s: &App, k: &Kit, i: usize) -> El {
     let refresh = Button::new("Refresh").icon(&icons::REFRESH).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
         .disabled(view.is_some_and(|v| v.state == Refresh::Loading))
         .on_press(move |s: &mut App| s.load_notes(i)).build(k).key("notes-refresh");
-    let mut list = panel(k).child(panel_head(k, &format!("Drawings on {branch}"), Some(refresh)));
+    let import = Button::new("Import…").icon(&crate::sync_page::IMPORT).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
+        .help("Add an .excalidraw file as a new drawing")
+        .on_press_tx(move |s: &mut App, tx| s.import_board(tx, i)).build(k).key("notes-import");
+    let mut list = panel(k).child(panel_head(k, &format!("Drawings on {branch}"), Some(row().gap(4.0).center_y().child(import).child(refresh))));
     match view {
         None => list = list.child(rule(k)).child(col().w_full().padding(24.0).items_center().child(text("Loading…").font(k.ty.ui).color(k.c.text_muted))),
         Some(v) if v.state == Refresh::Loading && v.items.is_empty() => list = list.child(rule(k)).child(col().w_full().padding(24.0).items_center().child(text("Loading…").font(k.ty.ui).color(k.c.text_muted))),
@@ -94,14 +97,20 @@ pub fn notes_tab(s: &App, k: &Kit, i: usize) -> El {
     }
     col().w_full().gap(12.0)
         .child(text("Drawings, diagrams and annotations for this repository, saved on this computer. Each branch has its own set.").font(k.ty.small).color(k.c.text_muted).wrap())
+        .child(crate::sync_page::header(s, k))
         .child(picker)
         .child(new_panel)
         .child(list)
 }
 
 fn note_row(s: &App, k: &Kit, i: usize, full: &str, branch: &str, n: &notes::Note) -> El {
-    let _ = (full, branch);
     let open_name = n.name.clone();
+    let id = (full.to_owned(), branch.to_owned(), n.name.clone());
+    let export = Button::new("Export…").icon(&crate::sync_page::EXPORT).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
+        .help(format!("Save {}.excalidraw (it also opens on excalidraw.com)", n.name))
+        .on_press_tx(move |s: &mut App, tx| s.export_board(tx, id.clone()))
+        .build(k).key(format!("export-note-{}", n.name));
+    let mark = crate::sync_page::mark(s, k, &crate::sync::Key::new(full, branch, &n.name));
     let open = Button::new("Open").icon(&icons::PEN).control_size(ControlSize::Small)
         .on_press(move |s: &mut App| s.open_board(i, open_name.clone(), false))
         .build(k).key(format!("open-note-{}", n.name));
@@ -116,13 +125,19 @@ fn note_row(s: &App, k: &Kit, i: usize, full: &str, branch: &str, n: &notes::Not
             .on_press(move |s: &mut App| s.confirm_delete = Some(name.clone()))
             .build(k).key(format!("delete-note-{}", n.name))
     };
-    row().w_full().px(16.0).py(10.0).gap(12.0).center_y().hover(k.c.hover)
+    let mut meta = row().gap(8.0).center_y().flex_wrap()
+        .child(text(format!("Edited {} · {}", n.updated_ago(s.now), notes::size(n.size))).font(k.ty.text_small).color(k.c.text_muted));
+    if let Some(m) = mark {
+        meta = meta.child(m);
+    }
+    let buttons = row().gap(6.0).center_y().flex_wrap().child(open).child(export).child(delete);
+    let info = col().grow(1.0).shrink().min_w(160.0).gap(2.0)
+        .child(text(n.name.clone()).font(k.ty.ui_medium).color(k.c.text_base).wrap())
+        .child(meta);
+    row().w_full().px(16.0).py(10.0).gap(12.0).center_y().flex_wrap().hover(k.c.hover)
         .child(ui::ico(&icons::PEN, 16.0, k.c.icon_muted))
-        .child(col().grow(1.0).shrink().gap(2.0)
-            .child(text(n.name.clone()).font(k.ty.ui_medium).color(k.c.text_base))
-            .child(text(format!("Edited {} · {}", n.updated_ago(s.now), notes::size(n.size))).font(k.ty.text_small).color(k.c.text_muted)))
-        .child(open)
-        .child(delete)
+        .child(info)
+        .child(buttons)
 }
 
 fn tool_icon(t: Tool) -> &'static rune::Icon {
@@ -192,7 +207,11 @@ fn editor(_s: &App, k: &Kit, i: usize, b: &Board) -> El {
         .child(text(b.name.clone()).font(k.ty.body_medium).color(k.c.text_strong))
         .child(text(b.branch.clone()).font(k.ty.text_small).color(k.c.text_muted).px(8.0).py(2.0).radius(10.0).border(1.0, k.c.border_weak))
         .child(el().grow(1.0))
-        .child(text(status).font(k.ty.text_small).color(tint));
+        .child(text(status).font(k.ty.text_small).color(tint))
+        .child(Button::new("Export…").icon(&crate::sync_page::EXPORT).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
+            .help("Save this drawing as an .excalidraw file")
+            .on_press_tx(move |s: &mut App, tx| if let Some(id) = s.board.as_ref().map(|b| (b.repo.clone(), b.branch.clone(), b.name.clone())) { s.export_board(tx, id); })
+            .build(k).key("export-board"));
     let size = rune::memo::layout_size("board").filter(|[w, h]| *w > 1.0 && *h > 1.0).unwrap_or([840.0, 504.0]);
     let canvas = canvas(b, k, size, false);
     let hint = match b.tool {
@@ -279,6 +298,8 @@ pub fn phone_editor(k: &Kit, i: usize, b: &Board, safe: [f32; 4]) -> El {
         .child(col().grow(1.0).shrink().min_w(0.0).gap(1.0)
             .child(text(b.name.clone()).font(k.ty.body_medium).color(k.c.text_strong).max_lines(1))
             .child(text(format!("{} · {status}", b.branch)).font(k.ty.text_small).color(tint).max_lines(1)))
+        .child(tb(&crate::sync_page::EXPORT, "Export the drawing", false, ready, "export-board".into())
+            .on_press_tx(|s: &mut App, tx| if let Some(id) = s.board.as_ref().filter(|b| b.save != Save::Loading).map(|b| (b.repo.clone(), b.branch.clone(), b.name.clone())) { s.export_board(tx, id); }))
         .child(tb(&icons::UNDO, "Undo", false, ready && b.can_undo(), "undo".into())
             .on_press(|s: &mut App| if s.board.as_mut().is_some_and(|b| b.save != Save::Loading && b.undo()) { s.save_board(); }))
         .child(tb(&icons::REDO, "Redo", false, ready && b.can_redo(), "redo".into())
