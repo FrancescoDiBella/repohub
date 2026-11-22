@@ -22,6 +22,22 @@ The sections are **Added**, **Changed** and **Fixed**.
   show up to three assignees.
 - The Pull requests and Issues filters are kept between visits and restarts; **Clear** resets
   them.
+- **Boards on every device:** choose a private repository of yours in Settings → Account →
+  Boards (for example `repohub-notes`), and boards sync through it: draw on the phone, open the
+  computer, and the board is there. Changes made on two devices are merged, so both sets of
+  strokes stay; if two copies can't be merged, both are kept and a toast says so. Deleting a
+  board deletes it on the other devices, unless one changed it since. The Notes tab says when it
+  last synced and what waits to be sent, and marks each board. RepoHub warns before using a
+  public repository and never creates one; **Stop syncing** leaves everything in place.
+- **Export…** and **Import…** of a board as an `.excalidraw` file (a save dialog on the desktop,
+  a download in the browser, the phone's pickers on Android). They need no account.
+- **Commits** on a repository's page: the history of the branch you picked, grouped by day,
+  30 at a time with **Load more**, a filter by message, author or commit id, and Copy id and
+  Open on GitHub on each commit. Click one to read its whole message, who wrote and committed
+  it, its parents and what it changed as a diff. **Compare** shows how two branches differ (the
+  commits and the combined diff) and opens the New pull request form with both filled in.
+  The palette has "Commits of …", and on the desktop the list says when your clone has commits
+  to push or to pull.
 - Actions: filter workflow runs by status (**All**, **Failed**, **Running**), repository and
   workflow; click a run to inspect its jobs, steps and the last 200 lines of any job's log (with
   **Copy log**), and re-run failed jobs or the whole workflow (**Actions: Read and write** /
@@ -32,6 +48,11 @@ The sections are **Added**, **Changed** and **Fixed**.
   panels.
 
 ### Changed
+- A deleted drawing goes to a trash folder next to the drawings and stays there 30 days.
+- Drawing on a board saved from excalidraw.com keeps the elements RepoHub doesn't draw (images,
+  frames) in the file.
+- The repository page's section bar scrolls sideways when its sections don't fit, instead of
+  squeezing their names.
 - Faster **Repositories** page, **⌘K** command palette and **Terminal** on large accounts:
   searching and filtering reuse pre-computed repository keys and cached lists, the repository
   list shows 60 cards at a time with **Show more** and memoizes unchanged cards, local clone

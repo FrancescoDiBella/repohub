@@ -5,7 +5,12 @@
 //! - Web: `repohub-server` stores them (see `server/src/notes.rs`) in its `DATA_DIR`.
 //!
 //! Both use the same layout, `notes/<owner>/<repo>/<branch>/<name>.excalidraw`, so a folder can
-//! move between the two. Nothing is sent to GitHub.
+//! move between the two. A deleted drawing goes to `trash/<date>/…` next to `notes/` and stays
+//! there 30 days. Boards reach GitHub only through sync (`sync.rs`, `sync_io.rs`), which keeps
+//! its index in `notes-sync/`.
+//!
+//! Saving merges: if the file changed underneath the editor (sync brought another device's
+//! edits), the editor's copy and the file's are merged ([`crate::sync::merge`]) and both kept.
 
 #[derive(Clone, Debug)]
 pub struct Note {
@@ -18,6 +23,15 @@ impl Note {
     pub fn updated_ago(&self, now: i64) -> String {
         crate::model::fmt_ago(self.updated_at, now)
     }
+}
+
+/// One drawing anywhere in the notes storage, with the git blob id of its file (for sync).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stored {
+    pub repo: String,
+    pub branch: String,
+    pub name: String,
+    pub sha: String,
 }
 
 /// The notes list for one repository and branch.
@@ -56,7 +70,7 @@ pub fn segment(s: &str) -> String {
     out
 }
 
-fn decode(s: &str) -> String {
+pub(crate) fn decode(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;
@@ -91,7 +105,7 @@ pub fn size(bytes: u64) -> String {
 mod local {
     use std::path::PathBuf;
 
-    use super::{Note, segment};
+    use super::{Note, Stored, segment};
 
     /// Where notes are kept on this computer.
     pub fn data_dir() -> PathBuf {
@@ -127,6 +141,104 @@ mod local {
         }).collect();
         items.sort_by_key(|x| std::cmp::Reverse(x.1));
         Ok(items.into_iter().map(|x| x.0).collect())
+    }
+
+    /// One read-compare-write at a time in this app, so a save and a sync never interleave.
+    pub static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    pub fn lock() -> std::sync::MutexGuard<'static, ()> {
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn entries(dir: &std::path::Path) -> Vec<(String, PathBuf)> {
+        let mut v: Vec<(String, PathBuf)> = std::fs::read_dir(dir).into_iter().flatten().flatten()
+            .map(|e| (e.file_name().to_string_lossy().into_owned(), e.path())).collect();
+        v.sort();
+        v
+    }
+
+    /// Every drawing of every repository and branch, with its blob id.
+    pub fn list_all() -> Result<Vec<Stored>, String> {
+        let mut out = Vec::new();
+        for (owner, o) in entries(&data_dir().join("notes")).into_iter().filter(|e| e.1.is_dir()) {
+            for (repo, r) in entries(&o).into_iter().filter(|e| e.1.is_dir()) {
+                for (branch, b) in entries(&r).into_iter().filter(|e| e.1.is_dir()) {
+                    for (file, f) in entries(&b) {
+                        let Some(stem) = file.strip_suffix(".excalidraw") else { continue };
+                        let Ok(bytes) = std::fs::read(&f) else { continue };
+                        out.push(Stored {
+                            repo: format!("{}/{}", super::decode(&owner), super::decode(&repo)),
+                            branch: super::decode(&branch),
+                            name: super::decode(stem),
+                            sha: crate::sync::blob_sha(&bytes),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// The blob id of the drawing's file now; `None` when there is none.
+    pub fn current(path: &std::path::Path) -> Result<Option<(String, String)>, String> {
+        match std::fs::read_to_string(path) {
+            Ok(s) => Ok(Some((crate::sync::blob_sha(s.as_bytes()), s))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("Couldn't read the drawing: {e}")),
+        }
+    }
+
+    static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+    /// Writes beside and moves in place, so a crash never leaves half a file.
+    pub fn write(repo: &str, branch: &str, name: &str, json: &str) -> Result<(), String> {
+        let path = file(repo, branch, name);
+        let id = TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = path.with_extension(format!("tmp.{}.{}", std::process::id(), id));
+        std::fs::create_dir_all(folder(repo, branch))
+            .and_then(|_| std::fs::write(&tmp, json))
+            .and_then(|_| std::fs::rename(&tmp, &path))
+            .map_err(|e| {
+                let _ = std::fs::remove_file(&tmp);
+                format!("Couldn't save the drawing: {e}")
+            })
+    }
+
+    /// Moves the drawing to `trash/<today>/<owner>/<repo>/<branch>/`; a name already there gets a
+    /// number. Trash folders older than 30 days are removed.
+    pub fn trash(repo: &str, branch: &str, name: &str) -> Result<(), String> {
+        let src = file(repo, branch, name);
+        let notes = data_dir().join("notes");
+        let rel = src.strip_prefix(&notes).map_err(|_| "Couldn't delete the drawing: it isn't in the notes folder".to_owned())?.to_path_buf();
+        let today = crate::sync::date(crate::net::now());
+        let mut dest = data_dir().join("trash").join(&today).join(&rel);
+        let mut n = 2;
+        while dest.exists() {
+            dest = data_dir().join("trash").join(&today).join(rel.with_file_name(format!("{} {n}.excalidraw", segment(name))));
+            n += 1;
+        }
+        if let Some(dir) = dest.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("Couldn't delete the drawing: {e}"))?;
+        }
+        std::fs::rename(&src, &dest).map_err(|e| format!("Couldn't delete the drawing: {e}"))?;
+        purge_trash();
+        Ok(())
+    }
+
+    /// Removes trash folders older than 30 days.
+    pub fn purge_trash() {
+        let cutoff = crate::sync::date(crate::net::now() - 30 * 86_400);
+        for (day, path) in entries(&data_dir().join("trash")) {
+            let dated = day.len() == 10 && day.bytes().enumerate().all(|(i, b)| if i == 4 || i == 7 { b == b'-' } else { b.is_ascii_digit() });
+            if dated && day < cutoff {
+                let _ = std::fs::remove_dir_all(path);
+            }
+        }
+    }
+
+    /// Where sync keeps its index for notes repository `repo`.
+    pub fn index_file(repo: &str) -> PathBuf {
+        data_dir().join("notes-sync").join(format!("{}.json", segment(&repo.to_ascii_lowercase())))
     }
 }
 
@@ -197,42 +309,239 @@ pub async fn load(repo: &str, branch: &str, name: &str) -> Result<Option<String>
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-
-/// Saves a drawing (an Excalidraw JSON document).
-pub async fn save(repo: &str, branch: &str, name: &str, json: String) -> Result<(), String> {
+/// Saves a drawing (an Excalidraw JSON document) from the editor. If the file changed
+/// underneath (sync wrote another device's edits), the two are merged and the merge is written;
+/// it comes back as `Some`, for the editor to take in.
+pub async fn save(repo: &str, branch: &str, name: &str, json: String) -> Result<Option<String>, String> {
     #[cfg(not(target_arch = "wasm32"))]
     {
+        let _guard = local::lock();
         let path = local::file(repo, branch, name);
-        let id = TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let tmp = path.with_extension(format!("tmp.{}.{}", std::process::id(), id));
-        let folder = local::folder(repo, branch);
-        std::fs::create_dir_all(&folder)
-            .and_then(|_| std::fs::write(&tmp, json))
-            .and_then(|_| std::fs::rename(&tmp, &path))
-            .map_err(|e| {
-                let _ = std::fs::remove_file(&tmp);
-                format!("Couldn't save the drawing: {e}")
-            })
+        let merged = match local::current(&path)? {
+            Some((_, now)) if now != json => match crate::sync::merge(&json, &now, crate::sync::Tie::First) {
+                Ok(m) => m,
+                // The file isn't a drawing any more (edited by hand?): it goes to the trash
+                // rather than being overwritten.
+                Err(_) => {
+                    local::trash(repo, branch, name)?;
+                    None
+                }
+            },
+            _ => None,
+        };
+        local::write(repo, branch, name, merged.as_deref().unwrap_or(&json))?;
+        Ok(merged)
     }
     #[cfg(target_arch = "wasm32")]
     {
-        let r = crate::net::request("PUT", &format!("api/notes/file?{}&name={}", query(repo, branch), enc(name)), "*/*", &json).await?;
-        if (200..300).contains(&r.status) { Ok(()) } else { Err(format!("Couldn't save the drawing: {}", r.body)) }
+        web::save(repo, branch, name, json).await
     }
 }
 
-/// Deletes one drawing.
-pub async fn delete(repo: &str, branch: &str, name: &str) -> Result<(), String> {
+/// Writes a drawing only if its file still has blob id `expect` (`None`: only if there is no
+/// file). False when it changed meanwhile: then nothing was written. For sync.
+pub async fn write_if(repo: &str, branch: &str, name: &str, expect: Option<&str>, json: &str) -> Result<bool, String> {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        std::fs::remove_file(local::file(repo, branch, name)).map_err(|e| format!("Couldn't delete the drawing: {e}"))
+        let _guard = local::lock();
+        let now = local::current(&local::file(repo, branch, name))?.map(|c| c.0);
+        if now.as_deref() != expect {
+            return Ok(false);
+        }
+        local::write(repo, branch, name, json)?;
+        Ok(true)
     }
     #[cfg(target_arch = "wasm32")]
     {
-        let r = crate::net::request("DELETE", &format!("api/notes/file?{}&name={}", query(repo, branch), enc(name)), "*/*", "").await?;
-        if (200..300).contains(&r.status) { Ok(()) } else { Err(format!("Couldn't delete the drawing: {}", r.body)) }
+        web::write_if(repo, branch, name, expect, json).await
+    }
+}
+
+/// Deletes one drawing: it moves to the trash, where it stays 30 days.
+pub async fn delete(repo: &str, branch: &str, name: &str) -> Result<(), String> {
+    trash_if(repo, branch, name, None).await.and_then(|done| if done { Ok(()) } else { Err("Couldn't delete the drawing: it changed meanwhile".into()) })
+}
+
+/// Moves a drawing to the trash, only if its file still has blob id `expect` (`None`: whatever
+/// it holds). False when it changed meanwhile, or is gone.
+pub async fn trash_if(repo: &str, branch: &str, name: &str, expect: Option<&str>) -> Result<bool, String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _guard = local::lock();
+        let Some((now, _)) = local::current(&local::file(repo, branch, name))? else {
+            return if expect.is_none() { Err("Couldn't delete the drawing: it isn't there any more".into()) } else { Ok(false) };
+        };
+        if expect.is_some_and(|e| e != now) {
+            return Ok(false);
+        }
+        local::trash(repo, branch, name)?;
+        Ok(true)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        web::trash_if(repo, branch, name, expect).await
+    }
+}
+
+/// Every drawing on this device (desktop) or server (web), with blob ids. For sync.
+pub async fn list_all() -> Result<Vec<Stored>, String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        local::list_all()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        web::list_all().await
+    }
+}
+
+/// Sync's index for notes repository `repo`; empty when there is none yet.
+pub async fn load_index(repo: &str) -> Result<String, String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        match std::fs::read_to_string(local::index_file(repo)) {
+            Ok(s) => Ok(s),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+            Err(e) => Err(format!("Couldn't read what was last synced: {e}")),
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let r = crate::net::request("GET", &format!("api/notes/index?repo={}", enc(repo)), "application/json", "").await?;
+        match r.status {
+            200 => Ok(r.body),
+            404 => Ok(String::new()),
+            _ => Err(format!("Couldn't read what was last synced: {}", r.body)),
+        }
+    }
+}
+
+/// Saves sync's index for `repo`; an empty `json` removes it (Stop syncing).
+pub async fn save_index(repo: &str, json: &str) -> Result<(), String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let path = local::index_file(repo);
+        if json.is_empty() {
+            return match std::fs::remove_file(&path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("Couldn't forget what was synced: {e}")),
+                _ => Ok(()),
+            };
+        }
+        let tmp = path.with_extension("json.tmp");
+        path.parent().map(std::fs::create_dir_all).transpose()
+            .and_then(|_| std::fs::write(&tmp, json))
+            .and_then(|_| std::fs::rename(&tmp, &path))
+            .map_err(|e| format!("Couldn't save what was synced: {e}"))
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let method = if json.is_empty() { "DELETE" } else { "PUT" };
+        let r = crate::net::request(method, &format!("api/notes/index?repo={}", enc(repo)), "*/*", json).await?;
+        if (200..300).contains(&r.status) || (json.is_empty() && r.status == 404) { Ok(()) } else { Err(format!("Couldn't save what was synced: {}", r.body)) }
+    }
+}
+
+// ------------------------------------------------------------------ web: the server's notes API
+
+#[cfg(target_arch = "wasm32")]
+mod web {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    use super::{Stored, enc, query};
+    use crate::net::request;
+
+    thread_local! {
+        /// The blob id of what the editor last wrote to each drawing, when nothing else wrote it
+        /// since: a save that matches it needs no read first.
+        static KNOWN: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    }
+
+    fn url(repo: &str, branch: &str, name: &str) -> String {
+        format!("api/notes/file?{}&name={}", query(repo, branch), enc(name))
+    }
+
+    fn forget(u: &str) {
+        KNOWN.with(|k| k.borrow_mut().remove(u));
+    }
+
+    pub async fn save(repo: &str, branch: &str, name: &str, json: String) -> Result<Option<String>, String> {
+        let u = url(repo, branch, name);
+        let mut base: Option<Option<String>> = KNOWN.with(|k| k.borrow().get(&u).cloned()).map(Some);
+        for _ in 0..4 {
+            let (expect, write, merged) = match base.take() {
+                Some(known) => (known, json.clone(), None),
+                None => {
+                    let r = request("GET", &u, "application/json", "").await?;
+                    match r.status {
+                        404 => (None, json.clone(), None),
+                        200 if r.body == json => (Some(crate::sync::blob_sha(r.body.as_bytes())), json.clone(), None),
+                        200 => {
+                            let sha = crate::sync::blob_sha(r.body.as_bytes());
+                            match crate::sync::merge(&json, &r.body, crate::sync::Tie::First) {
+                                Ok(Some(m)) => (Some(sha), m.clone(), Some(m)),
+                                _ => (Some(sha), json.clone(), None),
+                            }
+                        }
+                        _ => return Err(format!("Couldn't save the drawing: {}", r.body)),
+                    }
+                }
+            };
+            let cond = expect.as_deref().unwrap_or("none");
+            let r = request("PUT", &format!("{u}&if={cond}"), "*/*", &write).await?;
+            match r.status {
+                200..=299 => {
+                    KNOWN.with(|k| {
+                        let mut k = k.borrow_mut();
+                        // After a merge the editor's queued copies lack what came in: their
+                        // saves read the file again.
+                        if merged.is_some() { k.remove(&u) } else { k.insert(u.clone(), crate::sync::blob_sha(write.as_bytes())) }
+                    });
+                    return Ok(merged);
+                }
+                409 => continue,
+                _ => return Err(format!("Couldn't save the drawing: {}", r.body)),
+            }
+        }
+        Err("Couldn't save the drawing: it keeps changing underneath. Try again.".into())
+    }
+
+    pub async fn write_if(repo: &str, branch: &str, name: &str, expect: Option<&str>, json: &str) -> Result<bool, String> {
+        let u = url(repo, branch, name);
+        forget(&u);
+        let r = request("PUT", &format!("{u}&if={}", expect.unwrap_or("none")), "*/*", json).await?;
+        match r.status {
+            200..=299 => Ok(true),
+            409 => Ok(false),
+            _ => Err(format!("Couldn't save the drawing: {}", r.body)),
+        }
+    }
+
+    pub async fn trash_if(repo: &str, branch: &str, name: &str, expect: Option<&str>) -> Result<bool, String> {
+        let u = url(repo, branch, name);
+        forget(&u);
+        let full = match expect {
+            Some(e) => format!("{u}&if={e}"),
+            None => u,
+        };
+        let r = request("DELETE", &full, "*/*", "").await?;
+        match r.status {
+            200..=299 => Ok(true),
+            409 => Ok(false),
+            404 if expect.is_some() => Ok(false),
+            _ => Err(format!("Couldn't delete the drawing: {}", r.body)),
+        }
+    }
+
+    pub async fn list_all() -> Result<Vec<Stored>, String> {
+        use serde_json::Value;
+        let r = request("GET", "api/notes/all", "application/json", "").await?;
+        if r.status != 200 {
+            return Err(format!("The RepoHub server answered {}: {}", r.status, r.body));
+        }
+        let v: Value = serde_json::from_str(&r.body).map_err(|e| e.to_string())?;
+        let s = |n: &Value, k: &str| n.get(k).and_then(Value::as_str).unwrap_or("").to_owned();
+        Ok(v.as_array().into_iter().flatten().map(|n| Stored { repo: s(n, "repo"), branch: s(n, "branch"), name: s(n, "name"), sha: s(n, "sha") }).collect())
     }
 }
 
@@ -260,7 +569,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("repohub-notes-{}", std::process::id()));
         // SAFETY: single-threaded test setup.
         unsafe { std::env::set_var("REPOHUB_DATA_DIR", &dir) };
-        run(save("Octo/Repo", "feature/x", "Map (v2)", "{\"type\":\"excalidraw\"}".into())).unwrap();
+        assert_eq!(run(save("Octo/Repo", "feature/x", "Map (v2)", "{\"type\":\"excalidraw\"}".into())).unwrap(), None);
         assert!(dir.join("notes/octo/repo/feature%2Fx/Map%20%28v2%29.excalidraw").is_file());
         let list = run(list("octo/repo", "feature/x")).unwrap();
         assert_eq!(list.len(), 1);

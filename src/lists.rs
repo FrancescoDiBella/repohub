@@ -378,8 +378,8 @@ pub fn settings(s: &App, k: &Kit) -> El {
         ("⌘/Ctrl + 1 … 5", "Overview, Repositories, Pull requests, Issues, Actions"),
         ("⌘/Ctrl + ,", "Settings"),
         ("⌘/Ctrl + R", "Refresh from GitHub"),
-        ("⌘/Ctrl + [", "Back: out of a conversation, or from a repository to the list"),
-        ("Esc", "Close what's open: a confirmation, a form, a diff, a conversation, a file, a message"),
+        ("⌘/Ctrl + [", "Back: out of a conversation, a commit or a comparison, or from a repository to the list"),
+        ("Esc", "Close what's open: a confirmation, a form, a diff, a conversation, a commit, a comparison, a file, a message"),
         ("Ctrl + Shift + Tab", "Leave the terminal, so the keyboard reaches the rest of the app"),
         ("↑ ↓ in ⌘K", "Move through the results; Enter runs the one highlighted"),
     ].iter().fold(keys, |p, (key, what)| p.child(rule(k)).child(info(k, key, (*what).to_owned())));
@@ -390,7 +390,7 @@ pub fn settings(s: &App, k: &Kit) -> El {
     // Five segments don't fit a phone: the row scrolls sideways there.
     let picker = if s.compact { row().w_full().scroll_x().child(picker) } else { row().w_full().child(picker) };
     let (subtitle, body): (&str, Vec<El>) = match section {
-        Section::Account => ("Your profile, the GitHub account and the connection.", vec![profile, account, conn]),
+        Section::Account => ("Your profile, the GitHub account, the connection and where boards sync.", vec![profile, account, conn, crate::sync_page::settings_block(s, k)]),
         Section::Appearance => ("Light, dark or the system's, and the themes.", vec![appearance]),
         Section::Assistants => ("Claude and the other coding assistants the Terminal starts.", vec![assistants]),
         Section::Plugins => ("Sections and pages others wrote for RepoHub.", vec![plugins]),

@@ -4,14 +4,17 @@ A dashboard for your own GitHub repositories, written in Rust with
 [Rune](https://github.com/anomalyco/rune) (a GPU-rendered UI framework) and `rune-kit`.
 
 It reads real data from the GitHub REST API: profile, repositories, files, README, languages,
-last commit, pull requests, issues, notifications, workflow runs and weekly commits. From the
+commits, pull requests, issues, notifications, workflow runs and weekly commits. From the
 app you can also:
 - **read and answer** issues and pull requests: comment, review, comment on diff lines, see the
   checks, merge, close and reopen;
 - **filter** issues and pull requests, and go through your **notifications**;
+- read a branch's **commits**, open one to see what it changed, and **compare** two branches
+  before opening a pull request;
 - work in a repository's **local clone** (desktop): its files, its changes as a diff, commit,
   push and pull, a **Terminal** and **Claude**;
-- keep **notes**: hand-drawn diagrams and sketches for each repository and branch;
+- keep **notes**: hand-drawn diagrams and sketches for each repository and branch, on every
+  device through a private repository of yours, and exported as `.excalidraw` files;
 - pick or make a **theme**, and add **plugins**.
 
 | | |
@@ -23,7 +26,7 @@ app you can also:
 The pictures are made from the sample data by `scripts/screenshots.sh`.
 
 **Contents:** [Docker](#run-it-with-docker) · [Desktop app](#desktop-app) ·
-[Android app](#android-app) · [Themes](#themes) · [Working on GitHub](#working-on-github-from-the-app) ·
+[Android app](#android-app) · [Themes](#themes) · [Working on GitHub](#working-on-github-from-the-app) · [Commits](#commits) ·
 [Files on your computer](#files-on-your-computer-desktop-app) · [Notes](#notes) ·
 [Status bar](#status-bar-desktop-app) · [Claude](#claude-desktop-app) · [Plugins](#plugins-desktop-app) ·
 [Terminal](#terminal-desktop-app) · [Configuration](#configuration) · [What it shows](#what-it-shows) ·
@@ -103,7 +106,9 @@ phone and allow the installation.
 - **What it has:** the overview, repositories, pull requests, issues, workflow runs, README and
   code; creating issues, branches and pull requests, and merging; Notes.
 - **Notes:** a drawing opens full screen. One finger draws with the chosen tool, **Move the
-  view** drags the drawing, and plus and minus zoom. Drawings are kept on the phone.
+  view** drags the drawing, and plus and minus zoom. Drawings are kept on the phone and, with a
+  notes repository chosen in Settings, [sync](#boards-on-every-device) with your other devices.
+  **Export** opens the phone's "save to" picker; **Import…** its file picker.
 - **Back:** the back button closes what's open, then goes up a page, then leaves the app.
 - **Not on the phone:** the terminal, Claude, local clones and plugins need a computer.
 - **Needs:** Android 12 or later with a current Android System WebView (121 or later).
@@ -295,7 +300,7 @@ finds `repohub`) and press Enter:
 
 - any page, repository, open pull request or issue;
 - for the repository on screen: New issue, New pull request, New branch, Ask Claude, Open a
-  terminal, Open on GitHub, Copy the clone URL, and its sections;
+  terminal, Open on GitHub, Copy the clone URL, Commits of it, and its other sections;
 - Refresh and the theme.
 
 ↑ ↓ move through the results, Esc or a click outside closes it.
@@ -318,6 +323,7 @@ With a token that has write access, the everyday changes happen in RepoHub:
 | Overview | **Waiting for your review**: the open pull requests where your review is requested, above the open pull requests, when there are any. |
 | Pull request rows | **Files** shows what it changes as a diff, unified or side by side, with syntax colours and word changes. From there **Merge** with a merge commit, **Squash** or **Rebase**. **Merge** on the row asks first. |
 | Changes tab (desktop, with a local clone) | What changed since the last commit, as a diff, new files included. **Commit** or **Commit and push** everything with a message. **Push**, **Pull** (fast-forward only), and **New pull request** from the branch. |
+| Notes tab | With a notes repository chosen (Settings → Account → Boards), each change to a board is one commit to `boards/…/<name>.excalidraw` there, and a board deleted here is deleted there. See [Boards on every device](#boards-on-every-device). |
 | Changes tab: merging | **Merge a branch** into the one checked out: pick it to preview its commits and the diff it brings, then merge. If there are conflicts, it lists the files and offers **Abort merge**. Fix them in your editor or the Terminal, then **Commit** finishes the merge. Commit refuses files that still have conflict markers. |
 
 What GitHub creates shows at once; the lists catch up on the next refresh. GitHub's error, if
@@ -333,6 +339,32 @@ In Docker the same actions go through `repohub-server`, which forwards only thes
 
 The token needs, as a fine-grained token: **Contents**, **Issues** and **Pull requests** read
 and write, **Metadata** and **Actions** read. A classic token needs the `repo` scope.
+
+## Commits
+
+A repository's **Commits** section (after Code) shows the history of the branch picked in the
+branch picker, newest first and grouped by day (Today, Yesterday, 12 November…). Each row has the
+first line of the message, who wrote it (their GitHub account, or the name in git when GitHub
+knows no account for them), the short commit id, how long ago, and **Verified** when GitHub
+checked its signature. **Copy id** copies the full id, the arrow opens it on GitHub.
+
+- **Load more** reads the next 30; the end of the list says whether GitHub has more.
+- The **filter** narrows the commits already loaded by message, author or commit id, as you type.
+- On the desktop, when the Changes tab has seen that your local clone has commits to push or
+  to pull, a line above the list says so, with a link to the Changes tab.
+
+**Click a commit** to open it in place of the list: its whole message, who wrote it and who
+committed it, when, its parent commits (click one to open it; Back comes back), and what it
+changed as a diff, unified or side by side (always unified on a phone). It says when GitHub
+shows no diff for a file (binary or too large) and when a commit has more than the 300 files
+GitHub lists. **Back**, Esc or ⌘[ (Ctrl+[) returns to the list where you were.
+
+**Compare** opens a small form: the branch to compare (the one on screen) and the branch it's
+compared with (the default branch). The result says how far apart they are ("3 commits ahead,
+1 behind main"), lists the commits and shows what they change together. When the branch is
+ahead and no pull request is open for it, **New pull request** opens the form with both branches
+filled in; when one is open, a button opens it. Identical branches, a branch with nothing new and
+branches with no history in common get a sentence instead.
 
 ## Files on your computer (desktop app)
 
@@ -371,16 +403,61 @@ Each repository has a **Notes** tab with a small whiteboard in the spirit of
 - **Editing:** select and drag to move, Delete to remove, Ctrl/⌘+Z to undo and Ctrl/⌘+Shift+Z to
   redo.
 - **Saving:** every change is saved at once, in Excalidraw's `.excalidraw` format, so a drawing
-  also opens on excalidraw.com (*Open* → pick the file).
+  also opens on excalidraw.com (*Open* → pick the file). Elements RepoHub doesn't draw (images,
+  frames) stay in the file when you draw on it.
+- **Export… and Import…:** **Export…** (on a drawing's row or in the editor) saves
+  `<name>.excalidraw` where you choose: the system's save dialog on the desktop (the Downloads
+  folder where there's none), a download in the browser, the "save to" picker on Android.
+  **Import…** (next to Refresh) adds an `.excalidraw` file as a new drawing; a name that exists
+  gets a number, and the toast says how many elements RepoHub couldn't draw and skipped. Neither
+  needs an account.
 
-Drawings never go to GitHub. They are stored at
-`notes/<owner>/<repo>/<branch>/<name>.excalidraw` inside:
+Drawings are stored at `notes/<owner>/<repo>/<branch>/<name>.excalidraw` inside:
 - the desktop app: `REPOHUB_DATA_DIR`, or the platform's data folder (`~/.local/share/repohub`,
   `~/Library/Application Support/RepoHub`, `%APPDATA%\RepoHub`);
 - Docker: the `notes` volume (`/data` in the container), which survives rebuilds and updates;
 - the Android app: the app's private storage on the phone.
 
 The static GitHub Pages build has nowhere to store them, so the tab explains that instead.
+A deleted drawing goes to `trash/<date>/…` next to `notes/` and stays there 30 days, so a wrong
+delete can be undone by moving the file back.
+
+### Boards on every device
+
+Boards sync through **one private repository on your GitHub account**, the *notes repository*:
+draw on the phone, open the computer, and the board is there.
+
+1. Create a private repository on GitHub, for example `repohub-notes` (**Create it on GitHub** in
+   Settings opens the page; RepoHub doesn't create repositories).
+2. In **Settings → Account → Boards**, type it as `owner/name` and press **Use it**. RepoHub checks
+   that it exists and that you can write to it, and asks first if it's public ("Everyone could
+   see your boards"). The choice is saved per account; empty means sync is off.
+3. Do the same on your other devices.
+
+The token needs **Contents: read and write** on that repository (a fine-grained token can be
+limited to it). Boards go to `boards/<owner>/<repo>/<branch>/<name>.excalidraw` on its default
+branch, encoded as the local folder is, one commit per change (`Update Plan (octo/app@main)`,
+`Delete …`).
+
+- **When:** when the Notes tab opens, a few seconds after a board is saved (never in the middle
+  of a stroke), on **Sync now**, and with the app's refresh. Drawing never waits for it.
+- **Changes on both devices** are merged: the strokes of both stay, and for a shape moved on both,
+  the later edit wins. If two copies can't be merged at all, both are kept: the other device's
+  is saved as `<name> (conflict <date>)` and a toast says so.
+- **Deleting** a board deletes it on the other devices too, unless one of them changed it since:
+  then it comes back. What sync deletes here goes to the trash too.
+- **A board open in the editor** shows what arrives at once if you haven't drawn since the last
+  save; otherwise the next save merges it.
+- **Offline or rate-limited:** boards keep working here; the Notes header says how many wait to
+  be sent, with **Retry**.
+- The Notes header says **Synced 2 minutes ago**, **Syncing…**, **3 boards to send** or the error;
+  each board has a mark: Synced, Waiting to sync, or Conflict copy.
+- **Stop syncing** forgets the repository; the boards here and there stay as they are.
+- Boards larger than 10 MB stay on the device. With sample data or no token, Settings explains
+  that sync needs an account.
+
+Each device remembers what it last synced in `notes-sync/<owner>%2F<name>.json` next to
+`notes/` (for Docker, on the server's volume, shared by the browsers that use it).
 
 ## Status bar (desktop app)
 
@@ -517,13 +594,15 @@ GitHub Enterprise.
 | Overview | totals, commits over the last 26 weeks, recent repositories, what waits for your review, open pull requests | `/user` or `/users/{u}`, `/user/repos` or `/users/{u}/repos`, `/search/issues` (with `review-requested:{u}`), `/repos/{r}/stats/participation` |
 | Repositories | search by name, description and topic; public, private and fork filters; star | `/user/starred`, `PUT`/`DELETE /user/starred/{r}` |
 | Repository | root files, README, languages, last commit, copy clone URL, open on GitHub | `/repos/{r}/contents`, `/readme`, `/languages`, `/commits` |
+| Repository → Commits | a branch's history (30 at a time), one commit with its diff, two branches compared and whether a pull request is open between them | `/repos/{r}/commits?sha={branch}&per_page=30&page={n}`, `/repos/{r}/commits/{sha}`, `/repos/{r}/compare/{base}...{head}`, `/search/issues?q=is:pr is:open repo:{r} head:{head} base:{base}` |
 | Pull requests | pull requests you're involved in or whose review is asked of you: open, draft, merged, closed; filters; click to read the conversation, its checks and its diff | `/search/issues?q=is:pr involves:{u}`, `/search/issues?q=is:pr is:open review-requested:{u}`, `/repos/{r}/pulls/{n}`, `/files`, `/reviews`, `/comments`, `/commits/{sha}/check-runs` |
 | Issues | open issues in your repositories; filters; click to read and answer; new issue with labels and assignees | `/search/issues?q=is:issue is:open user:{u}`, `/repos/{r}/issues/{n}`, `/comments`, `POST /repos/{r}/issues` |
 | Conversation details | labels, assignees, milestone, reviewers; edit them, the title and the description | the repository's choices: `/repos/{r}/labels`, `/assignees`, `/milestones?state=open` (the first 100 of each; it says when there are more); changes: `PATCH /repos/{r}/issues/{n}` (`labels`, `assignees`, `milestone`, `title`, `body`), `POST` and `DELETE /repos/{r}/pulls/{n}/requested_reviewers` |
 | Notifications | your unread notifications; mark as read | `/notifications`, `PATCH /notifications/threads/{id}` |
 | Actions | latest runs of the most recently pushed repositories | `/repos/{r}/actions/runs` |
-| Repository → Notes | drawings per branch: create, open, draw, delete | `/repos/{r}/branches` (the drawings stay on your computer) |
-| Settings | connection status, the configuration in use (the token is never shown) and where notes are kept | — |
+| Repository → Notes | drawings per branch: create, open, draw, delete, export, import; sync state | `/repos/{r}/branches` |
+| Notes sync | boards on every device through your notes repository `{n}` | `/repos/{n}`, `/repos/{n}/git/trees/{branch}?recursive=1`, `GET`/`PUT`/`DELETE /repos/{n}/contents/boards/…/<name>.excalidraw` |
+| Settings | connection status, the configuration in use (the token is never shown), where notes are kept and the notes repository | — |
 
 How it behaves:
 - **Refresh** (toolbar icon, or ⌘R / Ctrl+R) reloads everything.
@@ -532,7 +611,7 @@ How it behaves:
 - RepoHub never creates or deletes repositories, and never changes their settings: "New
   repository" and "Settings on GitHub" open GitHub in the browser. What it does write (issues,
   pull requests, comments, reviews, branches, stars, labels, assignees, milestones, review
-  requests, titles and descriptions) is listed under
+  requests, titles and descriptions, and boards in your notes repository) is listed under
   [Working on GitHub from the app](#working-on-github-from-the-app).
 
 ## Development

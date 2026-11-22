@@ -19,7 +19,7 @@
 //! | [`Facet`] | Labels / Assignees / Milestone / Reviewers | what the open triage picker edits |
 //! | [`Submit`] | Editing → Sending → (closed) / Failed | a form that writes to GitHub |
 //! | [`Compose`] | Issue / Branch / Pull | which form is open |
-//! | [`BranchSlot`] | View / From / Head / Base | what the branch picker fills in |
+//! | [`BranchSlot`] | View / From / Head / Base / CompareHead / CompareBase | what the branch picker fills in |
 
 /// Where the data on screen comes from.
 ///
@@ -173,6 +173,46 @@ impl Save {
     }
 }
 
+/// Syncing boards through the notes repository (`sync_io.rs`), as the Notes section's header
+/// says it.
+///
+/// ```text
+/// Off ──Use it──▶ Ready ──Notes opened, a save, Sync now, refresh──▶ Running ──▶ Done{at}
+///                                                                       └──────▶ Failed ──Retry──▶ Running
+/// any ──Stop syncing (or sample data, no token)──▶ Off
+/// ```
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum BoardSync {
+    /// No notes repository chosen, or nothing to sync with (sample data, no token).
+    #[default]
+    Off,
+    /// Chosen, not run yet.
+    Ready,
+    Running,
+    /// The last run ended (Unix seconds). Boards changed since wait for the next.
+    Done { at: i64 },
+    /// The last run stopped (offline, refused, rate-limited): why. Boards keep working here and
+    /// wait for the next run.
+    Failed(String),
+}
+
+/// Choosing the notes repository in Settings → Account → Boards.
+///
+/// ```text
+/// Idle ──Use it──▶ Checking ──private──▶ Idle (chosen)
+///                     ├──public──▶ ConfirmPublic ──Use it anyway──▶ Idle (chosen)
+///                     └──missing, no access──▶ Failed ──Use it──▶ Checking
+/// ```
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum NotesRepoCheck {
+    #[default]
+    Idle,
+    Checking,
+    /// The repository is public: everyone could see the boards. Asks before going on.
+    ConfirmPublic(String),
+    Failed(String),
+}
+
 /// The appearance. `System` follows the computer's light or dark setting.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Theme {
@@ -247,6 +287,8 @@ impl SettingsSection {
 pub enum RepoTab {
     #[default]
     Code,
+    /// The branch's history, one commit's changes, and comparing two branches.
+    Commits,
     /// What changed in the local clone since the last commit (desktop, with a clone).
     Changes,
     Issues,
@@ -259,8 +301,8 @@ pub enum RepoTab {
 }
 
 impl RepoTab {
-    pub const ALL: [RepoTab; 9] = [RepoTab::Code, RepoTab::Changes, RepoTab::Issues, RepoTab::Pulls, RepoTab::Actions, RepoTab::Notes, RepoTab::Claude, RepoTab::Terminal, RepoTab::Settings];
-    pub const LABELS: [&'static str; 9] = ["Code", "Changes", "Issues", "Pull requests", "Actions", "Notes", "Claude", "Terminal", "Settings"];
+    pub const ALL: [RepoTab; 10] = [RepoTab::Code, RepoTab::Commits, RepoTab::Changes, RepoTab::Issues, RepoTab::Pulls, RepoTab::Actions, RepoTab::Notes, RepoTab::Claude, RepoTab::Terminal, RepoTab::Settings];
+    pub const LABELS: [&'static str; 10] = ["Code", "Commits", "Changes", "Issues", "Pull requests", "Actions", "Notes", "Claude", "Terminal", "Settings"];
 
     pub fn index(self) -> usize {
         RepoTab::ALL.iter().position(|t| *t == self).unwrap_or(0)
@@ -460,6 +502,9 @@ pub enum BranchSlot {
     /// A pull request's branch, and the branch it goes into.
     Head,
     Base,
+    /// The Commits section's comparison: the branch compared, and the one it's compared with.
+    CompareHead,
+    CompareBase,
 }
 
 /// What a triage picker edits on an issue or a pull request (see `triage`). One picker is open at
@@ -711,7 +756,9 @@ mod tests {
         }
         assert_eq!(RepoTab::parse("notes"), Some(RepoTab::Notes));
         assert_eq!(RepoTab::parse("Pull requests"), Some(RepoTab::Pulls));
-        assert_eq!(RepoTab::parse("7"), Some(RepoTab::Terminal));
+        assert_eq!(RepoTab::parse("8"), Some(RepoTab::Terminal));
+        assert_eq!(RepoTab::parse("commits"), Some(RepoTab::Commits));
+        assert_eq!(RepoTab::Commits.index(), 1, "Commits comes after Code");
         assert_eq!(RepoTab::parse("changes"), Some(RepoTab::Changes));
         assert_eq!(RepoTab::parse("claude"), Some(RepoTab::Claude));
         assert_eq!(RepoTab::from_index(99), RepoTab::Code);
