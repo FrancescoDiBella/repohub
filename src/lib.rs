@@ -7920,8 +7920,8 @@ mod fix67_tests {
         // Re-open and verify Escape also closes the run detail view.
         click(&mut rt, "run-ngsi-ld-xr-contexts-1003", &mut t);
         assert!(rt.find("run-detail").is_some());
-        rt.update(|app, _| {
-            let handled = crate::shortcuts(app, &rune::KeyEvent { key: rune::Key::Escape, mods: rune::Mods::default() });
+        rt.update(|app, tx| {
+            let handled = crate::shortcuts(app, &rune::KeyEvent { key: rune::Key::Escape, mods: rune::Mods::default() }, tx);
             assert!(handled);
         });
         t += 0.1;
