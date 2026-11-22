@@ -11,6 +11,8 @@ app you can also:
 - **filter** issues and pull requests, and go through your **notifications**;
 - read a branch's **commits**, open one to see what it changed, and **compare** two branches
   before opening a pull request;
+- read a repository's **releases** and tags, draft a release with GitHub's generated notes and
+  publish it;
 - work in a repository's **local clone** (desktop): its files, its changes as a diff, commit,
   push and pull, a **Terminal** and **Claude**;
 - keep **notes**: hand-drawn diagrams and sketches for each repository and branch, on every
@@ -26,7 +28,7 @@ app you can also:
 The pictures are made from the sample data by `scripts/screenshots.sh`.
 
 **Contents:** [Docker](#run-it-with-docker) · [Desktop app](#desktop-app) ·
-[Android app](#android-app) · [Themes](#themes) · [Working on GitHub](#working-on-github-from-the-app) · [Commits](#commits) ·
+[Android app](#android-app) · [Themes](#themes) · [Working on GitHub](#working-on-github-from-the-app) · [Commits](#commits) · [Releases](#releases) ·
 [Files on your computer](#files-on-your-computer-desktop-app) · [Notes](#notes) ·
 [Status bar](#status-bar-desktop-app) · [Claude](#claude-desktop-app) · [Plugins](#plugins-desktop-app) ·
 [Terminal](#terminal-desktop-app) · [Configuration](#configuration) · [What it shows](#what-it-shows) ·
@@ -333,8 +335,9 @@ window. Type a few letters (they can be the start of any word, or just letters i
 finds `repohub`) and press Enter:
 
 - any page, repository, open pull request or issue;
-- for the repository on screen: New issue, New pull request, New branch, Ask Claude, Open a
-  terminal, Open on GitHub, Copy the clone URL, Commits of it, and its other sections;
+- for the repository on screen: New issue, New pull request, New branch, New release, Ask
+  Claude, Open a terminal, Open on GitHub, Copy the clone URL, Commits of it, Releases of it, and
+  its other sections;
 - Refresh and the theme.
 
 ↑ ↓ move through the results, Esc or a click outside closes it.
@@ -358,6 +361,7 @@ With a token that has write access, the everyday changes happen in RepoHub:
 | Pull request rows | **Files** shows what it changes as a diff, unified or side by side, with syntax colours and word changes. From there **Merge** with a merge commit, **Squash** or **Rebase**. **Merge** on the row asks first. |
 | Changes tab (desktop, with a local clone) | What changed since the last commit, as a diff, new files included. **Commit** or **Commit and push** everything with a message. **Push**, **Pull** (fast-forward only), and **New pull request** from the branch. |
 | Notes tab | With a notes repository chosen (Settings → Account → Boards), each change to a board is one commit to `boards/…/<name>.excalidraw` there, and a board deleted here is deleted there. See [Boards on every device](#boards-on-every-device). |
+| Releases tab | **New release**: a tag (the next versions are offered), the branch a new tag is made from, title, Markdown notes with **Generate notes**, pre-release. **Save draft**, or **Publish release** after a question. On a draft: **Edit** and **Publish** (it asks first). |
 | Changes tab: merging | **Merge a branch** into the one checked out: pick it to preview its commits and the diff it brings, then merge. If there are conflicts, it lists the files and offers **Abort merge**. Fix them in your editor or the Terminal, then **Commit** finishes the merge. Commit refuses files that still have conflict markers. |
 
 What GitHub creates shows at once; the lists catch up on the next refresh. GitHub's error, if
@@ -366,7 +370,8 @@ milestone, reviewer, title or description change updates the conversation and th
 without a reload, with a message; when GitHub refuses (the token may only read the
 repository), the details say so once and keep the old values.
 
-RepoHub still doesn't delete repositories or branches or rewrite history: those stay on GitHub.
+RepoHub still doesn't delete repositories, branches, releases or tags, upload files to a release,
+or rewrite history: those stay on GitHub.
 Commit, push and pull run the `git` installed on your computer, in the clone, with your own
 credentials.
 In Docker the same actions go through `repohub-server`, which forwards only these writes.
@@ -399,6 +404,37 @@ compared with (the default branch). The result says how far apart they are ("3 c
 ahead and no pull request is open for it, **New pull request** opens the form with both branches
 filled in; when one is open, a button opens it. Identical branches, a branch with nothing new and
 branches with no history in common get a sentence instead.
+
+## Releases
+
+A repository's **Releases** section (after Actions) lists its releases, newest first, 20 at a time
+with **Load more**. Each shows its title, its tag, a word for its state (**Latest**,
+**Pre-release** or **Draft**), who published it and when, and its notes as formatted text; notes
+longer than a dozen lines end with **Show all**. Its files are listed with their size and how
+many times they were downloaded: click one to download it in the browser (GitHub's source
+archives aren't listed). The arrow opens the release on GitHub. Drafts show only to people who
+can push to the repository: GitHub decides. Under the list, **Tags without a release** lists the
+tags no release uses, each with **Draft a release**.
+
+The repository's header shows the latest release's tag next to Public or Private; clicking it
+opens the section.
+
+**New release** opens a form:
+- **Tag**: type one, or pick one of the next versions offered after the newest tag that looks
+  like a version (`v1.2.3` offers `v1.2.4`, `v1.3.0` and `v2.0.0`; a repository with none offers
+  `v0.1.0`). It says whether the release uses an existing tag or creates it, and from which
+  branch (the branch picker; the default branch at first). A tag follows the rules of a branch
+  name, and one that another release uses is refused before anything is sent.
+- **Title** (the tag when left empty) and **Notes** in Markdown. **Generate notes** asks GitHub
+  for the notes since the previous release; if you typed notes, it asks before replacing them.
+- **Pre-release**, then **Save draft** or **Publish release**. Publishing creates the tag,
+  notifies the repository's watchers and can start workflows, so it asks first ("Publish v0.2.0
+  from main? This creates the tag and can't be undone from RepoHub."). Saving a draft doesn't.
+
+A draft has **Edit** (the same form, filled in) and **Publish** (it asks first). RepoHub doesn't
+upload files: **Add files on GitHub** opens the draft there. After a save the list and the header
+show it at once. When GitHub refuses (for example a tag that already has a release, or a token
+without the Contents permission), the form keeps what you typed and says why.
 
 ## Files on your computer (desktop app)
 
@@ -629,6 +665,7 @@ GitHub Enterprise.
 | Repositories | search by name, description and topic; public, private and fork filters; star | `/user/starred`, `PUT`/`DELETE /user/starred/{r}` |
 | Repository | root files, README, languages, last commit, copy clone URL, open on GitHub | `/repos/{r}/contents`, `/readme`, `/languages`, `/commits` |
 | Repository → Commits | a branch's history (30 at a time), one commit with its diff, two branches compared and whether a pull request is open between them | `/repos/{r}/commits?sha={branch}&per_page=30&page={n}`, `/repos/{r}/commits/{sha}`, `/repos/{r}/compare/{base}...{head}`, `/search/issues?q=is:pr is:open repo:{r} head:{head} base:{base}` |
+| Repository → Releases | releases (20 at a time) with notes and files, the latest release (also in the header), tags without a release; draft, edit and publish a release, generated notes | `/repos/{r}/releases?per_page=20&page={n}`, `/repos/{r}/releases/latest`, `/repos/{r}/tags?per_page=50`, `POST /repos/{r}/releases`, `POST /repos/{r}/releases/generate-notes`, `PATCH /repos/{r}/releases/{id}` |
 | Pull requests | pull requests you're involved in or whose review is asked of you: open, draft, merged, closed; filters; click to read the conversation, its checks and its diff | `/search/issues?q=is:pr involves:{u}`, `/search/issues?q=is:pr is:open review-requested:{u}`, `/repos/{r}/pulls/{n}`, `/files`, `/reviews`, `/comments`, `/commits/{sha}/check-runs` |
 | Issues | open issues in your repositories; filters; click to read and answer; new issue with labels and assignees | `/search/issues?q=is:issue is:open user:{u}`, `/repos/{r}/issues/{n}`, `/comments`, `POST /repos/{r}/issues` |
 | Conversation details | labels, assignees, milestone, reviewers; edit them, the title and the description | the repository's choices: `/repos/{r}/labels`, `/assignees`, `/milestones?state=open` (the first 100 of each; it says when there are more); changes: `PATCH /repos/{r}/issues/{n}` (`labels`, `assignees`, `milestone`, `title`, `body`), `POST` and `DELETE /repos/{r}/pulls/{n}/requested_reviewers` |
@@ -645,8 +682,8 @@ How it behaves:
 - Errors (rejected token, rate limit, unknown user) show a banner with the reason and **Retry**.
 - RepoHub never creates or deletes repositories, and never changes their settings: "New
   repository" and "Settings on GitHub" open GitHub in the browser. What it does write (issues,
-  pull requests, comments, reviews, branches, stars, labels, assignees, milestones, review
-  requests, titles and descriptions, and boards in your notes repository) is listed under
+  pull requests, comments, reviews, branches, releases, stars, labels, assignees, milestones,
+  review requests, titles and descriptions, and boards in your notes repository) is listed under
   [Working on GitHub from the app](#working-on-github-from-the-app).
 
 ## Development

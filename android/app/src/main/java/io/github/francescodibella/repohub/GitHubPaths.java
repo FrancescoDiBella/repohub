@@ -160,7 +160,11 @@ final class GitHubPaths {
                     if (rest.length == 2 && ((rest[0].equals("actions") && rest[1].equals("runs")) || (rest[0].equals("stats") && rest[1].equals("participation")))) {
                         return true;
                     }
-                    if (rest.length == 1 && java.util.Arrays.asList("contents", "readme", "languages", "commits", "branches", "issues").contains(rest[0])) {
+                    if (rest.length == 1 && java.util.Arrays.asList("contents", "readme", "languages", "commits", "branches", "issues", "releases", "tags").contains(rest[0])) {
+                        return true;
+                    }
+                    // The latest release (not one release by id or tag).
+                    if (rest.length == 2 && rest[0].equals("releases") && rest[1].equals("latest")) {
                         return true;
                     }
                     // A repository's labels, assignable people and milestones (triage pickers).
@@ -215,17 +219,19 @@ final class GitHubPaths {
                 // Taking back a review request and deleting a board file are the only DELETEs in a repository.
                 return requestedReviewers(repo, rest) || (repo && boardFile(rest)) || starred(seg);
             case "POST":
-                // Creating an issue, a pull request or a branch; commenting; reviewing a pull request;
-                // asking for a review; re-running a workflow.
-                return repo && ((rest.length == 1 && (rest[0].equals("issues") || rest[0].equals("pulls")))
+                // Creating an issue, a pull request, a branch or a release (and its generated notes);
+                // commenting; reviewing a pull request; asking for a review; re-running a workflow.
+                return repo && ((rest.length == 1 && (rest[0].equals("issues") || rest[0].equals("pulls") || rest[0].equals("releases")))
                     || requestedReviewers(repo, rest)
                     || (rest.length == 2 && rest[0].equals("git") && rest[1].equals("refs"))
+                    || (rest.length == 2 && rest[0].equals("releases") && rest[1].equals("generate-notes"))
                     || (rest.length == 3 && number(rest[1]) && ((rest[0].equals("issues") && rest[2].equals("comments")) || (rest[0].equals("pulls") && (rest[2].equals("reviews") || rest[2].equals("comments")))))
                     || (rest.length == 4 && rest[0].equals("actions") && rest[1].equals("runs") && number(rest[2]) && (rest[3].equals("rerun") || rest[3].equals("rerun-failed-jobs"))));
             case "PATCH":
                 // Closing or reopening an issue, and editing its labels, assignees, milestone, title and
-                // description (pull requests too); marking one notification as read.
-                return (repo && rest.length == 2 && rest[0].equals("issues") && number(rest[1]))
+                // description (pull requests too); saving or publishing a draft release (by its number);
+                // marking one notification as read.
+                return (repo && rest.length == 2 && (rest[0].equals("issues") || rest[0].equals("releases")) && number(rest[1]))
                     || (seg.length == 3 && seg[0].equals("notifications") && seg[1].equals("threads") && number(seg[2]));
             default:
                 return false;

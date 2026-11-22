@@ -370,12 +370,14 @@ pub fn repo_detail(s: &App, k: &Kit, i: usize, plugin: Option<El>) -> El {
     let back = Button::new("Repositories").icon(&icons::BACK).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
         .on_press(|s: &mut App| s.go(Page::Repos)).build(k).key("back").self_start();
     let vis = if r.private { ui::pill(k, "Private", k.c.warning.icon) } else { ui::pill(k, "Public", k.c.text_muted) };
+    // The name, Public or Private, and the latest release's tag (it opens Releases).
     let header = row().w_full().center_y().justify_between().gap(12.0).flex_wrap()
-        .child(row().gap(10.0).center_y()
+        .child(row().gap(10.0).center_y().shrink().min_w(0.0)
             .child(ui::avatar(k, &r.name, r.hue, 36.0))
-            .child(col().gap(2.0)
+            .child(col().gap(2.0).shrink().min_w(0.0)
                 .child(text(format!("{} /", r.owner)).font(k.ty.text_small).color(k.c.text_muted))
-                .child(row().gap(8.0).center_y().child(text(r.name.clone()).font(k.ty.body_medium).color(k.c.text_strong)).child(vis))))
+                .child(row().gap(8.0).center_y().flex_wrap().child(text(r.name.clone()).font(k.ty.body_medium).color(k.c.text_strong).wrap()).child(vis)
+                    .children(crate::releases_page::header_pill(s, k, i)))))
         .child(row().gap(8.0).flex_wrap().shrink().min_w(0.0)
             .child(open_button(k, "Open on GitHub", &r.url, "open-github"))
             .child(Button::new(format!("Fork · {}", r.forks)).icon(&icons::FORK).control_size(ControlSize::Small)
@@ -399,8 +401,9 @@ pub fn repo_detail(s: &App, k: &Kit, i: usize, plugin: Option<El>) -> El {
                 None => s.open_plugin_tab(i, s.plugins.repo_tabs().get(t - shown.len()).map(|(id, _)| id.clone())),
             }
         }).build(k).key("tabs");
-    // Ten sections and the plugins' don't always fit (a phone, a narrow window): the strip
-    // scrolls sideways rather than squeezing the labels.
+    // Eleven sections and the plugins' don't always fit (a phone, a narrow window): the strip
+    // scrolls sideways rather than squeezing the labels, and `reveal_tab` keeps the one on screen
+    // in view.
     let tabs = row().w_full().scroll_x().child(tabs);
     let in_repo = |name: &str| name.eq_ignore_ascii_case(&r.full_name) || name.eq_ignore_ascii_case(&r.name);
     let body = if let Some(p) = plugin.filter(|_| s.plugin_tab.is_some()) { p } else { match s.tab {
@@ -414,12 +417,25 @@ pub fn repo_detail(s: &App, k: &Kit, i: usize, plugin: Option<El>) -> El {
             .child(list_of(k, "Pull requests", Some(actions::open_form_button(k, i, Compose::Pull)),
                 s.data.pulls.iter().filter(|x| in_repo(&x.repo)).map(|x| actions::pull_line(s, k, x, s.compact)).collect())),
         RepoTab::Actions => list_of(k, "Workflow runs", None, s.data.runs.iter().filter(|x| in_repo(&x.repo)).map(|x| crate::runs_page::run_line(s, k, x, s.compact)).collect()),
+        RepoTab::Releases => crate::releases_page::releases_tab(s, k, i),
         RepoTab::Notes => crate::notes_page::notes_tab(s, k, i),
         RepoTab::Claude => crate::claude_page::claude_tab(s, k, i),
         RepoTab::Terminal => crate::terminal_page::terminal_tab(s, k, i, k.c.page.r + k.c.page.g + k.c.page.b < 1.5),
         RepoTab::Settings => crate::lists::repo_settings(s, k, r),
     } };
     col().w_full().gap(16.0).child(back).child(header).child(tabs).child(actions::form_panel(s, k, i)).child(body)
+}
+
+/// Scrolls the section bar sideways so the section on screen shows: after a section opens from
+/// elsewhere (the header, the palette, the place saved last time, a start-up argument). It runs
+/// on the frame after `App::set_tab` (see `poll`).
+pub fn reveal_tab(s: &App, tx: &mut rune::Tx) {
+    if !matches!(s.page, Page::Repo(_)) || s.plugin_tab.is_some() {
+        return;
+    }
+    if let Some(n) = s.tabs().iter().position(|t| *t == s.tab) {
+        tx.scroll_into_view(format!("tabs/segment{n}"));
+    }
 }
 
 /// The files and what's under them: from the local clone an open file comes first, then the

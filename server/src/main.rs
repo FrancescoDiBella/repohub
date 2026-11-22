@@ -558,9 +558,10 @@ fn compare_spec(spec: &str) -> bool {
 }
 
 /// Which proxied API calls are allowed: the exact read endpoints RepoHub uses, starring, and the few
-/// writes the app makes (create an issue, a branch or a pull request, close an issue, merge a
-/// pull request, and board sync's writes to one board file in the notes repository). Nothing that
-/// deletes repositories or branches, rewrites, or exposes administrative repository data.
+/// writes the app makes (create an issue, a branch, a pull request or a release, close an issue,
+/// merge a pull request, publish a draft release, triage an issue, and board sync's writes to
+/// one board file in the notes repository). Nothing that deletes repositories, branches, releases
+/// or tags, rewrites, uploads, or exposes administrative repository data.
 fn allowed(method: &Method, path: &str) -> bool {
     let p = path.split('?').next().unwrap_or("");
     let seg: Vec<&str> = p.trim_start_matches('/').split('/').collect();
@@ -603,6 +604,10 @@ fn allowed(method: &Method, path: &str) -> bool {
                     | ["commits"]
                     | ["branches"]
                     | ["issues"]
+                    // The releases, the tags, and the latest release (not one release by id or tag).
+                    | ["releases"]
+                    | ["releases", "latest"]
+                    | ["tags"] => return true,
                     // A repository's labels, assignable people and milestones (triage pickers).
                     | ["labels"]
                     | ["assignees"]
@@ -651,14 +656,15 @@ fn allowed(method: &Method, path: &str) -> bool {
         // Board sync writes one board, under boards/ and ending in .excalidraw, nothing else.
         Method::Put | Method::Delete if repo && board_file(rest) => true,
         Method::Put | Method::Delete => seg.len() == 4 && seg[0] == "user" && seg[1] == "starred" && !seg[2].is_empty() && !seg[3].is_empty(),
-        // Creating an issue, a pull request or a branch; commenting; reviewing a pull request; asking
-        // for a review; re-running a workflow.
-        Method::Post => repo && (matches!(rest, ["issues"] | ["pulls"] | ["git", "refs"])
+        // Creating an issue, a pull request, a branch or a release (and its generated notes);
+        // commenting; reviewing a pull request; asking for a review; re-running a workflow.
+        Method::Post => repo && (matches!(rest, ["issues"] | ["pulls"] | ["git", "refs"] | ["releases"] | ["releases", "generate-notes"])
             || (rest.len() == 3 && number(rest[1]) && matches!((rest[0], rest[2]), ("issues", "comments") | ("pulls", "reviews") | ("pulls", "comments") | ("pulls", "requested_reviewers")))
             || (rest.len() == 4 && rest[0] == "actions" && rest[1] == "runs" && number(rest[2]) && matches!(rest[3], "rerun" | "rerun-failed-jobs"))),
         // Closing or reopening an issue, and editing its labels, assignees, milestone, title and
-        // description (pull requests too); marking one notification as read.
-        Method::Patch => (repo && rest.len() == 2 && rest[0] == "issues" && number(rest[1]))
+        // description (pull requests too); saving or publishing a draft release (by its number);
+        // marking one notification as read.
+        Method::Patch => (repo && rest.len() == 2 && (rest[0] == "issues" || rest[0] == "releases") && number(rest[1]))
             || (seg.len() == 3 && seg[0] == "notifications" && seg[1] == "threads" && number(seg[2])),
         _ => false,
     }
@@ -1103,6 +1109,18 @@ mod tests {
         assert!(!allowed(&Method::Get, "/repos/owner/repo/actions/runs/bad/jobs"));
         assert!(!allowed(&Method::Get, "/repos/owner/repo/actions/jobs/bad/logs"));
         assert!(!allowed(&Method::Get, "/repos/owner/repo/actions/runs/42/logs"));
+        // Releases and tags: the list, the latest, the tags; nothing by id, tag or asset.
+        assert!(allowed(&Method::Get, "/repos/owner/repo/releases"));
+        assert!(allowed(&Method::Get, "/repos/owner/repo/releases?per_page=20&page=2"));
+        assert!(allowed(&Method::Get, "/repos/owner/repo/releases/latest"));
+        assert!(allowed(&Method::Get, "/repos/owner/repo/tags?per_page=50"));
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/releases/42"));
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/releases/tags/v1.0.0"));
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/releases/42/assets"));
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/releases/assets/7"));
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/releases/latest/assets"));
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/tags/v1.0.0"));
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/git/tags/0123abc"));
     }
 
     #[test]
@@ -1116,6 +1134,26 @@ mod tests {
         assert!(allowed(&Method::Put, "/repos/owner/repo/pulls/7/merge"));
         assert!(allowed(&Method::Post, "/repos/owner/repo/actions/runs/42/rerun"));
         assert!(allowed(&Method::Post, "/repos/owner/repo/actions/runs/42/rerun-failed-jobs"));
+        // Releases: create one, generate its notes, save or publish a draft by its number.
+        assert!(allowed(&Method::Post, "/repos/owner/repo/releases"));
+        assert!(allowed(&Method::Post, "/repos/owner/repo/releases/generate-notes"));
+        assert!(allowed(&Method::Patch, "/repos/owner/repo/releases/42"));
+        assert!(!allowed(&Method::Patch, "/repos/owner/repo/releases/latest"));
+        assert!(!allowed(&Method::Patch, "/repos/owner/repo/releases/4a2"));
+        assert!(!allowed(&Method::Patch, "/repos/owner/repo/releases/-1"));
+        assert!(!allowed(&Method::Patch, "/repos/owner/repo/releases/42/assets"));
+        assert!(!allowed(&Method::Patch, "/repos/owner/repo/releases"));
+        assert!(!allowed(&Method::Post, "/repos/owner/repo/releases/42"));
+        assert!(!allowed(&Method::Post, "/repos/owner/repo/releases/42/assets"));
+        assert!(!allowed(&Method::Post, "/repos/owner/repo/releases/generate-notes/x"));
+        assert!(!allowed(&Method::Put, "/repos/owner/repo/releases/42"));
+        // Releases, their files and tags are never deleted, and no tag object is made.
+        assert!(!allowed(&Method::Delete, "/repos/owner/repo/releases/42"));
+        assert!(!allowed(&Method::Delete, "/repos/owner/repo/releases/assets/7"));
+        assert!(!allowed(&Method::Delete, "/repos/owner/repo/releases/42/assets/7"));
+        assert!(!allowed(&Method::Post, "/repos/owner/repo/git/tags"));
+        assert!(!allowed(&Method::Delete, "/repos/owner/repo/git/refs/tags/v1.0.0"));
+        assert!(!allowed(&Method::Patch, "/repos/owner/repo/git/refs/tags/v1.0.0"));
         // Marking one notification as read, not all of them, and no unsubscribing.
         assert!(allowed(&Method::Patch, "/notifications/threads/12"));
         assert!(!allowed(&Method::Patch, "/notifications/threads/abc"));

@@ -52,6 +52,8 @@ mod plugins;
 mod plugins;
 mod plugins_page;
 mod prefs;
+mod releases;
+mod releases_page;
 mod state;
 mod review;
 mod runs_page;
@@ -224,6 +226,11 @@ pub struct App {
     pub(crate) runs_filter: runs_page::RunsFilter,
     /// The Commits section: the branch's history, the commit open and the comparison.
     commits: commits::Commits,
+    /// The Releases section (its list, the form, questions waiting for a yes) and each
+    /// repository's latest release for the header.
+    releases: releases::Releases,
+    /// The section bar scrolls the section on screen into view on the next frame (`poll`).
+    reveal_tab: bool,
     /// The issue or pull request whose conversation is on screen, in place of the page.
     thread: Option<thread::Open>,
     /// Counts conversation loads (see [`thread::Open::epoch`]).
@@ -494,6 +501,7 @@ impl App {
         self.open_run = None;
         self.close_pull_diff();
         self.commits.leave();
+        self.releases.leave();
     }
 
     /// How many unread notifications are loaded.
@@ -842,6 +850,7 @@ impl App {
             self.leave_tab();
         }
         self.tab = tab;
+        self.reveal_tab = true;
         self.save_place();
         match tab {
             RepoTab::Notes => {
@@ -851,6 +860,7 @@ impl App {
             RepoTab::Terminal => self.open_terminal(i),
             RepoTab::Changes => self.load_changes(i),
             RepoTab::Commits => self.load_history(i, false),
+            RepoTab::Releases => self.load_releases(i, false),
             _ => {}
         }
     }
@@ -1201,6 +1211,7 @@ impl App {
         self.diff_load = None;
         self.close_pull_diff();
         self.commits = commits::Commits::default();
+        self.releases = releases::Releases::default();
         self.changes = None;
         self.commit_msg.clear();
         self.git_error = None;
@@ -1360,7 +1371,7 @@ impl App {
             self.close_commit(None);
         } else if self.commits.compare.is_some() {
             self.close_compare();
-        } else {
+        } else if !self.release_escape() {
             match self.page {
                 Page::Overview => net::leave_app(),
                 Page::Repo(_) => self.go(Page::Repos),
@@ -1511,6 +1522,7 @@ impl App {
         self.set_tab(i, RepoTab::Code);
         self.load_branches(i, true);
         self.load_detail(i);
+        self.load_latest_release(i, false);
     }
 
     /// Reloads everything from GitHub in the background.
@@ -1597,6 +1609,7 @@ impl App {
                 {
                     self.go(Page::Overview);
                 }
+                self.releases_refreshed(self.repo_index());
                 self.restore_place();
                 // With the lists, what's waiting for you.
                 self.load_inbox();
@@ -2058,6 +2071,7 @@ impl App {
             BranchSlot::Head => if let Some(f) = self.form.as_mut() { f.from = branch },
             BranchSlot::Base => if let Some(f) = self.form.as_mut() { f.into = branch },
             BranchSlot::CompareBase | BranchSlot::CompareHead => self.pick_compare(slot, branch),
+            BranchSlot::ReleaseTarget => self.pick_release_target(branch),
         }
     }
 
@@ -2353,6 +2367,7 @@ impl App {
                 }
                 self.notify(format!("{} pull request #{n}", if open { "Reopened" } else { "Closed" }));
             }
+            github::Done::Release(r) => self.release_done(&full_name, *r),
             github::Done::Triaged { number, change, applied } => self.apply_triaged(&full_name, number, change, applied),
             github::Done::Reran { run_id, failed_only } => {
                 for r in self.data.runs.iter_mut().filter(|r| r.id == run_id && same_repo(&r.repo, &full_name)) {
@@ -3226,6 +3241,8 @@ fn init() -> App {
         issue_filter: filters::ListFilter::default(),
         runs_filter: runs_page::RunsFilter::default(),
         commits: commits::Commits::default(),
+        releases: releases::Releases::default(),
+        reveal_tab: false,
         thread: None,
         thread_epoch: 0,
         choices: triage::Cache::default(),
@@ -3390,6 +3407,9 @@ fn init() -> App {
     if let Some(state) = arg("sync") {
         s.sync_still(&state, arg("notes-repo"));
     }
+    // `-- tab releases` reads the releases before the first frame; `-- release new` (or `notes`,
+    // `edit`, `publish`) opens the form. Any repository page reads its latest release.
+    s.releases_still(arg("release"));
     // `-- board Name` opens a drawing of that section (for headless stills); `zoom 2` zooms it.
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(name) = arg("board")
@@ -4138,6 +4158,9 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
     #[cfg(target_arch = "wasm32")]
     let plugins_ran = false;
     s.clock = clock;
+    if std::mem::take(&mut s.reveal_tab) {
+        pages::reveal_tab(s, tx);
+    }
     let due = clock - s.tick_at >= EVERY;
     if due {
         s.tick_at = clock;
@@ -4222,6 +4245,8 @@ fn shortcuts(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
             s.confirm_merge = None;
         } else if s.form.is_some() {
             s.form = None;
+        } else if s.release_escape() {
+            // The publish question, GitHub's notes on offer, or the release form.
         } else if s.pull_diff_of.is_some() {
             s.close_pull_diff();
         } else if s.thread.is_some() {
