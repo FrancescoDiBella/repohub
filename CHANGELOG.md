@@ -9,6 +9,11 @@ The sections are **Added**, **Changed** and **Fixed**.
 
 ## Unreleased
 
+## 0.2.0 — 2026-11-22
+
+Four new features (Commits, Releases, triage in conversations, boards on every device), a faster
+start and smaller downloads.
+
 ### Added
 - RepoHub opens at once: the lists of the last load show in the first frame, with "Updating…"
   until GitHub answers. If it can't, the lists stay and the banner says how old they are. The
