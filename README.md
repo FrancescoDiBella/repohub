@@ -4,11 +4,13 @@ A dashboard for your own GitHub repositories, written in Rust with
 [Rune](https://github.com/anomalyco/rune) (a GPU-rendered UI framework) and `rune-kit`.
 
 It reads real data from the GitHub REST API: profile, repositories, files, README, languages,
-last commit, pull requests, issues, notifications, workflow runs and weekly commits. From the
+commits, pull requests, issues, notifications, workflow runs and weekly commits. From the
 app you can also:
 - **read and answer** issues and pull requests: comment, review, comment on diff lines, see the
   checks, merge, close and reopen;
 - **filter** issues and pull requests, and go through your **notifications**;
+- read a branch's **commits**, open one to see what it changed, and **compare** two branches
+  before opening a pull request;
 - work in a repository's **local clone** (desktop): its files, its changes as a diff, commit,
   push and pull, a **Terminal** and **Claude**;
 - keep **notes**: hand-drawn diagrams and sketches for each repository and branch;
@@ -23,7 +25,7 @@ app you can also:
 The pictures are made from the sample data by `scripts/screenshots.sh`.
 
 **Contents:** [Docker](#run-it-with-docker) · [Desktop app](#desktop-app) ·
-[Android app](#android-app) · [Themes](#themes) · [Working on GitHub](#working-on-github-from-the-app) ·
+[Android app](#android-app) · [Themes](#themes) · [Working on GitHub](#working-on-github-from-the-app) · [Commits](#commits) ·
 [Files on your computer](#files-on-your-computer-desktop-app) · [Notes](#notes) ·
 [Status bar](#status-bar-desktop-app) · [Claude](#claude-desktop-app) · [Plugins](#plugins-desktop-app) ·
 [Terminal](#terminal-desktop-app) · [Configuration](#configuration) · [What it shows](#what-it-shows) ·
@@ -292,7 +294,7 @@ finds `repohub`) and press Enter:
 
 - any page, repository, open pull request or issue;
 - for the repository on screen: New issue, New pull request, New branch, Ask Claude, Open a
-  terminal, Open on GitHub, Copy the clone URL, and its sections;
+  terminal, Open on GitHub, Copy the clone URL, Commits of it, and its other sections;
 - Refresh and the theme.
 
 ↑ ↓ move through the results, Esc or a click outside closes it.
@@ -324,6 +326,32 @@ In Docker the same actions go through `repohub-server`, which forwards only thes
 
 The token needs, as a fine-grained token: **Contents**, **Issues** and **Pull requests** read
 and write, **Metadata** and **Actions** read. A classic token needs the `repo` scope.
+
+## Commits
+
+A repository's **Commits** section (after Code) shows the history of the branch picked in the
+branch picker, newest first and grouped by day (Today, Yesterday, 12 November…). Each row has the
+first line of the message, who wrote it (their GitHub account, or the name in git when GitHub
+knows no account for them), the short commit id, how long ago, and **Verified** when GitHub
+checked its signature. **Copy id** copies the full id, the arrow opens it on GitHub.
+
+- **Load more** reads the next 30; the end of the list says whether GitHub has more.
+- The **filter** narrows the commits already loaded by message, author or commit id, as you type.
+- On the desktop, when the Changes tab has seen that your local clone has commits to push or
+  to pull, a line above the list says so, with a link to the Changes tab.
+
+**Click a commit** to open it in place of the list: its whole message, who wrote it and who
+committed it, when, its parent commits (click one to open it; Back comes back), and what it
+changed as a diff, unified or side by side (always unified on a phone). It says when GitHub
+shows no diff for a file (binary or too large) and when a commit has more than the 300 files
+GitHub lists. **Back**, Esc or ⌘[ (Ctrl+[) returns to the list where you were.
+
+**Compare** opens a small form: the branch to compare (the one on screen) and the branch it's
+compared with (the default branch). The result says how far apart they are ("3 commits ahead,
+1 behind main"), lists the commits and shows what they change together. When the branch is
+ahead and no pull request is open for it, **New pull request** opens the form with both branches
+filled in; when one is open, a button opens it. Identical branches, a branch with nothing new and
+branches with no history in common get a sentence instead.
 
 ## Files on your computer (desktop app)
 
@@ -506,6 +534,7 @@ GitHub Enterprise.
 | Overview | totals, commits over the last 26 weeks, recent repositories, open pull requests | `/user` or `/users/{u}`, `/user/repos` or `/users/{u}/repos`, `/search/issues`, `/repos/{r}/stats/participation` |
 | Repositories | search by name, description and topic; public, private and fork filters; star | `/user/starred`, `PUT`/`DELETE /user/starred/{r}` |
 | Repository | root files, README, languages, last commit, copy clone URL, open on GitHub | `/repos/{r}/contents`, `/readme`, `/languages`, `/commits` |
+| Repository → Commits | a branch's history (30 at a time), one commit with its diff, two branches compared and whether a pull request is open between them | `/repos/{r}/commits?sha={branch}&per_page=30&page={n}`, `/repos/{r}/commits/{sha}`, `/repos/{r}/compare/{base}...{head}`, `/search/issues?q=is:pr is:open repo:{r} head:{head} base:{base}` |
 | Pull requests | pull requests you're involved in: open, draft, merged, closed; filters; click to read the conversation, its checks and its diff | `/search/issues?q=is:pr involves:{u}`, `/repos/{r}/pulls/{n}`, `/files`, `/reviews`, `/comments`, `/commits/{sha}/check-runs` |
 | Issues | open issues in your repositories; filters; click to read and answer | `/search/issues?q=is:issue is:open user:{u}`, `/repos/{r}/issues/{n}`, `/comments` |
 | Notifications | your unread notifications; mark as read | `/notifications`, `PATCH /notifications/threads/{id}` |

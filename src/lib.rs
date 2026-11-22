@@ -21,6 +21,8 @@ mod claude_page;
 #[cfg(not(target_arch = "wasm32"))]
 mod clones;
 mod clones_shim;
+mod commits;
+mod commits_page;
 mod config;
 mod github;
 mod harness;
@@ -211,6 +213,8 @@ pub struct App {
     issue_filter: filters::ListFilter,
     /// What the Actions page is narrowed to.
     pub(crate) runs_filter: runs_page::RunsFilter,
+    /// The Commits section: the branch's history, the commit open and the comparison.
+    commits: commits::Commits,
     /// The issue or pull request whose conversation is on screen, in place of the page.
     thread: Option<thread::Open>,
     /// Counts conversation loads (see [`thread::Open::epoch`]).
@@ -467,6 +471,7 @@ impl App {
         self.thread = None;
         self.open_run = None;
         self.close_pull_diff();
+        self.commits.leave();
     }
 
     /// How many unread notifications are loaded.
@@ -800,6 +805,7 @@ impl App {
             RepoTab::Notes => self.load_notes(i),
             RepoTab::Terminal => self.open_terminal(i),
             RepoTab::Changes => self.load_changes(i),
+            RepoTab::Commits => self.load_history(i, false),
             _ => {}
         }
     }
@@ -1143,6 +1149,7 @@ impl App {
         self.diff_of = None;
         self.diff_load = None;
         self.close_pull_diff();
+        self.commits = commits::Commits::default();
         self.changes = None;
         self.commit_msg.clear();
         self.git_error = None;
@@ -1298,6 +1305,10 @@ impl App {
             self.open_run = None;
         } else if self.pull_diff_of.is_some() {
             self.close_pull_diff();
+        } else if self.commits.open.is_some() {
+            self.close_commit(None);
+        } else if self.commits.compare.is_some() {
+            self.close_compare();
         } else {
             match self.page {
                 Page::Overview => net::leave_app(),
@@ -1509,6 +1520,9 @@ impl App {
                             self.sync_tray();
                         }
                         self.load_detail(i);
+                        if self.tab == RepoTab::Commits {
+                            self.load_history(i, true);
+                        }
                     } else {
                         self.go(Page::Repos);
                     }
@@ -1887,6 +1901,9 @@ impl App {
         {
             f.from = other.clone();
         }
+        if let Ok(names) = &r {
+            self.commits.branches_arrived(&key, names);
+        }
         if let Ok(names) = &r
             && let Some(picked) = self.branch_of.get(&key)
             && !names.contains(picked)
@@ -1949,6 +1966,11 @@ impl App {
         if self.tab == RepoTab::Notes {
             self.load_notes(i);
         }
+        // The history follows the branch; the answer for the previous one is dropped.
+        if self.tab == RepoTab::Commits {
+            self.commits.open = None;
+            self.load_history(i, false);
+        }
     }
 
     /// The branch picker chose `branch` for `slot`.
@@ -1959,6 +1981,7 @@ impl App {
             BranchSlot::From => if let Some(f) = self.form.as_mut() { f.from = branch },
             BranchSlot::Head => if let Some(f) = self.form.as_mut() { f.from = branch },
             BranchSlot::Base => if let Some(f) = self.form.as_mut() { f.into = branch },
+            BranchSlot::CompareBase | BranchSlot::CompareHead => self.pick_compare(slot, branch),
         }
     }
 
@@ -2134,6 +2157,7 @@ impl App {
                 }
             }
             github::Done::Pull(c) => {
+                self.commits.pull_opened(&full_name, c.number, &c.url);
                 let (title, draft) = self.pull_meta.take().unwrap_or_default();
                 let author = self.data.profile.login.clone();
                 self.data.pulls.insert(0, model::Pull { labels: Vec::new(),
@@ -3099,6 +3123,7 @@ fn init() -> App {
         pull_filter: filters::ListFilter::default(),
         issue_filter: filters::ListFilter::default(),
         runs_filter: runs_page::RunsFilter::default(),
+        commits: commits::Commits::default(),
         thread: None,
         thread_epoch: 0,
         open_run: None,
@@ -3227,6 +3252,9 @@ fn init() -> App {
         s.open_thread(&repo, number, true);
         s.open_pull_diff(repo, number);
     }
+    // `-- tab commits` reads the history before the first frame; `-- commit 0123abc` (or `commit 2`,
+    // the second in the list) opens a commit, `-- compare main...feature/x` compares two branches.
+    s.commits_still(arg("commit"), arg("compare"));
     // `-- board Name` opens a drawing of that section (for headless stills); `zoom 2` zooms it.
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(name) = arg("board")
@@ -3912,7 +3940,7 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
             }
             // A phone shows diffs unified (see `changes_page`), whatever was picked when wide.
             if compact {
-                for d in [&mut s.diff, &mut s.pull_diff] {
+                for d in [&mut s.diff, &mut s.pull_diff, &mut s.commits.commit_diff, &mut s.commits.compare_diff] {
                     if d.mode() != rune_kit::diff::DiffMode::Unified {
                         d.set_mode(rune_kit::diff::DiffMode::Unified);
                     }
@@ -3981,7 +4009,7 @@ fn on_close(s: &mut App, tx: &mut Tx) {
     let _ = (s, tx);
 }
 
-fn on_key(s: &mut App, ev: &KeyEvent, _: &mut Tx) -> bool {
+fn on_key(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
     // The board editor's shortcuts, unless the text tool's field is taking the keys.
     // They apply only while the editor is on screen: an open drawing left behind on another
     // page must not swallow Delete or ⌘Z there.
@@ -3998,17 +4026,17 @@ fn on_key(s: &mut App, ev: &KeyEvent, _: &mut Tx) -> bool {
             _ if ev.is_command('z') && ev.mods.shift => b.redo(),
             _ if ev.is_command('z') => b.undo(),
             _ if ev.is_command('y') => b.redo(),
-            _ => return shortcuts(s, ev),
+            _ => return shortcuts(s, ev, tx),
         };
         if changed {
             s.save_board();
         }
         return true;
     }
-    shortcuts(s, ev)
+    shortcuts(s, ev, tx)
 }
 
-fn shortcuts(s: &mut App, ev: &KeyEvent) -> bool {
+fn shortcuts(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
     if shell::is_sidebar_toggle(ev) {
         s.sidebar.toggle();
         return true;
@@ -4021,13 +4049,18 @@ fn shortcuts(s: &mut App, ev: &KeyEvent) -> bool {
         s.palette = if s.palette.is_some() { None } else { Some(palette::Palette::new()) };
         return true;
     }
-    // ⌘/Ctrl+[ goes back: out of a conversation or workflow run, or from a repository to the list.
+    // ⌘/Ctrl+[ goes back: out of a conversation, a workflow run, a commit or a comparison, or
+    // from a repository to the list.
     if ev.is_command('[') {
         if s.thread.is_some() {
             s.close_pull_diff();
             s.thread = None;
         } else if s.open_run.is_some() {
             s.open_run = None;
+        } else if s.commits.open.is_some() {
+            s.close_commit(Some(tx));
+        } else if s.commits.compare.is_some() {
+            s.close_compare();
         } else if matches!(s.page, Page::Repo(_)) {
             s.go(Page::Repos);
         } else {
@@ -4047,6 +4080,10 @@ fn shortcuts(s: &mut App, ev: &KeyEvent) -> bool {
             s.thread = None;
         } else if s.open_run.is_some() {
             s.open_run = None;
+        } else if s.commits.open.is_some() {
+            s.close_commit(Some(tx));
+        } else if s.commits.compare.is_some() {
+            s.close_compare();
         } else if s.local_file.is_some() {
             s.local_file = None;
         } else if s.toast.is_some() {
@@ -7883,8 +7920,8 @@ mod fix67_tests {
         // Re-open and verify Escape also closes the run detail view.
         click(&mut rt, "run-ngsi-ld-xr-contexts-1003", &mut t);
         assert!(rt.find("run-detail").is_some());
-        rt.update(|app, _| {
-            let handled = crate::shortcuts(app, &rune::KeyEvent { key: rune::Key::Escape, mods: rune::Mods::default() });
+        rt.update(|app, tx| {
+            let handled = crate::shortcuts(app, &rune::KeyEvent { key: rune::Key::Escape, mods: rune::Mods::default() }, tx);
             assert!(handled);
         });
         t += 0.1;
