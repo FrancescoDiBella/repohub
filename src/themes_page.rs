@@ -104,15 +104,39 @@ fn editor(s: &App, k: &Kit, shown_dark: bool) -> El {
             .on_change(|s: &mut App, _| s.look_typed()).build(k).key("look-name").grow(1.0).min_w(180.0));
     let colors = Part::ALL.iter().map(|p| {
         let i = p.index();
+        let part = *p;
         let edit = &s.look_edit.colors[i];
         let valid = themes::parse_hex(&edit.text).is_some();
-        row().w_full().gap(12.0).center_y().flex_wrap()
+        let mut r = row().w_full().gap(12.0).center_y().flex_wrap()
             .child(label(p.label()))
             .child(el().size(24.0, 24.0).radius(6.0).fill(t.color(*p)).border(1.0, k.c.border_base))
             .child(TextInput::new(edit).label(p.label()).placeholder("#rrggbb").invalid(!valid)
                 .on_edit(move |s: &mut App| &mut s.look_edit.colors[i])
-                .on_change(|s: &mut App, _| s.look_typed()).build(k).key(format!("look-color-{i}")).w(120.0))
-            .key(format!("look-color-row-{i}"))
+                .on_change(|s: &mut App, _| s.look_typed()).build(k).key(format!("look-color-{i}")).w(120.0));
+        if let Some(w) = themes::part_contrast_warning(t, part) {
+            let warn_ink = if themes::meets_contrast(k.c.warning.icon, k.c.bg_base, themes::MIN_CONTRAST) {
+                k.c.warning.icon
+            } else {
+                themes::contrast_ink(k.c.bg_base)
+            };
+            let btn_ink = themes::contrast_ink(k.c.bg_base);
+            r = r.child(ui::pill(k, &w.message(), warn_ink).role("status").key(format!("look-contrast-warn-{i}")))
+                .child(Button::new(format!("Fix contrast for {}", part.label()))
+                    .label_with(move |font, _| text("Fix contrast").font(font).color(btn_ink))
+                    .variant(ButtonVariant::Outline)
+                    .control_size(ControlSize::Small)
+                    .on_press(move |s: &mut App| {
+                        let mut fixed = None;
+                        s.change_look(|t| fixed = themes::fix_part_contrast(t, part));
+                        if let Some(hex) = fixed {
+                            s.look_edit.colors[i] = rune::TextEdit::new(hex);
+                            s.notify(format!("Adjusted {} for readable contrast", part.label().to_lowercase()));
+                        }
+                    })
+                    .build(k)
+                    .key(format!("look-fix-contrast-{i}")));
+        }
+        r.key(format!("look-color-row-{i}"))
     });
     let seg = |labels: &[&str], at: usize, key: &str, f: fn(&mut Look, usize)| {
         SegmentedControl::new(labels, Some(at)).label(key.to_owned()).fit()
@@ -132,11 +156,38 @@ fn editor(s: &App, k: &Kit, shown_dark: bool) -> El {
     if !matches!(t.backdrop, Backdrop::Plain | Backdrop::Image) {
         background = background.child(line("Pattern size", seg(&names(&SIZES), step(&SIZES, t.backdrop_size), "look-size", |t, i| t.backdrop_size = SIZES[i].1)));
     }
+    let mut accent_btns = row().gap(12.0).center_y().flex_wrap()
+        .child(Switch::new(t.accent_buttons).label("Main buttons in the accent colour")
+            .on_toggle(|s: &mut App| s.change_look(|t| t.accent_buttons = !t.accent_buttons)).build(k).key("look-accent-buttons"));
+    if let Some(w) = themes::button_contrast_warning(t) {
+        let warn_ink = if themes::meets_contrast(k.c.warning.icon, k.c.bg_base, themes::MIN_CONTRAST) {
+            k.c.warning.icon
+        } else {
+            themes::contrast_ink(k.c.bg_base)
+        };
+        let btn_ink = themes::contrast_ink(k.c.bg_base);
+        accent_btns = accent_btns
+            .child(ui::pill(k, &w.message(), warn_ink).role("status").key("look-contrast-warn-buttons"))
+            .child(Button::new("Fix contrast for accent buttons")
+                .label_with(move |font, _| text("Fix contrast").font(font).color(btn_ink))
+                .variant(ButtonVariant::Outline)
+                .control_size(ControlSize::Small)
+                .on_press(|s: &mut App| {
+                    let i = Part::Accent.index();
+                    let mut fixed = None;
+                    s.change_look(|t| fixed = themes::fix_part_contrast(t, Part::Accent));
+                    if let Some(hex) = fixed {
+                        s.look_edit.colors[i] = rune::TextEdit::new(hex);
+                        s.notify("Adjusted accent colour for readable buttons");
+                    }
+                })
+                .build(k)
+                .key("look-fix-contrast-buttons"));
+    }
     let effects = col().w_full().gap(10.0)
         .child(line("Glow on buttons", seg(&names(&STRENGTHS), step(&STRENGTHS, t.glow), "look-glow", |t, i| t.glow = STRENGTHS[i].1)))
         .child(line("Corners", seg(&names(&CORNERS), step(&CORNERS, t.radius), "look-corners", |t, i| t.radius = CORNERS[i].1)))
-        .child(line("Accent buttons", Switch::new(t.accent_buttons).label("Main buttons in the accent colour")
-            .on_toggle(|s: &mut App| s.change_look(|t| t.accent_buttons = !t.accent_buttons)).build(k).key("look-accent-buttons")))
+        .child(line("Accent buttons", accent_btns))
         .child(line("Preview", row().gap(10.0).py(6.0)
             .child(Button::new("Main button").variant(ButtonVariant::Submit).control_size(ControlSize::Small).on_press(|_: &mut App| {}).build(k).key("look-preview-submit"))
             .child(Button::new("Button").control_size(ControlSize::Small).on_press(|_: &mut App| {}).build(k).key("look-preview-neutral"))));
@@ -153,4 +204,60 @@ fn editor(s: &App, k: &Kit, shown_dark: bool) -> El {
         .child(background)
         .child(section("Effects"))
         .child(effects)
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn editor_warns_on_low_contrast_and_fix_contrast_resolves_it() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _tmp = crate::load_gen_tests::TempDataDir::new("theme-contrast-ui");
+
+        let mut s = crate::init();
+        s.pending_place = None;
+        s.page = crate::Page::Settings;
+        s.settings_section = crate::state::SettingsSection::Appearance;
+        let dark = s.theme.is_dark(true);
+        let base_id = s.looks.active(dark).id.clone();
+        s.duplicate_look(&base_id, dark);
+        s.toast = None;
+        let edit_id = s.look_edit.id.clone();
+        assert!(!edit_id.is_empty());
+
+        let mut rt = rune::Runtime::new(s, crate::view, (1180.0, 2600.0), rune::Env::new(true, 1.0));
+        rt.reduced_motion = true;
+        rt.frame(0.0);
+
+        let text_idx = Part::Text.index();
+        let warn_key = format!("look-contrast-warn-{text_idx}");
+        let fix_key = format!("look-fix-contrast-{text_idx}");
+        assert!(rt.find(&warn_key).is_none(), "duplicated built-in theme has no contrast warning");
+
+        // Make Text equal to Page so contrast drops to 1.0:1.
+        rt.update(|s, _| {
+            let page_hex = s.look_edit.colors[Part::Page.index()].text.clone();
+            s.look_edit.colors[text_idx] = rune::TextEdit::new(page_hex);
+            s.look_typed();
+        });
+        rt.frame(0.1);
+
+        assert!(rt.find(&warn_key).is_some(), "low-contrast warning pill appears");
+        assert!(
+            rt.elements().iter().any(|e| e.label.as_deref() == Some("Low contrast 1.0:1, aim for 4.5:1") || e.text.as_deref() == Some("Low contrast 1.0:1, aim for 4.5:1")),
+            "warning explains current and target contrast"
+        );
+
+        let (x, y) = rt.find(&fix_key).expect("Fix contrast button shown");
+        rt.pointer_move(x, y);
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(0.2);
+
+        assert!(rt.find(&warn_key).is_none(), "warning disappears after Fix contrast (x={x}, y={y}, text={})", rt.state.look_edit.colors[text_idx].text);
+        let fixed_look = rt.state.looks.get(&edit_id).expect("custom look");
+        assert!(themes::contrast_warnings(fixed_look).is_empty());
+        assert!(rt.state.toast.as_ref().is_some_and(|t| t.text.contains("contrast")));
+    }
 }

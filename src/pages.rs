@@ -2,7 +2,7 @@
 use rune::{El, col, el, row, text};
 use rune_kit::{Badge, BadgeVariant, Button, ButtonVariant, ControlSize, Kit, SegmentedControl, TextInput};
 
-use crate::lists::{pull_row, run_row};
+use crate::lists::pull_row;
 use crate::model::{PullState, Repo, lang_hue};
 use crate::ui::{self, panel, panel_head, rule};
 use crate::state::{BranchSlot, Compose, Load, OwnerFilter, RepoFilter, RepoSort, RepoTab};
@@ -141,7 +141,9 @@ fn see_all(k: &Kit, label: &str, page: Page) -> El {
 }
 
 fn compact_repo(k: &Kit, i: usize, r: &Repo, me: &str, now: i64) -> El {
+    let shown = if r.owner.eq_ignore_ascii_case(me) { &r.name } else { &r.full_name };
     row().w_full().px(16.0).py(10.0).gap(12.0).center_y().hover(k.c.hover).press(k.c.pressed)
+        .role("link").label(format!("Open {shown}"))
         .on_press(move |s: &mut App| s.open(i)).key(format!("recent-{}", r.full_name))
         .child(ui::avatar(k, &r.name, r.hue, 28.0))
         .child(col().grow(1.0).shrink().gap(2.0)
@@ -154,20 +156,12 @@ fn compact_repo(k: &Kit, i: usize, r: &Repo, me: &str, now: i64) -> El {
 
 // ---------------------------------------------------------------- repositories
 
+/// How many repository cards render initially before **Show more**.
+pub const REPOS_PAGE: usize = 60;
 
 pub fn repos(s: &App, k: &Kit) -> El {
-    let q = s.search.text.to_lowercase();
     let all = &s.data.repos;
-    let shown: Vec<usize> = (0..all.len()).filter(|&i| {
-        let r = &all[i];
-        s.owner.matches(&r.owner, &s.data.profile.login) && s.filter.matches(r.private, r.fork) && (q.is_empty() || r.name.to_lowercase().contains(&q) || r.description.to_lowercase().contains(&q) || r.topics.iter().any(|t| t.contains(&q)))
-    }).collect();
-    let mut shown = shown;
-    match s.sort {
-        RepoSort::Recent => {} // GitHub's order: most recently pushed first
-        RepoSort::Stars => shown.sort_by(|a, b| all[*b].stars.cmp(&all[*a].stars)),
-        RepoSort::Name => shown.sort_by_key(|i| all[*i].name.to_lowercase()),
-    }
+    let shown = s.filtered_repos();
     // The phone has no sidebar, where the pinned repositories live: they go at the top here.
     let pinned = if s.compact { crate::pinned(s) } else { Vec::new() };
     let pinned_row = (!pinned.is_empty()).then(|| {
@@ -182,17 +176,25 @@ pub fn repos(s: &App, k: &Kit) -> El {
     let sort = row().gap(8.0).center_y()
         .child(ui::ico(&icons::SORT, 14.0, k.c.icon_muted))
         .child(SegmentedControl::new(&RepoSort::LABELS, Some(s.sort.index())).label("Sort by").fit()
-            .on_pick(|s: &mut App, i, _| s.sort = RepoSort::from_index(i)).build(k).key("sort"));
+            .on_pick(|s: &mut App, i, _| {
+                s.sort = RepoSort::from_index(i);
+                s.repos_limit = REPOS_PAGE;
+            }).build(k).key("sort"));
     let search = TextInput::new(&s.search).placeholder("Search by name, description or topic…").leading_icon(k.glyph.search)
-        .on_edit(|s: &mut App| &mut s.search).build(k).key("search").grow(1.0).min_w(200.0);
+        .label("Search repositories")
+        .on_edit(|s: &mut App| &mut s.search)
+        .on_change(|s: &mut App, _| s.repos_limit = REPOS_PAGE)
+        .build(k).key("search").grow(1.0).min_w(200.0);
     let seg = SegmentedControl::new(&RepoFilter::LABELS, Some(s.filter.index())).label("Filter").fit()
-        .on_pick(|s: &mut App, i, _| s.filter = RepoFilter::from_index(i)).build(k).key("filter");
+        .on_pick(|s: &mut App, i, _| {
+            s.filter = RepoFilter::from_index(i);
+            s.repos_limit = REPOS_PAGE;
+        }).build(k).key("filter");
     // Whose: all, the account's own, or one organization (shown when there are any).
     let orgs = crate::orgs(s);
     let mut owners = row().w_full().gap(6.0).center_y().flex_wrap();
     if !orgs.is_empty() {
-        let me = s.data.profile.login.clone();
-        let mine = all.iter().filter(|r| r.owner.eq_ignore_ascii_case(&me)).count();
+        let mine = s.mine_repo_count();
         let mut chips: Vec<(String, OwnerFilter, usize)> = vec![("All".into(), OwnerFilter::All, all.len()), ("Mine".into(), OwnerFilter::Mine, mine)];
         chips.extend(orgs.into_iter().map(|(o, n)| (o.clone(), OwnerFilter::Org(o), n)));
         for (label, f, n) in chips {
@@ -201,13 +203,39 @@ pub fn repos(s: &App, k: &Kit) -> El {
             owners = owners.child(Button::new(format!("{label} · {n}")).control_size(ControlSize::Small)
                 .icon(if matches!(f, OwnerFilter::Org(_)) { &icons::GLOBE } else { &icons::REPO })
                 .variant(if on { ButtonVariant::Contrast } else { ButtonVariant::Ghost })
-                .on_press(move |s: &mut App| s.owner = f.clone()).build(k).key(key));
+                .on_press(move |s: &mut App| {
+                    s.owner = f.clone();
+                    s.repos_limit = REPOS_PAGE;
+                }).build(k).key(key));
         }
     }
-    let me = s.data.profile.login.clone();
+    let visible_len = shown.len().min(s.repos_limit.max(REPOS_PAGE));
+    let visible = &shown[..visible_len];
+    let remaining = shown.len().saturating_sub(visible_len);
+    let dark = s.shown_dark.get();
+    let active_look = s.looks.active(dark);
+    let look_ver = (dark, active_look.id.as_str(), &active_look.colors);
+    let now_bucket = s.now / 30;
+    let me = &s.data.profile.login;
     let mut list = col().w_full().gap(12.0);
-    for &i in &shown {
-        list = list.child(repo_card(k, i, &all[i], !all[i].owner.eq_ignore_ascii_case(&me), s.is_pinned(i), s.now));
+    for &i in visible {
+        let r = &all[i];
+        let show_owner = !r.owner.eq_ignore_ascii_case(me);
+        let pinned = s.is_pinned(i);
+        let now = s.now;
+        list = list.child(rune::memo(
+            format!("card-{}", r.full_name),
+            ((i, r.pushed, r.stars, r.forks, r.issues, now_bucket), (r.starred, r.private, r.fork, r.archived, show_owner, pinned), &look_ver),
+            || repo_card(k, i, r, show_owner, pinned, now),
+        ));
+    }
+    if remaining > 0 {
+        list = list.child(row().w_full().justify_center().pt(4.0)
+            .child(Button::new(format!("Show more ({remaining} left)"))
+                .variant(ButtonVariant::Outline)
+                .control_size(ControlSize::Small)
+                .on_press(|s: &mut App| s.repos_limit = s.repos_limit.max(REPOS_PAGE) + REPOS_PAGE)
+                .build(k).key("repos-show-more")));
     }
     if shown.is_empty() {
         if s.data.is_empty() && s.status.is_busy() {
@@ -230,6 +258,12 @@ pub fn repos(s: &App, k: &Kit) -> El {
         "Loading repositories…".to_owned()
     } else if s.data.is_empty() && matches!(s.status, Status::Failed(_)) {
         "Couldn't load repositories.".to_owned()
+    } else if remaining > 0 {
+        if s.data.repos_capped && shown.len() == all.len() {
+            format!("Showing {} of {}+ repositories", visible.len(), all.len())
+        } else {
+            format!("Showing {} of {} repositories", visible.len(), shown.len())
+        }
     } else if s.data.repos_capped {
         format!("Showing {} of {}+ repositories", shown.len(), all.len())
     } else {
@@ -284,8 +318,10 @@ fn repo_card(k: &Kit, i: usize, r: &Repo, show_owner: bool, pinned: bool, now: i
     if show_owner {
         title = title.child(text(format!("{} /", r.owner)).font(k.ty.body).color(k.c.text_muted));
     }
+    let open_label = format!("Open {}", if show_owner { &r.full_name } else { &r.name });
     let mut title = title
         .child(text(r.name.clone()).font(k.ty.body_medium).color(k.c.text_accent)
+            .role("link").label(open_label)
             .on_press(move |s: &mut App| s.open(i)).key(format!("open-{}", r.full_name)))
         .child(vis);
     if r.fork {
@@ -302,7 +338,7 @@ fn repo_card(k: &Kit, i: usize, r: &Repo, show_owner: bool, pinned: bool, now: i
         .child(ui::stat(k, &icons::ISSUE, r.issues.to_string()).help(format!("{} open issues and pull requests", r.issues)))
         .child(text(format!("Updated {}", r.updated_ago(now))).font(k.ty.text_small).color(k.c.text_faint));
     let desc = if r.description.is_empty() { "No description".to_owned() } else { r.description.clone() };
-    panel(k).padding(16.0).gap(10.0).key(format!("card-{}", r.full_name))
+    panel(k).padding(16.0).gap(10.0)
         .child(row().w_full().justify_between().gap(12.0)
             .child(col().grow(1.0).shrink().gap(6.0)
                 .child(title)
@@ -364,7 +400,7 @@ pub fn repo_detail(s: &App, k: &Kit, i: usize, plugin: Option<El>) -> El {
             .children(crate::changes_page::pull_panel_for(s, k, Some(&r.full_name)))
             .child(list_of(k, "Pull requests", Some(actions::open_form_button(k, i, Compose::Pull)),
                 s.data.pulls.iter().filter(|x| in_repo(&x.repo)).map(|x| actions::pull_line(s, k, x, s.compact)).collect())),
-        RepoTab::Actions => list_of(k, "Workflow runs", None, s.data.runs.iter().filter(|x| in_repo(&x.repo)).map(|x| run_row(k, x, s.now, s.compact)).collect()),
+        RepoTab::Actions => list_of(k, "Workflow runs", None, s.data.runs.iter().filter(|x| in_repo(&x.repo)).map(|x| crate::runs_page::run_line(s, k, x, s.compact)).collect()),
         RepoTab::Notes => crate::notes_page::notes_tab(s, k, i),
         RepoTab::Claude => crate::claude_page::claude_tab(s, k, i),
         RepoTab::Terminal => crate::terminal_page::terminal_tab(s, k, i, k.c.page.r + k.c.page.g + k.c.page.b < 1.5),

@@ -9,7 +9,7 @@ use crate::net::{self, Resp, Transport};
 use crate::inbox::{Notification, Subject};
 use crate::review::LineComment;
 use crate::thread::{Entry, Standing, Thread, Verdict};
-use crate::model::{Checks, Commit, Data, Detail, Issue, Profile, Pull, PullState, Repo, Run, duration, hex_hue, lang_hue, parse_iso};
+use crate::model::{Checks, Commit, Data, Detail, Issue, JobLog, Profile, Pull, PullState, Repo, Run, RunJob, RunStep, duration, hex_hue, lang_hue, parse_iso, same_repo};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LoadError {
@@ -177,6 +177,33 @@ impl Gh {
             404 => format!("Not found (404): {msg}. Check GITHUB_USER or the token's permissions."),
             code if msg.is_empty() => format!("GitHub API error {code}."),
             code => format!("GitHub error {code}: {msg}"),
+        }
+    }
+
+    /// Explains failures on workflow re-run endpoints (`POST .../actions/runs/{id}/rerun*`),
+    /// highlighting the Actions write permission when GitHub refuses with 403 or 404.
+    pub fn explain_actions_write(&self, r: &Resp) -> String {
+        let v = serde_json::from_str::<Value>(&r.body).ok();
+        let msg = v.as_ref().map(|v| s(v, "message")).unwrap_or_default();
+        let lower = msg.to_ascii_lowercase();
+        if r.status == 429
+            || r.remaining.as_deref() == Some("0")
+            || r.retry_after.is_some()
+            || lower.contains("rate limit")
+            || lower.contains("abuse")
+        {
+            return self.explain(r);
+        }
+        let detail = if msg.is_empty() { String::new() } else { format!(": {msg}") };
+        match r.status {
+            401 => "GitHub rejected the token (401): check the token in Settings, or GITHUB_TOKEN in your .env file.".into(),
+            403 => format!(
+                "GitHub refused (403){detail}. Re-running workflows requires the Actions write permission (\"Actions: Read and write\" on fine-grained tokens, or the \"repo\" / \"workflow\" scope on classic tokens)."
+            ),
+            404 => format!(
+                "Not found (404){detail}. Re-running workflows requires a token with the Actions write permission (\"Actions: Read and write\" on fine-grained tokens, or \"repo\" / \"workflow\" on classic tokens)."
+            ),
+            _ => self.explain(r),
         }
     }
 
@@ -382,7 +409,7 @@ impl Gh {
     fn repo(&self, v: &Value, starred: &HashSet<String>) -> Repo {
         let full = s(v, "full_name");
         let language = Some(s(v, "language")).filter(|l| !l.is_empty()).unwrap_or_else(|| "—".into());
-        Repo {
+        let r = Repo {
             owner: v.get("owner").map(|o| s(o, "login")).unwrap_or_default(),
             name: s(v, "name"),
             description: s(v, "description"),
@@ -400,7 +427,10 @@ impl Gh {
             url: s(v, "html_url"),
             starred: starred.contains(&full),
             full_name: full,
-        }
+            keys: std::sync::OnceLock::new(),
+        };
+        r.precompute_keys();
+        r
     }
 
     /// The account's repositories and those of its organizations (`cfg.orgs`), most recently
@@ -635,28 +665,31 @@ impl Gh {
 
     pub async fn runs(&self, full: &str) -> Result<Vec<Run>, String> {
         let v = self.get(&format!("/repos/{full}/actions/runs?per_page=4")).await?;
-        Ok(v.get("workflow_runs").and_then(Value::as_array).cloned().unwrap_or_default().iter().map(|r| {
-            let checks = match (s(r, "status").as_str(), s(r, "conclusion").as_str()) {
-                ("completed", "success" | "skipped" | "neutral") => Checks::Passing,
-                ("completed", _) => Checks::Failing,
-                _ => Checks::Running,
-            };
-            let start = parse_iso(&s(r, "run_started_at"));
-            let end = parse_iso(&s(r, "updated_at"));
-            Run {
-                workflow: s(r, "name"),
-                repo: full.to_owned(),
-                branch: s(r, "head_branch"),
-                duration: match (start, end) {
-                    (Some(a), Some(b)) if checks != Checks::Running => duration(b - a),
-                    (Some(a), _) => duration(self.now - a),
-                    _ => String::new(),
-                },
-                updated_at: end.unwrap_or(0),
-                checks,
-                url: s(r, "html_url"),
-            }
-        }).collect())
+        Ok(parse_workflow_runs(&v, full, self.now))
+    }
+
+    pub async fn run_jobs(&self, full: &str, run_id: u64) -> Result<Vec<RunJob>, String> {
+        let v = self.get(&format!("/repos/{full}/actions/runs/{run_id}/jobs?per_page=100")).await?;
+        Ok(parse_run_jobs(&v, self.now))
+    }
+
+    pub async fn job_log(&self, full: &str, job_id: u64) -> Result<JobLog, String> {
+        let r = self.t.send("GET", &format!("/repos/{full}/actions/jobs/{job_id}/logs"), JSON).await?;
+        match r.status {
+            200..=299 => Ok(tail_log(&r.body, LOG_TAIL_LINES)),
+            404 | 410 => Err("Logs for this job are not available yet or have expired on GitHub.".into()),
+            _ => Err(self.explain(&r)),
+        }
+    }
+
+    pub async fn rerun_run(&self, full: &str, run_id: u64, failed_only: bool) -> Result<(), String> {
+        let action = if failed_only { "rerun-failed-jobs" } else { "rerun" };
+        let r = self.t.send_body("POST", &format!("/repos/{full}/actions/runs/{run_id}/{action}"), JSON, "{}").await?;
+        if (200..300).contains(&r.status) {
+            Ok(())
+        } else {
+            Err(self.explain_actions_write(&r))
+        }
     }
 
     /// The owner's commits per week over the last 26 weeks (zeros while GitHub computes them).
@@ -898,7 +931,7 @@ pub async fn load_all(cfg: &Config) -> Result<Data, LoadError> {
     let mut pulls_failed = false;
     let mut open_pulls_total = None;
     let mut closed_pulls_total = None;
-    let pulls = match gh.pulls(&profile.login).await {
+    let mut pulls = match gh.pulls(&profile.login).await {
         Ok((p, open_tot, closed_tot)) => {
             open_pulls_total = Some(open_tot);
             closed_pulls_total = Some(closed_tot);
@@ -963,6 +996,13 @@ pub async fn load_all(cfg: &Config) -> Result<Data, LoadError> {
         warnings.push(format!("Commit activity couldn't load: {e}"));
     }
     runs.sort_by_key(|r| std::cmp::Reverse(r.updated_at));
+    for p in &mut pulls {
+        if p.checks.is_none()
+            && let Some(r) = runs.iter().find(|r| same_repo(&r.repo, &p.repo) && r.pull_numbers.contains(&p.number))
+        {
+            p.checks = Some(r.checks);
+        }
+    }
     let runs_total = runs.len();
     runs.truncate(20);
     Ok(Data {
@@ -984,6 +1024,168 @@ pub async fn load_all(cfg: &Config) -> Result<Data, LoadError> {
         runs_total,
         repos_capped,
     })
+}
+
+pub const LOG_TAIL_LINES: usize = 200;
+
+fn checks_and_label(status: &str, conclusion: &str) -> (Checks, String) {
+    if status != "completed" {
+        let label = match status {
+            "queued" => "queued",
+            "waiting" => "waiting",
+            "pending" => "pending",
+            _ => "in progress",
+        };
+        (Checks::Running, label.into())
+    } else {
+        match conclusion {
+            "success" => (Checks::Passing, "success".into()),
+            "skipped" => (Checks::Passing, "skipped".into()),
+            "neutral" => (Checks::Passing, "neutral".into()),
+            "cancelled" => (Checks::Failing, "cancelled".into()),
+            "timed_out" => (Checks::Failing, "timed out".into()),
+            "action_required" => (Checks::Failing, "action required".into()),
+            "startup_failure" => (Checks::Failing, "startup failure".into()),
+            "" => (Checks::Failing, "failed".into()),
+            other => (Checks::Failing, other.replace('_', " ")),
+        }
+    }
+}
+
+pub fn parse_workflow_runs(v: &Value, full: &str, now: i64) -> Vec<Run> {
+    v.get("workflow_runs").and_then(Value::as_array).into_iter().flatten().map(|r| {
+        let url = s(r, "html_url");
+        let id = r.get("id").and_then(Value::as_u64).or_else(|| {
+            url.rsplit('/').next().and_then(|x| x.parse::<u64>().ok())
+        }).unwrap_or(0);
+        let (checks, _) = checks_and_label(&s(r, "status"), &s(r, "conclusion"));
+        let start = parse_iso(&s(r, "run_started_at"));
+        let end = parse_iso(&s(r, "updated_at"));
+        let pull_numbers = r.get("pull_requests").and_then(Value::as_array).into_iter().flatten()
+            .map(|p| n(p, "number"))
+            .filter(|&num| num > 0)
+            .collect();
+        Run {
+            id,
+            workflow: s(r, "name"),
+            repo: full.to_owned(),
+            branch: s(r, "head_branch"),
+            duration: match (start, end) {
+                (Some(a), Some(b)) if checks != Checks::Running => duration(b - a),
+                (Some(a), _) => duration(now - a),
+                _ => String::new(),
+            },
+            updated_at: end.unwrap_or(0),
+            checks,
+            url,
+            pull_numbers,
+        }
+    }).collect()
+}
+
+pub fn parse_run_jobs(v: &Value, now: i64) -> Vec<RunJob> {
+    v.get("jobs").and_then(Value::as_array).into_iter().flatten().map(|j| {
+        let status = s(j, "status");
+        let (checks, status_label) = checks_and_label(&status, &s(j, "conclusion"));
+        let start = parse_iso(&s(j, "started_at"));
+        let end = parse_iso(&s(j, "completed_at"));
+        let dur = match (start, end) {
+            (Some(a), Some(b)) if status == "completed" => duration(b - a),
+            (Some(a), _) if status == "in_progress" => duration(now - a),
+            _ => String::new(),
+        };
+        let steps = j.get("steps").and_then(Value::as_array).into_iter().flatten().map(|st| {
+            let st_status = s(st, "status");
+            let (st_checks, st_label) = checks_and_label(&st_status, &s(st, "conclusion"));
+            let st_start = parse_iso(&s(st, "started_at"));
+            let st_end = parse_iso(&s(st, "completed_at"));
+            let st_dur = match (st_start, st_end) {
+                (Some(a), Some(b)) if st_status == "completed" => duration(b - a),
+                (Some(a), _) if st_status == "in_progress" => duration(now - a),
+                _ => String::new(),
+            };
+            RunStep {
+                number: n(st, "number"),
+                name: s(st, "name"),
+                checks: st_checks,
+                status_label: st_label,
+                duration: st_dur,
+            }
+        }).collect();
+        RunJob {
+            id: j.get("id").and_then(Value::as_u64).unwrap_or(0),
+            name: s(j, "name"),
+            checks,
+            status_label,
+            duration: dur,
+            url: s(j, "html_url"),
+            steps,
+        }
+    }).collect()
+}
+
+/// Strips terminal ANSI escape sequences (CSI colours, OSC hyperlinks/titles) from raw job logs.
+pub fn strip_ansi(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\r' {
+            if chars.peek() == Some(&'\n') {
+                continue;
+            }
+            out.push('\n');
+            continue;
+        }
+        if ch != '\x1b' {
+            out.push(ch);
+            continue;
+        }
+        match chars.peek().copied() {
+            Some('[') => {
+                chars.next();
+                for c in chars.by_ref() {
+                    if ('\x40'..='\x7e').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                chars.next();
+                while let Some(c) = chars.next() {
+                    if c == '\x07' {
+                        break;
+                    }
+                    if c == '\x1b' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            Some(c) if ('('..='/').contains(&c) => {
+                chars.next();
+                chars.next();
+            }
+            Some(c) if ('\x40'..='\x5f').contains(&c) => {
+                chars.next();
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Keeps the last `max_lines` lines of `raw` after stripping ANSI escape codes.
+pub fn tail_log(raw: &str, max_lines: usize) -> JobLog {
+    let cleaned = strip_ansi(raw);
+    let lines: Vec<&str> = cleaned.lines().collect();
+    let total_lines = lines.len();
+    let truncated = total_lines > max_lines;
+    let start = total_lines.saturating_sub(max_lines);
+    JobLog {
+        text: lines[start..].join("\n"),
+        total_lines,
+        truncated,
+    }
 }
 
 pub async fn load_more_pulls(cfg: &Config, login: &str, open: bool, page: usize) -> Result<(Vec<Pull>, usize), String> {
@@ -1028,6 +1230,14 @@ pub async fn load_pull_files(cfg: &Config, full: &str, number: u32) -> Result<Ve
 
 pub async fn load_detail(cfg: &Config, full: &str, at: &str) -> Detail {
     Gh::new(cfg).detail(full, at).await
+}
+
+pub async fn load_run_jobs(cfg: &Config, full: &str, run_id: u64) -> Result<Vec<RunJob>, String> {
+    Gh::new(cfg).run_jobs(full, run_id).await
+}
+
+pub async fn load_job_log(cfg: &Config, full: &str, job_id: u64) -> Result<JobLog, String> {
+    Gh::new(cfg).job_log(full, job_id).await
 }
 
 /// What GitHub created: its number and page.
@@ -1078,6 +1288,8 @@ pub enum Write {
     Review { number: u32, verdict: Verdict, body: String },
     /// A comment on lines of a pull request's diff.
     LineComment { number: u32, comment: NewLineComment },
+    /// Re-running all jobs (`failed_only: false`) or only failed jobs (`failed_only: true`) of a workflow run.
+    RerunRun { run_id: u64, failed_only: bool },
 }
 
 impl Write {
@@ -1085,7 +1297,7 @@ impl Write {
     pub fn number(&self) -> Option<u32> {
         match self {
             Write::CloseIssue(n) | Write::ReopenIssue(n) | Write::SetPullOpen { number: n, .. } | Write::Merge { number: n, .. } | Write::Comment { number: n, .. } | Write::Review { number: n, .. } | Write::LineComment { number: n, .. } => Some(*n),
-            Write::Issue { .. } | Write::Branch { .. } | Write::Pull(_) => None,
+            Write::Issue { .. } | Write::Branch { .. } | Write::Pull(_) | Write::RerunRun { .. } => None,
         }
     }
 }
@@ -1104,6 +1316,7 @@ pub enum Done {
     Commented(u32),
     Reviewed(u32, Verdict),
     LineCommented(u32),
+    Reran { run_id: u64, failed_only: bool },
 }
 
 pub async fn run(cfg: &Config, full: &str, w: Write) -> Result<Done, String> {
@@ -1119,6 +1332,7 @@ pub async fn run(cfg: &Config, full: &str, w: Write) -> Result<Done, String> {
         Write::LineComment { number, comment } => gh.line_comment(full, number, &comment).await.map(|_| Done::LineCommented(number)),
         Write::SetPullOpen { number, open } => gh.set_pull_open(full, number, open).await.map(|_| Done::PullOpen(number, open)),
         Write::Merge { number, method } => gh.merge_pull(full, number, method).await.map(|_| Done::Merged(number)),
+        Write::RerunRun { run_id, failed_only } => gh.rerun_run(full, run_id, failed_only).await.map(|_| Done::Reran { run_id, failed_only }),
     }
 }
 
@@ -1197,5 +1411,90 @@ mod tests {
         }
         assert_eq!(enc("feature/x y"), "feature%2Fx%20y");
         assert_eq!(enc_path("feature/x"), "feature/x");
+    }
+
+    #[test]
+    fn workflow_runs_and_jobs_parse_with_steps_and_pr_numbers() {
+        use crate::model::Checks;
+        let now = crate::model::parse_iso("2026-11-18T12:02:00Z").unwrap();
+        let runs_json = serde_json::json!({"workflow_runs": [
+            {
+                "id": 7001,
+                "name": "CI",
+                "head_branch": "fix-bug",
+                "status": "completed",
+                "conclusion": "failure",
+                "run_started_at": "2026-11-18T12:00:00Z",
+                "updated_at": "2026-11-18T12:00:45Z",
+                "html_url": "https://github.com/acme/app/actions/runs/7001",
+                "pull_requests": [{"number": 19}]
+            },
+            {
+                "name": "Fallback ID",
+                "head_branch": "main",
+                "status": "in_progress",
+                "conclusion": null,
+                "run_started_at": "2026-11-18T12:01:00Z",
+                "updated_at": "2026-11-18T12:01:30Z",
+                "html_url": "https://github.com/acme/app/actions/runs/7002"
+            }
+        ]});
+        let runs = super::parse_workflow_runs(&runs_json, "acme/app", now);
+        assert_eq!(runs.len(), 2);
+        assert_eq!((runs[0].id, runs[0].checks, runs[0].duration.as_str()), (7001, Checks::Failing, "45s"));
+        assert_eq!(runs[0].pull_numbers, vec![19]);
+        assert_eq!((runs[1].id, runs[1].checks, runs[1].duration.as_str()), (7002, Checks::Running, "1m 00s"));
+
+        let jobs_json = serde_json::json!({"jobs": [
+            {
+                "id": 910,
+                "name": "test (ubuntu-latest)",
+                "status": "completed",
+                "conclusion": "failure",
+                "started_at": "2026-11-18T12:00:02Z",
+                "completed_at": "2026-11-18T12:00:44Z",
+                "html_url": "https://github.com/acme/app/actions/runs/7001/job/910",
+                "steps": [
+                    {"number": 1, "name": "Checkout", "status": "completed", "conclusion": "success", "started_at": "2026-11-18T12:00:02Z", "completed_at": "2026-11-18T12:00:05Z"},
+                    {"number": 2, "name": "cargo test", "status": "completed", "conclusion": "failure", "started_at": "2026-11-18T12:00:05Z", "completed_at": "2026-11-18T12:00:44Z"}
+                ]
+            }
+        ]});
+        let jobs = super::parse_run_jobs(&jobs_json, now);
+        assert_eq!(jobs.len(), 1);
+        assert_eq!((jobs[0].id, jobs[0].checks, jobs[0].status_label.as_str(), jobs[0].duration.as_str()), (910, Checks::Failing, "failure", "42s"));
+        assert_eq!(jobs[0].steps.len(), 2);
+        assert_eq!((jobs[0].steps[1].number, jobs[0].steps[1].checks, jobs[0].steps[1].duration.as_str()), (2, Checks::Failing, "39s"));
+    }
+
+    #[test]
+    fn strip_ansi_and_tail_log_keep_last_200_lines() {
+        let raw = "\x1b[32mPASS\x1b[0m step 1\r\n\x1b]8;;https://example.com\x07link\x1b]8;;\x07\n\x1b[1;31mFAIL\x1b[0m exit 1";
+        assert_eq!(super::strip_ansi(raw), "PASS step 1\nlink\nFAIL exit 1");
+
+        let many: String = (1..=250).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let tailed = super::tail_log(&many, super::LOG_TAIL_LINES);
+        assert!(tailed.truncated);
+        assert_eq!(tailed.total_lines, 250);
+        assert_eq!(tailed.text.lines().count(), 200);
+        assert!(tailed.text.starts_with("line 51\n"));
+        assert!(tailed.text.ends_with("\nline 250"));
+    }
+
+    #[test]
+    fn explain_actions_write_mentions_actions_permission_on_403() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let gh = super::Gh::new(&crate::config::Config::load());
+        let resp = crate::net::Resp {
+            status: 403,
+            body: r#"{"message":"Resource not accessible by personal access token"}"#.into(),
+            remaining: Some("4990".into()),
+            reset: None,
+            retry_after: None,
+            link: None,
+        };
+        let msg = gh.explain_actions_write(&resp);
+        assert!(msg.contains("Actions write permission"), "{msg}");
+        assert!(msg.contains("Actions: Read and write"), "{msg}");
     }
 }

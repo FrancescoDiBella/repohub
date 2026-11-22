@@ -5,7 +5,7 @@ use rune_kit::{Button, ButtonVariant, ControlSize, Kit, SegmentedControl, TextAr
 
 use crate::claude::{Item, Mode, Run};
 use crate::ui::{self, panel};
-use crate::{App, clones_shim, icons, terminal_page};
+use crate::{App, icons, terminal_page};
 
 /// Prompts offered on an empty chat.
 const STARTERS: [&str; 4] = [
@@ -28,7 +28,7 @@ pub fn claude_tab(s: &App, k: &Kit, i: usize) -> El {
         return web_only(k);
     }
     let r = &s.data.repos[i];
-    let Some(dir) = clones_shim::find(&r.full_name) else {
+    let Some(dir) = s.known_clone(&r.full_name) else {
         return col().w_full().gap(10.0)
             .child(panel(k).padding(20.0).gap(8.0)
                 .child(row().gap(10.0).center_y().child(ui::ico(&icons::SPARK, 18.0, k.c.icon_muted))
