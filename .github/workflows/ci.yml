@@ -37,6 +37,25 @@ jobs:
         run: cargo clippy --release --all-targets -- -D warnings
       - name: Clippy (server)
         run: cargo clippy --release --all-targets --manifest-path server/Cargo.toml -- -D warnings
+      # The flows (tests/flows, CONTRIBUTING "Flows"): the program itself, headless, against the
+      # mock GitHub in tests/mock: start-up, clicks and typing, the element tree checked for what
+      # each screen must show, the requests GitHub would get. A panic, a missing element or a wrong
+      # request fails the job; the stills are kept as the `flows` artifact. The program reuses
+      # what the tests compiled. Rune draws offscreen with Mesa's software Vulkan driver.
+      - name: Software Vulkan driver
+        run: |
+          ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null && exit 0
+          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends mesa-vulkan-drivers libvulkan1
+      - name: Program for the flows
+        run: cargo build --release --bin repohub
+      - name: Flows
+        run: python3 tests/flows/run.py --out flows
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: flows
+          path: flows/
+          if-no-files-found: ignore
       # The web build is built, optimized and measured by the size job.
 
   # What we ship, measured: the desktop program as releases build it and the web build as the
