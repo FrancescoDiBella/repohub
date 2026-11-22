@@ -1,0 +1,142 @@
+# The GitHub API requests RepoHub makes, and requests it must never make: one per line,
+# `allow|deny METHOD /path` with the path as the app sends it (encoded, query left out).
+#
+# Three things read this list, so the three allowlists stay equal:
+# - repohub-server's proxy, `allowed()` in server/src/main.rs (test: server/src/allowlist_cases.rs);
+# - the Android app's GitHubPaths.java (BackendTest.sharedAllowlist);
+# - the app itself (src/allowlist_tests.rs): every request it makes must be an `allow` line.
+# A request added to the app, or a change to one allowlist, that isn't made everywhere fails a
+# test. Add a new request here, with its refused neighbours as `deny` lines.
+
+# --- what the app asks (src/allowlist_tests.rs records these) ---
+allow DELETE /repos/octo/app/pulls/14/requested_reviewers
+allow DELETE /repos/octo/notes/contents/boards/octo/app/feature%252Fx%2520y/Plan%2520%2528v2%2529.excalidraw
+allow DELETE /user/starred/octo/app
+allow GET /notifications
+allow GET /orgs/org/repos
+allow GET /repos/octo/app/actions/jobs/7/logs
+allow GET /repos/octo/app/actions/runs
+allow GET /repos/octo/app/actions/runs/9/jobs
+allow GET /repos/octo/app/assignees
+allow GET /repos/octo/app/branches
+allow GET /repos/octo/app/commits
+allow GET /repos/octo/app/commits/0123abcd
+allow GET /repos/octo/app/commits/0123abcd0123abcd0123abcd0123abcd0123abcd/check-runs
+allow GET /repos/octo/app/compare/main...feature/x
+allow GET /repos/octo/app/contents
+allow GET /repos/octo/app/git/ref/heads/main
+allow GET /repos/octo/app/issues/14
+allow GET /repos/octo/app/issues/14/comments
+allow GET /repos/octo/app/labels
+allow GET /repos/octo/app/languages
+allow GET /repos/octo/app/milestones
+allow GET /repos/octo/app/pulls/14
+allow GET /repos/octo/app/pulls/14/comments
+allow GET /repos/octo/app/pulls/14/files
+allow GET /repos/octo/app/pulls/14/reviews
+allow GET /repos/octo/app/readme
+allow GET /repos/octo/app/releases
+allow GET /repos/octo/app/releases/latest
+allow GET /repos/octo/app/stats/participation
+allow GET /repos/octo/app/tags
+allow GET /repos/octo/notes
+allow GET /repos/octo/notes/contents/boards/octo/app/feature%252Fx%2520y/Plan%2520%2528v2%2529.excalidraw
+allow GET /repos/octo/notes/git/trees/main
+allow GET /search/issues
+allow GET /user
+allow GET /user/repos
+allow GET /user/starred
+allow GET /users/octo
+allow GET /users/octo/orgs
+allow GET /users/octo/repos
+allow PATCH /notifications/threads/123
+allow PATCH /repos/octo/app/issues/14
+allow PATCH /repos/octo/app/releases/200
+allow POST /repos/octo/app/actions/runs/9/rerun
+allow POST /repos/octo/app/actions/runs/9/rerun-failed-jobs
+allow POST /repos/octo/app/git/refs
+allow POST /repos/octo/app/issues
+allow POST /repos/octo/app/issues/14/comments
+allow POST /repos/octo/app/pulls
+allow POST /repos/octo/app/pulls/14/comments
+allow POST /repos/octo/app/pulls/14/requested_reviewers
+allow POST /repos/octo/app/pulls/14/reviews
+allow POST /repos/octo/app/releases
+allow POST /repos/octo/app/releases/generate-notes
+allow PUT /repos/octo/app/pulls/14/merge
+allow PUT /repos/octo/notes/contents/boards/octo/app/feature%252Fx%2520y/Plan%2520%2528v2%2529.excalidraw
+allow PUT /user/starred/octo/app
+
+# --- the same endpoints with other names and numbers ---
+allow GET /repos/octo/app/git/ref/heads/feature/x
+allow GET /repos/octo/app/compare/release/1.0...feature/x
+allow GET /repos/Octo-Org/my.app_2/issues/7
+allow GET /repos/octo/app/commits/0123ABCDEF
+allow PUT /repos/octo/notes/contents/boards/octo/app/main/Plan.excalidraw
+allow DELETE /repos/octo/notes/contents/boards/octo/%252Egithub/main/Ideas.excalidraw
+
+# --- never: repositories, branches, tags, releases, settings, files outside boards/ ---
+deny DELETE /repos/octo/app
+deny PATCH /repos/octo/app
+deny POST /user/repos
+deny POST /repos/octo/app/forks
+deny DELETE /repos/octo/app/git/refs/heads/main
+deny PATCH /repos/octo/app/git/refs/heads/main
+deny DELETE /repos/octo/app/git/refs/tags/v1.0.0
+deny DELETE /repos/octo/app/releases/200
+deny POST /repos/octo/app/releases/200/assets
+deny PATCH /repos/octo/app/releases/latest
+deny GET /repos/octo/app/releases/200
+deny GET /repos/octo/app/releases/tags/v1.0.0
+deny PUT /repos/octo/app/contents/README.md
+deny GET /repos/octo/app/contents/README.md
+deny PUT /repos/octo/app/collaborators/eve
+deny GET /repos/octo/app/collaborators
+deny GET /repos/octo/app/hooks
+deny GET /repos/octo/app/keys
+deny GET /repos/octo/app/actions/secrets
+deny POST /repos/octo/app/actions/runs/9/cancel
+deny POST /repos/octo/app/actions/workflows/1/dispatches
+deny GET /repos/octo/app/git/blobs/abc
+deny GET /user/emails
+deny GET /user/keys
+deny PATCH /user
+deny GET /search/code
+deny PUT /notifications
+deny HEAD /user
+
+# --- never: neighbours of what's allowed ---
+deny GET /repos/octo/app/issues/14x
+deny GET /repos/octo/app/issues/-1
+deny PATCH /repos/octo/app/issues/14/comments
+deny DELETE /repos/octo/app/issues/14/labels
+deny DELETE /repos/octo/app/pulls/14/requested_reviewers/eve
+deny PATCH /notifications/threads/12a
+deny DELETE /user/starred/octo
+deny GET /repos/octo/app/commits/main/check-runs
+deny GET /repos/octo/app/commits/0123ab
+deny GET /repos/octo/app/compare/main...-x
+deny GET /repos/octo/app/compare/main..feature
+deny GET /repos/octo/app/compare/main...a..b
+deny GET /repos/octo/app/git/trees/main/x
+deny GET /repos/octo/app/git/trees/.hidden
+deny PUT /repos/octo/notes/contents/README.md
+deny PUT /repos/octo/notes/contents/boards/o/r/main/x.json
+deny PUT /repos/octo/notes/contents/boards/o/r/x.excalidraw
+deny PUT /repos/octo/notes/contents/boards/o/r/main/sub/x.excalidraw
+deny PUT /repos/octo/notes/contents/boards/o/r/main/.excalidraw
+deny PUT /repos/octo/notes/contents/boards/o/r/main/.hidden.excalidraw
+deny DELETE /repos/octo/notes/contents/boards/o/r/main/x%2Fy.excalidraw
+deny PUT /repos/octo/notes/contents/other/o/r/main/x.excalidraw
+
+# --- never: ways around the checks (traversal, double encoding, odd characters) ---
+deny GET /repos/octo/app/%2e%2e/%2e%2e/user/emails
+deny GET /repos/octo/app/git/ref/heads/%252e%252e/%252e%252e/user/emails
+deny GET /repos/octo/app/commits/0123abcd/../../../../user/emails
+deny GET /repos/octo/app/issues/14/%2e%2e
+deny GET /repos/octo/app//issues/14
+deny GET /repos/octo/app/issues/14%2Fcomments
+deny PUT /repos/octo/notes/contents/boards/o/r/%2E%2E/x.excalidraw
+deny PUT /repos/octo/notes/contents/boards/o/r/main/..%2F..%2Fx.excalidraw
+deny PUT /repos/../user/contents/boards/o/r/main/x.excalidraw
+deny GET /repos/octo/app/issues/14%00

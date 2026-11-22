@@ -74,6 +74,48 @@ public class BackendTest {
         f.delete();
     }
 
+    /** server/allowlist.txt, from the working folder or one above it (Gradle runs in android/app). */
+    private static File sharedList() {
+        for (File d = new File(System.getProperty("user.dir")).getAbsoluteFile(); d != null; d = d.getParentFile()) {
+            File f = new File(d, "server/allowlist.txt");
+            if (f.isFile()) {
+                return f;
+            }
+        }
+        throw new AssertionError("server/allowlist.txt not found above " + System.getProperty("user.dir"));
+    }
+
+    /**
+     * The requests repohub-server's proxy forwards and refuses (server/allowlist.txt, which its
+     * tests and the app's own read too): the backend forwards exactly the same ones.
+     */
+    @Test
+    public void sharedAllowlist() throws Exception {
+        account.token = "tok";
+        List<String> wrong = new ArrayList<>();
+        int count = 0;
+        for (String raw : Files.readAllLines(sharedList().toPath())) {
+            String line = raw.trim();
+            if (line.isEmpty() || line.startsWith("#")) {
+                continue;
+            }
+            String[] parts = line.split("\\s+");
+            assertEquals(line, 3, parts.length);
+            boolean want = parts[0].equals("allow");
+            assertTrue(line, want || parts[0].equals("deny"));
+            count++;
+            int before = http.sent.size();
+            boolean write = !parts[1].equals("GET") && !parts[1].equals("HEAD");
+            Backend.Reply r = backend.handle(parts[1], "gh" + parts[2], null, write ? "{}" : "");
+            boolean forwarded = http.sent.size() > before;
+            if (forwarded != want || (!want && r.status != 403)) {
+                wrong.add(line + " (answered " + r.status + ")");
+            }
+        }
+        assertTrue("the list is read", count > 100);
+        assertTrue("GitHubPaths doesn't do what server/allowlist.txt says:\n" + String.join("\n", wrong), wrong.isEmpty());
+    }
+
     @Test
     public void allowlistMatchesTheServers() {
         assertTrue(GitHubPaths.allowed("GET", "/notifications"));

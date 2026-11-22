@@ -4403,6 +4403,8 @@ pub fn start() {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod load_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod allowlist_tests;
 
 #[cfg(test)]
 mod pin_tests {

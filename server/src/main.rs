@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 use tiny_http::{Header, Method, Request, Response, Server};
 
 mod notes;
+#[cfg(test)]
+mod allowlist_cases;
 
 struct Cfg {
     token: Option<String>,
