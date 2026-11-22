@@ -7,7 +7,11 @@ import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
+import java.security.MessageDigest;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -16,15 +20,170 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * The drawings, kept as .excalidraw files in the app's private storage. Same layout, names and
- * answers as repohub-server's notes (server/src/notes.rs).
+ * answers as repohub-server's notes (server/src/notes.rs): conditional writes ({@code if=}),
+ * deletes into {@code trash/<date>/} for 30 days, every drawing with its git blob id
+ * ({@code api/notes/all}) and board sync's index ({@code api/notes/index}).
  */
 final class Notes {
     static final long MAX_BYTES = 25L << 20;
+    static final long MAX_INDEX_BYTES = 4L << 20;
     private static final AtomicLong TMP = new AtomicLong(1);
+    /** One read-compare-write at a time. */
+    private static final Object LOCK = new Object();
+    private final File data;
     private final File root;
 
     Notes(File dataDir) {
+        this.data = dataDir;
         this.root = new File(dataDir, "notes");
+    }
+
+    /** The git blob id of a file's content (what GitHub calls its sha). */
+    static String blobSha(byte[] content) {
+        try {
+            MessageDigest d = MessageDigest.getInstance("SHA-1");
+            d.update(("blob " + content.length + "\0").getBytes(StandardCharsets.UTF_8));
+            d.update(content);
+            StringBuilder out = new StringBuilder();
+            for (byte b : d.digest()) {
+                out.append(String.format(Locale.ROOT, "%02x", b & 0xff));
+            }
+            return out.toString();
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    private static String today(long offsetDays) {
+        return LocalDate.now(ZoneOffset.UTC).minusDays(offsetDays).toString();
+    }
+
+    private static byte[] readOrNull(File f) {
+        try {
+            return Files.readAllBytes(f.toPath());
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    private static File[] sorted(File dir) {
+        File[] kids = dir.listFiles();
+        if (kids == null) {
+            return new File[0];
+        }
+        Arrays.sort(kids);
+        return kids;
+    }
+
+    /** Moves a drawing to trash/<today>/…, a taken name getting a number; drops trash older than 30 days. */
+    void trash(File file) throws IOException {
+        String rel = root.toPath().relativize(file.toPath()).toString();
+        File day = new File(new File(data, "trash"), today(0));
+        File dest = new File(day, rel);
+        String stem = file.getName().substring(0, file.getName().length() - ".excalidraw".length());
+        for (int n = 2; dest.exists(); n++) {
+            dest = new File(dest.getParentFile(), stem + " " + n + ".excalidraw");
+        }
+        File parent = dest.getParentFile();
+        if (!parent.isDirectory() && !parent.mkdirs()) {
+            throw new IOException("the trash folder can't be created");
+        }
+        Files.move(file.toPath(), dest.toPath(), StandardCopyOption.ATOMIC_MOVE);
+        String cutoff = today(30);
+        for (File d : sorted(new File(data, "trash"))) {
+            if (d.getName().matches("\\d{4}-\\d{2}-\\d{2}") && d.getName().compareTo(cutoff) < 0) {
+                deleteTree(d);
+            }
+        }
+    }
+
+    private static void deleteTree(File f) {
+        for (File k : sorted(f)) {
+            deleteTree(k);
+        }
+        f.delete();
+    }
+
+    /** Every drawing, as {@code GET api/notes/all} lists it. */
+    String listAll() {
+        StringBuilder out = new StringBuilder("[");
+        for (File o : sorted(root)) {
+            for (File r : sorted(o)) {
+                for (File b : sorted(r)) {
+                    for (File f : sorted(b)) {
+                        if (!f.isFile() || !f.getName().endsWith(".excalidraw")) {
+                            continue;
+                        }
+                        byte[] bytes = readOrNull(f);
+                        if (bytes == null) {
+                            continue;
+                        }
+                        String name = f.getName().substring(0, f.getName().length() - ".excalidraw".length());
+                        if (out.length() > 1) {
+                            out.append(',');
+                        }
+                        out.append("{\"repo\":").append(Backend.jsonString(unsegment(o.getName()) + "/" + unsegment(r.getName())))
+                            .append(",\"branch\":").append(Backend.jsonString(unsegment(b.getName())))
+                            .append(",\"name\":").append(Backend.jsonString(unsegment(name)))
+                            .append(",\"sha\":\"").append(blobSha(bytes)).append('"')
+                            .append(",\"updated\":").append(f.lastModified() / 1000)
+                            .append(",\"size\":").append(bytes.length).append('}');
+                    }
+                }
+            }
+        }
+        return out.append(']').toString();
+    }
+
+    /** {@code api/notes/index?repo=owner/name}: board sync's index for that notes repository. */
+    private Backend.Reply index(String method, Map<String, String> q, String body) {
+        String repo = q.getOrDefault("repo", "");
+        if (!validRepo(repo)) {
+            return Backend.Reply.text(400, "repo (owner/name) is required");
+        }
+        File file = new File(new File(data, "notes-sync"), segment(repo.toLowerCase(Locale.ROOT)) + ".json");
+        switch (method) {
+            case "GET": {
+                byte[] b = readOrNull(file);
+                return b == null ? Backend.Reply.text(404, "Nothing synced yet") : Backend.Reply.json(200, new String(b, StandardCharsets.UTF_8));
+            }
+            case "PUT": {
+                byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+                if (bytes.length > MAX_INDEX_BYTES || !body.startsWith("{")) {
+                    return Backend.Reply.text(400, "Expected a sync index (JSON, 4 MB at most)");
+                }
+                try {
+                    write(file, bytes);
+                    return Backend.Reply.text(204, "");
+                } catch (IOException e) {
+                    return Backend.Reply.text(500, "Couldn't save the sync index: " + e.getMessage());
+                }
+            }
+            case "DELETE":
+                file.delete();
+                return Backend.Reply.text(204, "");
+            default:
+                return Backend.Reply.text(405, "Method not allowed");
+        }
+    }
+
+    /** Writes beside and moves in place, so a crash never leaves half a file. */
+    private static void write(File file, byte[] bytes) throws IOException {
+        File folder = file.getParentFile();
+        File tmp = new File(folder, file.getName() + ".tmp." + TMP.getAndIncrement());
+        try {
+            if (!folder.isDirectory() && !folder.mkdirs()) {
+                throw new IOException("the folder can't be created");
+            }
+            try (FileOutputStream out = new FileOutputStream(tmp)) {
+                out.write(bytes);
+                out.getFD().sync();
+            }
+            Files.move(tmp.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        } catch (IOException e) {
+            tmp.delete();
+            throw e;
+        }
     }
 
     static Map<String, String> query(String url) {
@@ -121,9 +280,19 @@ final class Notes {
         return f.length();
     }
 
-    /** Answers `method` on `url` ("api/notes?…" or "api/notes/file?…"). */
+    /** Answers `method` on `url` ("api/notes?…", "api/notes/file?…", "api/notes/all", "api/notes/index?…"). */
     Backend.Reply handle(String method, String url, String body) {
         Map<String, String> q = query(url);
+        int qAt = url.indexOf('?');
+        String route = qAt < 0 ? url : url.substring(0, qAt);
+        if (route.equals("api/notes/all")) {
+            return method.equals("GET") ? Backend.Reply.json(200, listAll()) : Backend.Reply.text(405, "Method not allowed");
+        }
+        if (route.equals("api/notes/index")) {
+            synchronized (LOCK) {
+                return index(method, q, body);
+            }
+        }
         String repo = q.getOrDefault("repo", "");
         String branch = q.getOrDefault("branch", "");
         if (!validRepo(repo) || !validBranch(branch)) {
@@ -167,6 +336,22 @@ final class Notes {
             return Backend.Reply.text(400, "Invalid name: use letters, digits, spaces, _ - . ( ), at most 80 characters");
         }
         File file = new File(folder, segment(name) + ".excalidraw");
+        // `if`: only when the file still has this blob id ("none": only when there is none).
+        String cond = q.get("if");
+        synchronized (LOCK) {
+            if (cond != null && (method.equals("PUT") || method.equals("DELETE"))) {
+                byte[] now = readOrNull(file);
+                String sha = now == null ? null : blobSha(now);
+                boolean same = cond.equals("none") ? sha == null : cond.equals(sha);
+                if (!same) {
+                    return now == null && method.equals("DELETE") ? Backend.Reply.text(404, "No such drawing") : Backend.Reply.text(409, "The drawing changed meanwhile");
+                }
+            }
+            return file(method, folder, file, name, body);
+        }
+    }
+
+    private Backend.Reply file(String method, File folder, File file, String name, String body) {
         switch (method) {
             case "GET":
                 try {
@@ -182,24 +367,23 @@ final class Notes {
                 if (!body.startsWith("{")) {
                     return Backend.Reply.text(400, "Expected an Excalidraw JSON document");
                 }
-                File tmp = new File(folder, segment(name) + ".tmp." + TMP.getAndIncrement());
                 try {
-                    if (!folder.isDirectory() && !folder.mkdirs()) {
-                        throw new IOException("the folder can't be created");
-                    }
-                    try (FileOutputStream out = new FileOutputStream(tmp)) {
-                        out.write(bytes);
-                        out.getFD().sync();
-                    }
-                    Files.move(tmp.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+                    write(file, bytes);
                     return Backend.Reply.text(204, "");
                 } catch (IOException e) {
-                    tmp.delete();
                     return Backend.Reply.text(500, "Couldn't save the drawing: " + e.getMessage());
                 }
             }
             case "DELETE":
-                return file.delete() ? Backend.Reply.text(204, "") : Backend.Reply.text(404, "No such drawing");
+                if (!file.isFile()) {
+                    return Backend.Reply.text(404, "No such drawing");
+                }
+                try {
+                    trash(file);
+                    return Backend.Reply.text(204, "");
+                } catch (IOException e) {
+                    return Backend.Reply.text(500, "Couldn't delete the drawing: " + e.getMessage());
+                }
             default:
                 return Backend.Reply.text(405, "Method not allowed");
         }

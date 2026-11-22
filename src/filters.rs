@@ -1,10 +1,14 @@
 //! Narrowing the Pull requests and Issues pages: a search field and chips for the repository,
 //! the label and whose they are. Each page has its own [`ListFilter`]; nothing is asked of
 //! GitHub, the lists already loaded are filtered as you type.
+//!
+//! The filters are kept between visits, and between runs in the preferences (`"filters"`, next
+//! to the place: [`Saved`]); **Clear** resets them.
 use rune::{El, TextEdit, col, row, text};
+use serde_json::{Value, json};
 use rune_kit::{Button, ButtonVariant, ControlSize, Kit, TextInput};
 
-use crate::model::{Issue, Pull};
+use crate::model::{Issue, Pull, PullState};
 use crate::{App, icons};
 
 /// Which page's filter.
@@ -25,17 +29,47 @@ pub struct ListFilter {
     /// Pull requests only: drafts, and ones whose checks failed.
     pub drafts: bool,
     pub failing: bool,
+    /// Pull requests only: ones where your review is requested.
+    pub review: bool,
 }
 
 impl Default for ListFilter {
     fn default() -> Self {
-        ListFilter { search: TextEdit::new(""), repo: None, label: None, mine: false, drafts: false, failing: false }
+        ListFilter { search: TextEdit::new(""), repo: None, label: None, mine: false, drafts: false, failing: false, review: false }
     }
 }
 
 impl ListFilter {
     pub fn is_empty(&self) -> bool {
-        self.search.text.trim().is_empty() && self.repo.is_none() && self.label.is_none() && !self.mine && !self.drafts && !self.failing
+        self.search.text.trim().is_empty() && self.repo.is_none() && self.label.is_none() && !self.mine && !self.drafts && !self.failing && !self.review
+    }
+
+    /// What's kept in the preferences.
+    pub fn to_json(&self) -> Value {
+        json!({
+            "search": self.search.text.trim(),
+            "repo": self.repo,
+            "label": self.label,
+            "mine": self.mine,
+            "drafts": self.drafts,
+            "failing": self.failing,
+            "review": self.review,
+        })
+    }
+
+    /// A filter read back from the preferences; what's missing or odd is left empty.
+    pub fn from_json(v: &Value) -> ListFilter {
+        let text = |k: &str| v.get(k).and_then(Value::as_str).map(str::trim).filter(|x| !x.is_empty()).map(str::to_owned);
+        let on = |k: &str| v.get(k).and_then(Value::as_bool).unwrap_or(false);
+        ListFilter {
+            search: TextEdit::new(text("search").unwrap_or_default()),
+            repo: text("repo"),
+            label: text("label"),
+            mine: on("mine"),
+            drafts: on("drafts"),
+            failing: on("failing"),
+            review: on("review"),
+        }
     }
 
     pub fn clear(&mut self) {
@@ -66,6 +100,7 @@ impl ListFilter {
             && (!self.mine || p.author.eq_ignore_ascii_case(me))
             && (!self.drafts || p.state == crate::model::PullState::Draft)
             && (!self.failing || p.checks == Some(crate::model::Checks::Failing))
+            && (!self.review || p.review_requested)
     }
 
     pub fn issue(&self, x: &Issue, me: &str) -> bool {
@@ -93,6 +128,75 @@ fn of(s: &mut App, which: Which) -> &mut ListFilter {
     }
 }
 
+/// Both pages' filters and the Pull requests page's state, as kept in the preferences.
+#[derive(Debug, PartialEq)]
+pub struct Saved {
+    pub pulls: Value,
+    pub issues: Value,
+    /// The Pull requests page's state tab: `open`, `draft`, `merged`, `closed`.
+    pub state: &'static str,
+}
+
+impl Saved {
+    pub fn of(s: &App) -> Saved {
+        Saved { pulls: s.pull_filter.to_json(), issues: s.issue_filter.to_json(), state: state_word(s.pr_filter) }
+    }
+
+    pub fn to_json(&self) -> Value {
+        json!({ "pulls": self.pulls, "issues": self.issues, "state": self.state })
+    }
+}
+
+fn state_word(p: PullState) -> &'static str {
+    match p {
+        PullState::Open => "open",
+        PullState::Draft => "draft",
+        PullState::Merged => "merged",
+        PullState::Closed => "closed",
+    }
+}
+
+impl App {
+    /// Saves both pages' filters when they changed since last time (an account's, not the
+    /// sample data's). Called when you move, when a chip is pressed, on the 30-second tick and
+    /// when the app quits, so a search typed is kept too.
+    pub(crate) fn save_filters(&mut self) {
+        if self.data.sample {
+            return;
+        }
+        let now = Saved::of(self).to_json().to_string();
+        if self.saved_filters.as_deref() != Some(now.as_str()) {
+            crate::prefs::set("filters", serde_json::from_str(&now).unwrap_or(Value::Null));
+            self.saved_filters = Some(now);
+        }
+    }
+
+    /// Puts back the filters saved last time.
+    pub(crate) fn restore_filters(&mut self) {
+        let Some(v) = crate::prefs::get("filters") else { return };
+        if let Some(p) = v.get("pulls") {
+            self.pull_filter = ListFilter::from_json(p);
+        }
+        if let Some(i) = v.get("issues") {
+            self.issue_filter = ListFilter::from_json(i);
+        }
+        if let Some(st) = v.get("state").and_then(Value::as_str) {
+            self.pr_filter = [PullState::Open, PullState::Draft, PullState::Merged, PullState::Closed].into_iter().find(|p| state_word(*p) == st).unwrap_or(PullState::Open);
+        }
+        self.saved_filters = Some(Saved::of(self).to_json().to_string());
+    }
+
+    /// The open pull requests that wait for your review (the status-bar line, the Overview's
+    /// panel).
+    pub(crate) fn show_review_requested(&mut self) {
+        self.go(crate::Page::Pulls);
+        self.pr_filter = PullState::Open;
+        self.pull_filter.clear();
+        self.pull_filter.review = true;
+        self.save_filters();
+    }
+}
+
 /// The filter bar of a page. `repos` and `labels` are the ones in the list it filters.
 pub fn bar(s: &App, k: &Kit, which: Which, repos: Vec<String>, labels: Vec<String>) -> El {
     let (f, tag, what) = match which {
@@ -109,15 +213,16 @@ pub fn bar(s: &App, k: &Kit, which: Which, repos: Vec<String>, labels: Vec<Strin
             .build(k).key(key)
     };
     let mut top_row = row().w_full().gap(8.0).center_y().flex_wrap().child(search)
-        .child(chip(mine_label.to_owned(), f.mine, format!("{tag}-mine")).on_press(move |s: &mut App| { let f = of(s, which); f.mine = !f.mine; }));
+        .child(chip(mine_label.to_owned(), f.mine, format!("{tag}-mine")).on_press(move |s: &mut App| { let f = of(s, which); f.mine = !f.mine; s.save_filters(); }));
     if which == Which::Pulls {
         top_row = top_row
-            .child(chip("Drafts".to_owned(), f.drafts, format!("{tag}-drafts")).on_press(|s: &mut App| s.pull_filter.drafts = !s.pull_filter.drafts))
-            .child(chip("Failing checks".to_owned(), f.failing, format!("{tag}-failing")).on_press(|s: &mut App| s.pull_filter.failing = !s.pull_filter.failing));
+            .child(chip("Review requested".to_owned(), f.review, format!("{tag}-review")).on_press(|s: &mut App| { s.pull_filter.review = !s.pull_filter.review; s.save_filters(); }))
+            .child(chip("Drafts".to_owned(), f.drafts, format!("{tag}-drafts")).on_press(|s: &mut App| { s.pull_filter.drafts = !s.pull_filter.drafts; s.save_filters(); }))
+            .child(chip("Failing checks".to_owned(), f.failing, format!("{tag}-failing")).on_press(|s: &mut App| { s.pull_filter.failing = !s.pull_filter.failing; s.save_filters(); }));
     }
     if !f.is_empty() {
         top_row = top_row.child(Button::new("Clear").icon(&icons::CROSS).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
-            .on_press(move |s: &mut App| of(s, which).clear()).build(k).key(format!("{tag}-clear")));
+            .on_press(move |s: &mut App| { of(s, which).clear(); s.save_filters(); }).build(k).key(format!("{tag}-clear")));
     }
     let mut out = col().w_full().gap(8.0).key(format!("{tag}-filters")).child(top_row);
     let group = |title: &str, values: Vec<String>, picked: &Option<String>, kind: &'static str| {
@@ -132,6 +237,7 @@ pub fn bar(s: &App, k: &Kit, which: Which, repos: Vec<String>, labels: Vec<Strin
                 let f = of(s, which);
                 let slot = if kind == "repo" { &mut f.repo } else { &mut f.label };
                 *slot = if on { None } else { Some(value.clone()) };
+                s.save_filters();
             }));
         }
         r
@@ -168,7 +274,7 @@ mod tests {
     }
 
     fn pull(number: u32, title: &str, repo: &str, author: &str) -> Pull {
-        Pull { number, title: title.into(), repo: repo.into(), author: author.into(), state: PullState::Open, checks: None, updated_at: 0, comments: 0, url: String::new(), labels: Vec::new() }
+        Pull { number, title: title.into(), repo: repo.into(), author: author.into(), state: PullState::Open, checks: None, updated_at: 0, comments: 0, url: String::new(), labels: Vec::new(), assignees: Vec::new(), review_requested: false }
     }
 
     #[test]
@@ -207,6 +313,25 @@ mod tests {
         assert!(f.pull(&draft, "alice") && !f.pull(&red, "alice") && !f.is_empty());
         let f = ListFilter { failing: true, ..ListFilter::default() };
         assert!(!f.pull(&draft, "alice") && f.pull(&red, "alice"));
+    }
+
+    #[test]
+    fn review_requested_narrows_and_filters_round_trip_through_the_preferences() {
+        let mut waiting = pull(8, "Fix vocab", "octo/app", "bob");
+        waiting.review_requested = true;
+        let other = pull(9, "Other", "octo/app", "bob");
+        let f = ListFilter { review: true, ..ListFilter::default() };
+        assert!(f.pull(&waiting, "alice") && !f.pull(&other, "alice") && !f.is_empty());
+
+        let f = ListFilter { search: TextEdit::new(" vocab "), repo: Some("octo/app".into()), label: Some("bug".into()), mine: true, drafts: true, failing: true, review: true };
+        let back = ListFilter::from_json(&f.to_json());
+        assert_eq!(back.search.text, "vocab");
+        assert_eq!((back.repo.as_deref(), back.label.as_deref()), (Some("octo/app"), Some("bug")));
+        assert!(back.mine && back.drafts && back.failing && back.review);
+        // Missing or odd values are left empty.
+        let odd = ListFilter::from_json(&serde_json::json!({ "search": 3, "repo": "", "mine": "yes" }));
+        assert!(odd.is_empty());
+        assert!(ListFilter::from_json(&ListFilter::default().to_json()).is_empty());
     }
 
     #[test]

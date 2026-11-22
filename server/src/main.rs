@@ -489,10 +489,55 @@ fn check_origin_and_preflight(req: &Request, host_header: &str) -> Result<(), (u
     Ok(())
 }
 
-/// Which proxied API calls are allowed: the exact read endpoints RepoHub uses, starring, and the few
-/// writes the app makes (create an issue, a branch, a pull request or a release, close an issue,
-/// merge a pull request, publish a draft release). Nothing that deletes, rewrites, uploads, or
-/// exposes administrative repository data.
+/// One segment of a board's path in a notes repository, as the app writes it (its notes
+/// segment encoding, decoded once): `[A-Za-z0-9_.-]` and `%XX`, not empty, no leading dot.
+fn board_segment(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.is_empty() || b[0] == b'.' || s.len() > 255 {
+        return false;
+    }
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            c if c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.') => i += 1,
+            b'%' if i + 2 < b.len() && b[i + 1].is_ascii_hexdigit() && b[i + 2].is_ascii_hexdigit() => i += 3,
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// `boards/<owner>/<repo>/<branch>/<name>.excalidraw` (after `contents/`): the only files board
+/// sync reads and writes in the notes repository.
+fn board_file(rest: &[&str]) -> bool {
+    rest.len() == 6 && rest[0] == "contents" && rest[1] == "boards" && rest[2..].iter().all(|s| board_segment(s))
+        && rest[5].strip_suffix(".excalidraw").is_some_and(|stem| !stem.is_empty())
+}
+
+/// A board's contents path, checked on the raw address before anything is decoded:
+/// `/repos/{o}/{r}/contents/boards/…` where each board segment is `[A-Za-z0-9_.-]` or `%25XX`
+/// (the app's `%XX`, itself encoded). No `..`, no empty segment, no encoded slash (`%2F`) or dot:
+/// GitHub reads `%25` back as `%`, so the file names keep their `%` signs. Returns the path
+/// decoded once, for [`allowed`].
+fn board_contents_path(raw: &str) -> Option<String> {
+    let seg: Vec<&str> = raw.strip_prefix('/')?.split('/').collect();
+    let name = |s: &str| !s.is_empty() && !s.starts_with('.') && s.len() <= 100 && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'));
+    let raw_segment = |s: &str| {
+        let b = s.as_bytes();
+        let mut i = 0;
+        while i < b.len() {
+            match b[i] {
+                c if c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.') => i += 1,
+                b'%' if i + 4 < b.len() && &b[i + 1..i + 3] == b"25" && b[i + 3].is_ascii_hexdigit() && b[i + 4].is_ascii_hexdigit() => i += 5,
+                _ => return false,
+            }
+        }
+        !b.is_empty() && b[0] != b'.'
+    };
+    let ok = seg.len() == 9 && seg[0] == "repos" && name(seg[1]) && name(seg[2]) && seg[3] == "contents" && seg[4] == "boards" && seg[5..].iter().all(|s| raw_segment(s));
+    ok.then(|| raw.replace("%25", "%"))
+}
+
 /// A branch name GitHub takes (the app's `github::valid_branch`): no spaces, no `..`, no
 /// leading `-`, `/` or `.`, none of `~^:?*[\`.
 fn branch_name(name: &str) -> bool {
@@ -512,6 +557,11 @@ fn compare_spec(spec: &str) -> bool {
     spec.split_once("...").is_some_and(|(base, head)| branch_name(base) && branch_name(head))
 }
 
+/// Which proxied API calls are allowed: the exact read endpoints RepoHub uses, starring, and the few
+/// writes the app makes (create an issue, a branch, a pull request or a release, close an issue,
+/// merge a pull request, publish a draft release, triage an issue, and board sync's writes to
+/// one board file in the notes repository). Nothing that deletes repositories, branches, releases
+/// or tags, rewrites, uploads, or exposes administrative repository data.
 fn allowed(method: &Method, path: &str) -> bool {
     let p = path.split('?').next().unwrap_or("");
     let seg: Vec<&str> = p.trim_start_matches('/').split('/').collect();
@@ -535,6 +585,16 @@ fn allowed(method: &Method, path: &str) -> bool {
                 return true;
             }
             if repo {
+                // Board sync: the notes repository itself (exists, private, default branch), its
+                // file list, and its boards.
+                if rest.is_empty() || board_file(rest) {
+                    return true;
+                }
+                if let ["git", "trees", r] = rest
+                    && !r.is_empty() && !r.starts_with('.') && r.len() <= 100 && r.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+                {
+                    return true;
+                }
                 match rest {
                     ["actions", "runs"]
                     | ["stats", "participation"]
@@ -548,6 +608,10 @@ fn allowed(method: &Method, path: &str) -> bool {
                     | ["releases"]
                     | ["releases", "latest"]
                     | ["tags"] => return true,
+                    // A repository's labels, assignable people and milestones (triage pickers).
+                    | ["labels"]
+                    | ["assignees"]
+                    | ["milestones"] => return true,
                     _ => {}
                 }
                 if rest.len() >= 4 && rest[0] == "git" && rest[1] == "ref" && rest[2] == "heads" && rest[3..].iter().all(|s| !s.is_empty()) {
@@ -585,13 +649,20 @@ fn allowed(method: &Method, path: &str) -> bool {
             false
         }
         Method::Put if repo && rest.len() == 3 && rest[0] == "pulls" && number(rest[1]) && rest[2] == "merge" => true,
+        // Triage also edits an issue's labels, assignees, milestone, title and description (the
+        // PATCH below) and asks for reviews (POST). Taking back a review request on one pull
+        // request is the only DELETE in a repository.
+        Method::Delete if repo && rest.len() == 3 && rest[0] == "pulls" && number(rest[1]) && rest[2] == "requested_reviewers" => true,
+        // Board sync writes one board, under boards/ and ending in .excalidraw, nothing else.
+        Method::Put | Method::Delete if repo && board_file(rest) => true,
         Method::Put | Method::Delete => seg.len() == 4 && seg[0] == "user" && seg[1] == "starred" && !seg[2].is_empty() && !seg[3].is_empty(),
         // Creating an issue, a pull request, a branch or a release (and its generated notes);
-        // commenting; reviewing a pull request; re-running a workflow.
+        // commenting; reviewing a pull request; asking for a review; re-running a workflow.
         Method::Post => repo && (matches!(rest, ["issues"] | ["pulls"] | ["git", "refs"] | ["releases"] | ["releases", "generate-notes"])
-            || (rest.len() == 3 && number(rest[1]) && matches!((rest[0], rest[2]), ("issues", "comments") | ("pulls", "reviews") | ("pulls", "comments")))
+            || (rest.len() == 3 && number(rest[1]) && matches!((rest[0], rest[2]), ("issues", "comments") | ("pulls", "reviews") | ("pulls", "comments") | ("pulls", "requested_reviewers")))
             || (rest.len() == 4 && rest[0] == "actions" && rest[1] == "runs" && number(rest[2]) && matches!(rest[3], "rerun" | "rerun-failed-jobs"))),
-        // Closing or reopening an issue; saving or publishing a draft release (by its number);
+        // Closing or reopening an issue, and editing its labels, assignees, milestone, title and
+        // description (pull requests too); saving or publishing a draft release (by its number);
         // marking one notification as read.
         Method::Patch => (repo && rest.len() == 2 && (rest[0] == "issues" || rest[0] == "releases") && number(rest[1]))
             || (seg.len() == 3 && seg[0] == "notifications" && seg[1] == "threads" && number(seg[2])),
@@ -683,7 +754,8 @@ fn proxy(cfg: &Cfg, mut req: Request) {
         return;
     }
     let raw_path = full_path.split('?').next().unwrap_or("");
-    let Some(decoded_path) = validate_and_decode_path(raw_path) else {
+    let board = board_contents_path(raw_path);
+    let Some(decoded_path) = board.clone().or_else(|| validate_and_decode_path(raw_path)) else {
         let _ = req.respond(text(403, "Path traversal or invalid characters in path"));
         return;
     };
@@ -693,8 +765,14 @@ fn proxy(cfg: &Cfg, mut req: Request) {
     }
     let accept = header(&req, "Accept").unwrap_or_else(|| "application/vnd.github+json".into());
     let method = req.method().as_str().to_owned();
+    // A board (base64 in JSON) may be large; anything else is a short JSON body.
+    let limit: u64 = if board.is_some() { 16 << 20 } else { 1 << 16 };
     let mut body = Vec::new();
-    let _ = req.as_reader().take(1 << 16).read_to_end(&mut body);
+    let _ = req.as_reader().take(limit + 1).read_to_end(&mut body);
+    if body.len() as u64 > limit {
+        let _ = req.respond(text(413, "Too much to send"));
+        return;
+    }
     let mut r = cfg.agent.request(&method, &format!("{}{}", cfg.api, full_path))
         .set("Accept", &accept)
         .set("X-GitHub-Api-Version", "2022-11-28");
@@ -1088,6 +1166,126 @@ mod tests {
         assert!(!allowed(&Method::Post, "/repos/owner/repo/actions/runs/bad/rerun"));
         assert!(!allowed(&Method::Post, "/repos/owner/repo/actions/runs/42/cancel"));
         assert!(!allowed(&Method::Delete, "/repos/owner/repo/actions/runs/42/logs"));
+    }
+
+    #[test]
+    fn proxy_triage_allowlist() {
+        // The pickers' choices: exactly these three lists, nothing under them, and only read.
+        for p in ["/repos/owner/repo/labels", "/repos/owner/repo/labels?per_page=100", "/repos/owner/repo/assignees?per_page=100",
+            "/repos/owner/repo/milestones?state=open&per_page=100"] {
+            assert!(allowed(&Method::Get, p), "{p}");
+        }
+        for p in ["/repos/owner/repo/labels/bug", "/repos/owner/repo/assignees/alice", "/repos/owner/repo/milestones/3",
+            "/repos/owner/repo/milestones/3/labels", "/repos/owner/repo/collaborators", "/repos/owner/repo/issues/7/labels", "/labels"] {
+            assert!(!allowed(&Method::Get, p), "{p}");
+        }
+        // `/repos/owner/labels` is the repository named "labels" (read for board sync), not a list.
+        assert!(allowed(&Method::Get, "/repos/owner/labels"));
+        assert!(!allowed(&Method::Get, "/repos/owner/labels/labels/bug"));
+        for m in [Method::Post, Method::Put, Method::Patch, Method::Delete] {
+            assert!(!allowed(&m, "/repos/owner/repo/labels"), "{m:?} labels: creating labels is out of scope");
+            assert!(!allowed(&m, "/repos/owner/repo/milestones"), "{m:?} milestones");
+            assert!(!allowed(&m, "/repos/owner/repo/labels/bug"), "{m:?} one label");
+        }
+        // Labels, assignees, milestone, title and description: one PATCH on the issue.
+        assert!(allowed(&Method::Patch, "/repos/owner/repo/issues/7"));
+        assert!(!allowed(&Method::Patch, "/repos/owner/repo/pulls/7"), "a pull request's own fields aren't edited");
+        assert!(!allowed(&Method::Post, "/repos/owner/repo/issues/7/labels"));
+        assert!(!allowed(&Method::Delete, "/repos/owner/repo/issues/7/labels/bug"));
+        assert!(!allowed(&Method::Post, "/repos/owner/repo/issues/7/assignees"));
+        assert!(!allowed(&Method::Delete, "/repos/owner/repo/issues/7/assignees"));
+        // Asking for a review and taking the request back: digits for the number, nothing next to it.
+        assert!(allowed(&Method::Post, "/repos/owner/repo/pulls/7/requested_reviewers"));
+        assert!(allowed(&Method::Delete, "/repos/owner/repo/pulls/7/requested_reviewers"));
+        assert!(allowed(&Method::Get, "/repos/owner/repo/pulls/7"), "read with the conversation");
+        for p in ["/repos/owner/repo/pulls/x/requested_reviewers", "/repos/owner/repo/pulls/7a/requested_reviewers", "/repos/owner/repo/pulls//requested_reviewers",
+            "/repos/owner/repo/pulls/7/requested_reviewers/alice", "/repos/owner/repo/pulls/7/requested_reviewer", "/repos/owner/repo/issues/7/requested_reviewers",
+            "/repos/owner/repo/requested_reviewers", "/repos/owner/repo/pulls/requested_reviewers"] {
+            assert!(!allowed(&Method::Post, p), "POST {p}");
+            assert!(!allowed(&Method::Delete, p), "DELETE {p}");
+        }
+        assert!(!allowed(&Method::Put, "/repos/owner/repo/pulls/7/requested_reviewers"));
+        assert!(!allowed(&Method::Patch, "/repos/owner/repo/pulls/7/requested_reviewers"));
+        // DELETE anywhere else in a repository stays refused.
+        for p in ["/repos/owner/repo", "/repos/owner/repo/pulls/7", "/repos/owner/repo/issues/7", "/repos/owner/repo/pulls/7/reviews/1",
+            "/repos/owner/repo/pulls/7/merge", "/repos/owner/repo/issues/7/comments", "/repos/owner/repo/labels", "/repos/owner/repo/milestones/3",
+            "/repos/owner/repo/git/refs/heads/main", "/repos/owner/repo/branches/main"] {
+            assert!(!allowed(&Method::Delete, p), "DELETE {p}");
+        }
+        // Encoded slashes or dots never reach the allowlist.
+        assert!(validate_and_decode_path("/repos/owner/repo/pulls/7%2frequested_reviewers").is_none());
+        assert!(validate_and_decode_path("/repos/owner/repo/pulls/7/%2e%2e/requested_reviewers").is_none());
+    }
+
+    #[test]
+    fn board_sync_allowlist() {
+        let board = "/repos/me/repohub-notes/contents/boards/octo/app/feature%2Fx%20y/Plan%20%28v2%29.excalidraw";
+        for m in [Method::Get, Method::Put, Method::Delete] {
+            assert!(allowed(&m, board), "{m:?}");
+            assert!(allowed(&m, "/repos/me/notes/contents/boards/o/r/main/Plan.excalidraw"), "{m:?}");
+        }
+        assert!(!allowed(&Method::Post, board));
+        assert!(!allowed(&Method::Patch, board));
+        // The repository itself and its file list: read only.
+        assert!(allowed(&Method::Get, "/repos/me/repohub-notes"));
+        assert!(allowed(&Method::Get, "/repos/me/repohub-notes/git/trees/main?recursive=1"));
+        assert!(!allowed(&Method::Put, "/repos/me/repohub-notes"));
+        assert!(!allowed(&Method::Delete, "/repos/me/repohub-notes"));
+        assert!(!allowed(&Method::Post, "/repos/me/repohub-notes/git/trees"));
+        assert!(!allowed(&Method::Get, "/repos/me/repohub-notes/git/trees/feature/x"));
+        assert!(!allowed(&Method::Get, "/repos/me/repohub-notes/git/trees/.."));
+        assert!(!allowed(&Method::Get, "/repos/me/repohub-notes/git/blobs/abc123"));
+        // Writes stay narrow: under boards/, four levels deep, ending in .excalidraw.
+        for bad in [
+            "/repos/o/r/contents/README.md",
+            "/repos/o/r/contents/.github/workflows/x.yml",
+            "/repos/o/r/contents/boards/../x",
+            "/repos/o/r/contents/boards/o/r/main/x.json",
+            "/repos/o/r/contents/boards/o/r/main/.excalidraw",
+            "/repos/o/r/contents/boards/o/r/x.excalidraw",
+            "/repos/o/r/contents/boards/o/r/main/sub/x.excalidraw",
+            "/repos/o/r/contents/boards/o//main/x.excalidraw",
+            "/repos/o/r/contents/boards/o/r/../x.excalidraw",
+            "/repos/o/r/contents/boards/o/r/main/.hidden.excalidraw",
+            "/repos/o/r/contents/boards/o/r/main/a b.excalidraw",
+            "/repos/o/r/contents/boards/o/r/main/x.excalidraw/extra",
+            "/repos/o/r/contents/notes/o/r/main/x.excalidraw",
+            "/repos/o/r/contents",
+        ] {
+            assert!(!allowed(&Method::Put, bad), "PUT {bad}");
+            assert!(!allowed(&Method::Delete, bad), "DELETE {bad}");
+        }
+        assert!(allowed(&Method::Get, "/repos/o/r/contents"), "the Code tab's root listing is unchanged");
+        assert!(!allowed(&Method::Get, "/repos/o/r/contents/README.md"), "other files stay unreadable");
+        assert!(!allowed(&Method::Get, "/repos/o/r/contents/.github/workflows/x.yml"));
+    }
+
+    #[test]
+    fn board_paths_are_checked_before_decoding() {
+        // What the app sends: its `%XX` segment encoding, itself encoded as `%25XX`.
+        let raw = "/repos/me/notes/contents/boards/octo/app/feature%252Fx%2520y/Plan%2520%2528v2%2529.excalidraw";
+        assert_eq!(board_contents_path(raw).as_deref(), Some("/repos/me/notes/contents/boards/octo/app/feature%2Fx%20y/Plan%20%28v2%29.excalidraw"));
+        assert!(allowed(&Method::Put, &board_contents_path(raw).unwrap()));
+        // A branch named `..` is one folder, `%2E.`, never a step up.
+        assert!(board_contents_path("/repos/me/notes/contents/boards/o/r/%252E./x.excalidraw").is_some());
+        for bad in [
+            "/repos/me/notes/contents/boards/o/r/feature%2Fx/x.excalidraw", // an encoded slash
+            "/repos/me/notes/contents/boards/o/r/%2e%2e/x.excalidraw",
+            "/repos/me/notes/contents/boards/o/r/../x.excalidraw",
+            "/repos/me/notes/contents/boards/o/r/main/.x.excalidraw",
+            "/repos/me/notes/contents/boards/o/r//x.excalidraw",
+            "/repos/me/notes/contents/boards/o/r/main/x%25.excalidraw",
+            "/repos/me/notes/contents/boards/o/r/main/x%252.excalidraw",
+            "/repos/me/notes/contents/boards/o/r/main/x%5Cy.excalidraw",
+            "/repos/me/notes/contents/boards/o/r/main/x%00.excalidraw",
+            "/repos/me/notes/contents/README.md",
+            "/repos/me/notes/contents/boards/o/r/main/sub/x.excalidraw",
+            "/repos/.me/notes/contents/boards/o/r/main/x.excalidraw",
+        ] {
+            assert_eq!(board_contents_path(bad), None, "{bad}");
+        }
+        // Everything else still goes through the general check, which refuses `%` after decoding.
+        assert_eq!(validate_and_decode_path("/repos/me/notes/contents/boards/o/r/feature%252Fx/x.excalidraw"), None);
     }
 
     #[test]

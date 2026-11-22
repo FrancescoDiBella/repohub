@@ -76,6 +76,50 @@ final class GitHubPaths {
         }
     }
 
+    private static boolean name(String s) {
+        return !s.isEmpty() && !s.startsWith(".") && s.length() <= 100 && s.matches("[A-Za-z0-9._-]+");
+    }
+
+    /** One board segment as the app writes it (decoded once): [A-Za-z0-9_.-] and %XX, no leading dot. */
+    private static boolean boardSegment(String s) {
+        return !s.isEmpty() && !s.startsWith(".") && s.length() <= 255 && s.matches("([A-Za-z0-9_.-]|%[0-9A-Fa-f]{2})+");
+    }
+
+    /** {@code contents/boards/<owner>/<repo>/<branch>/<name>.excalidraw}: the only files board sync touches. */
+    private static boolean boardFile(String[] rest) {
+        if (rest.length != 6 || !rest[0].equals("contents") || !rest[1].equals("boards")) {
+            return false;
+        }
+        for (int i = 2; i < 6; i++) {
+            if (!boardSegment(rest[i])) {
+                return false;
+            }
+        }
+        return rest[5].endsWith(".excalidraw") && rest[5].length() > ".excalidraw".length();
+    }
+
+    /**
+     * A board's contents path, checked on the raw address before anything is decoded, as
+     * repohub-server's {@code board_contents_path}: each board segment is [A-Za-z0-9_.-] or
+     * %25XX (the app's %XX, itself encoded). No "..", empty segment, encoded slash or dot.
+     * Returns the path decoded once, or null.
+     */
+    static String boardContentsPath(String raw) {
+        if (!raw.startsWith("/")) {
+            return null;
+        }
+        String[] seg = raw.substring(1).split("/", -1);
+        if (seg.length != 9 || !seg[0].equals("repos") || !name(seg[1]) || !name(seg[2]) || !seg[3].equals("contents") || !seg[4].equals("boards")) {
+            return null;
+        }
+        for (int i = 5; i < 9; i++) {
+            if (seg[i].isEmpty() || seg[i].startsWith(".") || !seg[i].matches("([A-Za-z0-9_.-]|%25[0-9A-Fa-f]{2})+")) {
+                return null;
+            }
+        }
+        return raw.replace("%25", "%");
+    }
+
     private static boolean number(String s) {
         return !s.isEmpty() && s.matches("[0-9]+");
     }
@@ -106,6 +150,13 @@ final class GitHubPaths {
                     return true;
                 }
                 if (repo) {
+                    // Board sync: the notes repository itself, its file list, and its boards.
+                    if (rest.length == 0 || boardFile(rest)) {
+                        return true;
+                    }
+                    if (rest.length == 3 && rest[0].equals("git") && rest[1].equals("trees") && name(rest[2])) {
+                        return true;
+                    }
                     if (rest.length == 2 && ((rest[0].equals("actions") && rest[1].equals("runs")) || (rest[0].equals("stats") && rest[1].equals("participation")))) {
                         return true;
                     }
@@ -114,6 +165,10 @@ final class GitHubPaths {
                     }
                     // The latest release (not one release by id or tag).
                     if (rest.length == 2 && rest[0].equals("releases") && rest[1].equals("latest")) {
+                        return true;
+                    }
+                    // A repository's labels, assignable people and milestones (triage pickers).
+                    if (rest.length == 1 && (rest[0].equals("labels") || rest[0].equals("assignees") || rest[0].equals("milestones"))) {
                         return true;
                     }
                     if (rest.length >= 4 && rest[0].equals("git") && rest[1].equals("ref") && rest[2].equals("heads")) {
@@ -158,19 +213,23 @@ final class GitHubPaths {
                 if (repo && rest.length == 3 && rest[0].equals("pulls") && number(rest[1]) && rest[2].equals("merge")) {
                     return true;
                 }
-                return starred(seg);
+                // Board sync writes one board, under boards/ and ending in .excalidraw, nothing else.
+                return (repo && boardFile(rest)) || starred(seg);
             case "DELETE":
-                return starred(seg);
+                // Taking back a review request and deleting a board file are the only DELETEs in a repository.
+                return requestedReviewers(repo, rest) || (repo && boardFile(rest)) || starred(seg);
             case "POST":
                 // Creating an issue, a pull request, a branch or a release (and its generated notes);
-                // commenting; reviewing a pull request; re-running a workflow.
+                // commenting; reviewing a pull request; asking for a review; re-running a workflow.
                 return repo && ((rest.length == 1 && (rest[0].equals("issues") || rest[0].equals("pulls") || rest[0].equals("releases")))
+                    || requestedReviewers(repo, rest)
                     || (rest.length == 2 && rest[0].equals("git") && rest[1].equals("refs"))
                     || (rest.length == 2 && rest[0].equals("releases") && rest[1].equals("generate-notes"))
                     || (rest.length == 3 && number(rest[1]) && ((rest[0].equals("issues") && rest[2].equals("comments")) || (rest[0].equals("pulls") && (rest[2].equals("reviews") || rest[2].equals("comments")))))
                     || (rest.length == 4 && rest[0].equals("actions") && rest[1].equals("runs") && number(rest[2]) && (rest[3].equals("rerun") || rest[3].equals("rerun-failed-jobs"))));
             case "PATCH":
-                // Closing or reopening an issue; saving or publishing a draft release (by its number);
+                // Closing or reopening an issue, and editing its labels, assignees, milestone, title and
+                // description (pull requests too); saving or publishing a draft release (by its number);
                 // marking one notification as read.
                 return (repo && rest.length == 2 && (rest[0].equals("issues") || rest[0].equals("releases")) && number(rest[1]))
                     || (seg.length == 3 && seg[0].equals("notifications") && seg[1].equals("threads") && number(seg[2]));
@@ -203,5 +262,10 @@ final class GitHubPaths {
 
     private static boolean starred(String[] seg) {
         return seg.length == 4 && seg[0].equals("user") && seg[1].equals("starred") && !seg[2].isEmpty() && !seg[3].isEmpty();
+    }
+
+    /** `/repos/{o}/{r}/pulls/{digits}/requested_reviewers`, nothing under it. */
+    private static boolean requestedReviewers(boolean repo, String[] rest) {
+        return repo && rest.length == 3 && rest[0].equals("pulls") && number(rest[1]) && rest[2].equals("requested_reviewers");
     }
 }

@@ -256,6 +256,12 @@ impl Gh {
         }
     }
 
+    /// One request through the same transport, answered as it came (board sync reads the
+    /// status itself: a 409 there means "changed meanwhile", not a failure).
+    pub async fn send(&self, method: &str, path: &str, accept: &str, body: &str) -> Result<Resp, String> {
+        self.t.send_body(method, path, accept, body).await
+    }
+
     /// Sends a JSON body and returns the JSON answer (writes: POST, PATCH, PUT).
     async fn write(&self, method: &str, path: &str, body: Value) -> Result<Value, String> {
         let r = self.t.send_body(method, path, JSON, &body.to_string()).await?;
@@ -334,7 +340,7 @@ pub fn parse_pull(v: &Value) -> Pull {
     let merged = v.get("pull_request").and_then(|p| p.get("merged_at")).is_some_and(|m| !m.is_null());
     let state = if merged { PullState::Merged } else if s(v, "state") == "closed" { PullState::Closed } else if b(v, "draft") { PullState::Draft } else { PullState::Open };
     let updated_at = s(v, "updated_at");
-    Pull { labels: labels_of(v),
+    Pull { labels: labels_of(v), assignees: logins_of(v, "assignees"), review_requested: false,
         number: n(v, "number"),
         title: s(v, "title"),
         repo: repo_from_url(&s(v, "repository_url")),
@@ -358,7 +364,10 @@ pub fn parse_thread(issue: &Value, comments: &Value, pull: Option<(&Value, &Valu
     let mut more = n(issue, "comments") as usize > entries.len();
     let mut standing = if s(issue, "state") == "closed" { Standing::Closed } else { Standing::Open };
     let mut branches = None;
+    let (mut requested, mut reviewed) = (Vec::new(), Vec::new());
     if let Some((detail, reviews)) = pull {
+        requested = crate::triage::logins(detail, "requested_reviewers");
+        reviewed = crate::triage::reviewed_of(reviews);
         if b(detail, "merged") {
             standing = Standing::Merged;
         } else if standing == Standing::Open && b(detail, "draft") {
@@ -391,7 +400,11 @@ pub fn parse_thread(issue: &Value, comments: &Value, pull: Option<(&Value, &Valu
         author: who(issue),
         standing,
         url: s(issue, "html_url"),
-        labels: issue.get("labels").and_then(Value::as_array).into_iter().flatten().map(|l| (s(l, "name"), hex_hue(&s(l, "color")))).collect(),
+        labels: labels_of(issue),
+        assignees: logins_of(issue, "assignees"),
+        milestone: crate::triage::milestone_of(issue),
+        requested,
+        reviewed,
         branches,
         entries,
         more,
@@ -806,8 +819,8 @@ impl Gh {
         Ok(names)
     }
 
-    pub async fn create_issue(&self, full: &str, title: &str, body: &str) -> Result<Created, String> {
-        let v = self.write("POST", &format!("/repos/{full}/issues"), json!({ "title": title, "body": body })).await?;
+    pub async fn create_issue(&self, full: &str, title: &str, body: &str, labels: &[String], assignees: &[String]) -> Result<Created, String> {
+        let v = self.write("POST", &format!("/repos/{full}/issues"), issue_body(title, body, labels, assignees)).await?;
         Ok(Created { number: n(&v, "number"), url: s(&v, "html_url") })
     }
 
@@ -905,6 +918,32 @@ impl Gh {
 
     pub async fn close_issue(&self, full: &str, number: u32) -> Result<(), String> {
         self.write("PATCH", &format!("/repos/{full}/issues/{number}"), json!({ "state": "closed", "state_reason": "completed" })).await.map(|_| ())
+    }
+
+    /// A repository's labels, assignable people or open milestones (the first 100).
+    pub async fn choices(&self, full: &str, source: crate::triage::Source) -> Result<crate::triage::Choices, String> {
+        let (v, resp) = self.get_resp(&source.path(full)).await?;
+        let items = source.read(&v);
+        let more = next_page_path(resp.link.as_deref(), &self.api_base).is_some() || v.as_array().is_some_and(|a| a.len() >= 100);
+        Ok(crate::triage::Choices { items, more })
+    }
+
+    /// Sends a triage change and reads what the issue or pull request is now from GitHub's
+    /// answer to the last request (both `PATCH` on the issue and the reviewer requests answer
+    /// with the whole item).
+    pub async fn triage(&self, full: &str, number: u32, change: &crate::triage::Change) -> Result<crate::triage::Applied, String> {
+        let mut last = Value::Null;
+        for (method, path, body) in change.requests(full, number) {
+            last = self.write(method, &path, body).await?;
+        }
+        Ok(crate::triage::Applied::from_answer(change, &last))
+    }
+
+    /// Open pull requests that wait for `login`'s review (the first page), and how many GitHub
+    /// counts.
+    pub async fn review_requested(&self, login: &str) -> Result<(Vec<Pull>, usize), String> {
+        let (items, total) = self.search_page(&format!("is:pr is:open review-requested:{login}"), 1).await?;
+        Ok((items.iter().map(parse_pull).map(|p| Pull { review_requested: true, ..p }).collect(), total))
     }
 
     /// The files a pull request changes, with each one's patch (GitHub leaves out the patch of
@@ -1093,6 +1132,18 @@ pub async fn load_all(cfg: &Config) -> Result<Data, LoadError> {
             Vec::new()
         }
     };
+    // Pull requests waiting for your review (with a token: GitHub only knows whose review is
+    // asked for an account). Each shows once; one not in the list yet joins it.
+    let mut review_total = None;
+    if own && !pulls_failed {
+        match gh.review_requested(&profile.login).await {
+            Ok((waiting, total)) => {
+                review_total = Some(total);
+                merge_review_requested(&mut pulls, waiting, &mut open_pulls_total);
+            }
+            Err(e) => warnings.push(format!("Pull requests waiting for your review couldn't load: {e}")),
+        }
+    }
     // The organizations whose repositories were loaded: their issues too.
     let mut orgs: Vec<String> = repos.iter().map(|r| r.owner.clone()).filter(|o| !o.eq_ignore_ascii_case(&profile.login)).collect();
     orgs.sort_by_key(|o| o.to_lowercase());
@@ -1173,6 +1224,7 @@ pub async fn load_all(cfg: &Config) -> Result<Data, LoadError> {
         issues_total,
         runs_total,
         repos_capped,
+        review_total,
     })
 }
 
@@ -1370,6 +1422,38 @@ pub async fn load_line_comments(cfg: &Config, full: &str, number: u32) -> Result
     Gh::new(cfg).line_comments(full, number).await
 }
 
+/// Flags the pull requests in `waiting` as waiting for your review: those in `pulls` already are
+/// marked, the others join the list (and the open total, which counted only the first search).
+pub fn merge_review_requested(pulls: &mut Vec<Pull>, waiting: Vec<Pull>, open_total: &mut Option<usize>) {
+    for w in waiting {
+        match pulls.iter_mut().find(|p| p.number == w.number && p.repo.eq_ignore_ascii_case(&w.repo)) {
+            Some(p) => p.review_requested = true,
+            None => {
+                pulls.push(w);
+                if let Some(t) = open_total.as_mut() {
+                    *t += 1;
+                }
+            }
+        }
+    }
+}
+
+/// The body of `POST /repos/{r}/issues`: labels and assignees only when there are some.
+pub fn issue_body(title: &str, body: &str, labels: &[String], assignees: &[String]) -> Value {
+    let mut v = json!({ "title": title, "body": body });
+    if !labels.is_empty() {
+        v["labels"] = json!(labels);
+    }
+    if !assignees.is_empty() {
+        v["assignees"] = json!(assignees);
+    }
+    v
+}
+
+pub async fn load_choices(cfg: &Config, full: &str, source: crate::triage::Source) -> Result<crate::triage::Choices, String> {
+    Gh::new(cfg).choices(full, source).await
+}
+
 pub async fn load_thread(cfg: &Config, full: &str, number: u32) -> Result<Thread, String> {
     Gh::new(cfg).thread(full, number).await
 }
@@ -1464,7 +1548,8 @@ pub struct NewLineComment {
 /// One of the writes RepoHub makes on GitHub. Running it returns a message for the toast.
 #[derive(Clone, Debug)]
 pub enum Write {
-    Issue { title: String, body: String },
+    /// A new issue, with the labels and assignees picked in the form (may be empty).
+    Issue { title: String, body: String, labels: Vec<String>, assignees: Vec<String> },
     Branch { name: String, from: String },
     Pull(NewPull),
     CloseIssue(u32),
@@ -1486,13 +1571,16 @@ pub enum Write {
     EditRelease { id: u64, release: NewRelease },
     /// Draft `id` published as it is.
     PublishRelease { id: u64 },
+    /// Labels, assignees, milestone, reviewers, title or description of an issue or pull
+    /// request: one kind of change at a time, so the toast can say what changed.
+    Triage { number: u32, change: crate::triage::Change },
 }
 
 impl Write {
     /// The issue or pull request the write is about, when there is one.
     pub fn number(&self) -> Option<u32> {
         match self {
-            Write::CloseIssue(n) | Write::ReopenIssue(n) | Write::SetPullOpen { number: n, .. } | Write::Merge { number: n, .. } | Write::Comment { number: n, .. } | Write::Review { number: n, .. } | Write::LineComment { number: n, .. } => Some(*n),
+            Write::CloseIssue(n) | Write::ReopenIssue(n) | Write::SetPullOpen { number: n, .. } | Write::Merge { number: n, .. } | Write::Comment { number: n, .. } | Write::Review { number: n, .. } | Write::LineComment { number: n, .. } | Write::Triage { number: n, .. } => Some(*n),
             Write::Issue { .. } | Write::Branch { .. } | Write::Pull(_) | Write::RerunRun { .. } | Write::Release(_) | Write::EditRelease { .. } | Write::PublishRelease { .. } => None,
         }
     }
@@ -1515,12 +1603,14 @@ pub enum Done {
     Reran { run_id: u64, failed_only: bool },
     /// A release saved as a draft or published, as GitHub has it now.
     Release(Box<crate::releases::Release>),
+    /// A triage change was made: what was asked, and what GitHub says it is now.
+    Triaged { number: u32, change: crate::triage::Change, applied: crate::triage::Applied },
 }
 
 pub async fn run(cfg: &Config, full: &str, w: Write) -> Result<Done, String> {
     let gh = Gh::new(cfg);
     match w {
-        Write::Issue { title, body } => gh.create_issue(full, &title, &body).await.map(Done::Issue),
+        Write::Issue { title, body, labels, assignees } => gh.create_issue(full, &title, &body, &labels, &assignees).await.map(Done::Issue),
         Write::Branch { name, from } => gh.create_branch(full, &name, &from).await.map(|_| Done::Branch(name)),
         Write::Pull(p) => gh.create_pull(full, &p).await.map(Done::Pull),
         Write::CloseIssue(n) => gh.close_issue(full, n).await.map(|_| Done::Closed(n)),
@@ -1534,6 +1624,7 @@ pub async fn run(cfg: &Config, full: &str, w: Write) -> Result<Done, String> {
         Write::Release(n) => gh.save_release(full, None, &n).await.map(|r| Done::Release(Box::new(r))),
         Write::EditRelease { id, release } => gh.save_release(full, Some(id), &release).await.map(|r| Done::Release(Box::new(r))),
         Write::PublishRelease { id } => gh.publish_release(full, id).await.map(|r| Done::Release(Box::new(r))),
+        Write::Triage { number, change } => gh.triage(full, number, &change).await.map(|applied| Done::Triaged { number, change, applied }),
     }
 }
 

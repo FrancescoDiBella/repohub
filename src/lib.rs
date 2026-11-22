@@ -54,9 +54,15 @@ mod releases_page;
 mod state;
 mod review;
 mod runs_page;
+mod sync;
+mod sync_io;
+mod sync_page;
+mod board_file;
 mod terminal;
 mod thread;
 mod thread_page;
+mod triage;
+mod triage_page;
 mod terminal_page;
 mod themes;
 mod themes_page;
@@ -226,6 +232,13 @@ pub struct App {
     thread: Option<thread::Open>,
     /// Counts conversation loads (see [`thread::Open::epoch`]).
     thread_epoch: u64,
+    /// The repositories' labels, assignable people and milestones, kept once loaded (triage).
+    choices: triage::Cache,
+    /// The labels and assignees picked in the New issue form.
+    issue_picks: triage::Picks,
+    /// The list filters last saved in the preferences (`filters::Saved`), so they're written only
+    /// when they change.
+    saved_filters: Option<String>,
     /// The workflow run whose jobs and log are on screen, in place of the page.
     pub(crate) open_run: Option<runs_page::OpenRun>,
     /// Counts workflow run detail loads (see [`runs_page::OpenRun::epoch`]).
@@ -250,6 +263,8 @@ pub struct App {
     pending_note_saves: HashMap<(String, String, String), NoteOp>,
     /// The drawing open in the Notes tab, if any.
     board: Option<board::Board>,
+    /// Boards on every device: the notes repository and how syncing with it goes.
+    sync: sync_io::SyncState,
     // Claude tab (desktop): one conversation per repository, run in its local clone.
     chats: HashMap<String, claude::Chat>,
     claude_prompt: TextEdit,
@@ -426,6 +441,7 @@ impl App {
             prefs::set("place", self.place().to_json());
         }
         self.save_layout();
+        self.save_filters();
     }
 
     /// The sidebar and the list's sort and owner, saved when they changed.
@@ -557,7 +573,7 @@ impl App {
         self.confirm_merge = None;
         self.open_run = None;
         self.thread_epoch = self.thread_epoch.wrapping_add(1);
-        self.thread = Some(thread::Open { repo: repo.to_owned(), number, pull, load: Load::Loading, reply: TextEdit::new(""), sending: false, epoch: self.thread_epoch });
+        self.thread = Some(thread::Open { repo: repo.to_owned(), number, pull, load: Load::Loading, reply: TextEdit::new(""), sending: false, epoch: self.thread_epoch, edit: Default::default() });
         self.load_thread();
     }
 
@@ -579,7 +595,9 @@ impl App {
                 self.data.issues.iter().find(|x| x.number == number && same_repo(&x.repo, &repo))
                     .map(|x| (x.title.clone(), self.data.profile.login.clone(), thread::Standing::Open))
             }.unwrap_or_else(|| (format!("#{number}"), self.data.profile.login.clone(), thread::Standing::Open));
-            t.load = Load::Ready(thread::sample(&title, &author, pull, standing, self.now));
+            let mut sample = thread::sample(&title, &author, pull, standing, self.now);
+            triage::sample_thread(&mut sample, &self.data, &repo, number, pull);
+            t.load = Load::Ready(sample);
             return;
         }
         let Some(h) = self.handle.clone() else {
@@ -811,7 +829,10 @@ impl App {
         self.reveal_tab = true;
         self.save_place();
         match tab {
-            RepoTab::Notes => self.load_notes(i),
+            RepoTab::Notes => {
+                self.load_notes(i);
+                self.sync_now();
+            }
             RepoTab::Terminal => self.open_terminal(i),
             RepoTab::Changes => self.load_changes(i),
             RepoTab::Commits => self.load_history(i, false),
@@ -862,6 +883,7 @@ impl App {
             self.refresh();
         }
         self.save_layout();
+        self.save_filters();
         // A new Latest build is looked for every 6 hours, unless one is already waiting.
         if self.update.available().is_none() && self.update_checked.is_some_and(|c| self.clock - c >= 6.0 * 3600.0) {
             self.check_update(false);
@@ -1068,6 +1090,7 @@ impl App {
                 self.pull_filter.mine = true;
                 self.pull_filter.failing = true;
             }
+            tray::Action::ReviewRequested => self.show_review_requested(),
             tray::Action::OpenRepo(full) => if let Some(i) = repo(self, &full) { self.open(i) },
             tray::Action::NewIssue(full) => if let Some(i) = repo(self, &full) {
                 if !matches!(&self.page, Page::Repo(f) if f.eq_ignore_ascii_case(&full)) {
@@ -1128,6 +1151,8 @@ impl App {
         // Another account has other repositories and labels.
         self.pull_filter.clear();
         self.issue_filter.clear();
+        self.choices.clear();
+        self.issue_picks = triage::Picks::default();
         self.runs_filter.clear();
         self.data = Data::default();
         self.data_gen = self.data_gen.wrapping_add(1);
@@ -1553,6 +1578,7 @@ impl App {
                 self.restore_place();
                 // With the lists, what's waiting for you.
                 self.load_inbox();
+                self.sync_after_load();
             }
             Err(e) => {
                 if let Some(ra) = e.retry_after {
@@ -2009,6 +2035,7 @@ impl App {
         } else {
             self.branches.get(&full).and_then(Load::ready).and_then(|b| b.iter().find(|n| **n != default).cloned()).unwrap_or(shown.clone())
         };
+        self.issue_picks = triage::Picks::for_repo(&full);
         self.form = Some(actions::Form {
             repo: full,
             kind,
@@ -2037,6 +2064,7 @@ impl App {
         }
         let Some(f) = self.form.as_mut() else { return };
         let Ok(w) = f.write() else { return };
+        let w = triage::with_picks(w, &self.issue_picks);
         if !f.submit.start() {
             return;
         }
@@ -2080,9 +2108,15 @@ impl App {
             github::Write::RerunRun { run_id, .. } => Some(*run_id),
             _ => None,
         };
-        let key = match rerun_id {
-            Some(run_id) => runs_page::run_busy_key(&full, run_id),
-            None => actions::busy_key(repo, number),
+        // A triage change: what it's about, and whether it takes several requests.
+        let triage = match &w {
+            github::Write::Triage { change, .. } => Some((change.part(), change.requests(&full, number).len() > 1)),
+            _ => None,
+        };
+        let key = match (rerun_id, triage) {
+            (Some(run_id), _) => runs_page::run_busy_key(&full, run_id),
+            (None, Some(_)) => triage::busy_key(repo, number),
+            (None, None) => actions::busy_key(repo, number),
         };
         if !self.busy.insert(key.clone()) {
             return;
@@ -2099,7 +2133,11 @@ impl App {
             s.busy.remove(&key);
             // What was typed stays in the box when sending fails.
             if let Some(t) = s.thread.as_mut().filter(|t| t.is(&full_cb, number)) {
-                t.sending = false;
+                if triage.is_some() {
+                    t.edit.saving = None;
+                } else {
+                    t.sending = false;
+                }
             }
             if s.pull_diff_of.as_ref().is_some_and(|(f, n)| *n == number && same_repo(f, &full_cb))
                 && let Some(d) = s.pull_review.as_mut().and_then(|r| r.draft.as_mut())
@@ -2108,6 +2146,8 @@ impl App {
             }
             match r {
                 Ok(done) => s.apply_done(&full_cb, done),
+                // A refused triage change is said where it was made, once.
+                Err(e) if triage.is_some_and(|(part, partial)| s.triage_failed(&full_cb, number, part, partial, &e)) => {}
                 Err(e) => {
                     if let Some(run_id) = rerun_id
                         && let Some(o) = s.open_run.as_mut().filter(|o| o.run_id == run_id && same_repo(&o.repo, &full_cb))
@@ -2150,7 +2190,8 @@ impl App {
         match done {
             github::Done::Issue(c) => {
                 let title = self.form_title.take().unwrap_or_default();
-                self.data.issues.insert(0, model::Issue { labels: Vec::new(), assignees: Vec::new(), number: c.number, title, repo: full_name.clone(), label: None, created_at: self.now, comments: 0, url: c.url });
+                let (labels, assignees) = self.picked_for_new_issue(&full_name);
+                self.data.issues.insert(0, model::Issue { label: labels.first().cloned(), labels, assignees, number: c.number, title, repo: full_name.clone(), created_at: self.now, comments: 0, url: c.url });
                 if let Some(r) = self.data.repos.iter_mut().find(|r| r.full_name.eq_ignore_ascii_case(&full_name)) {
                     r.issues += 1;
                 }
@@ -2174,7 +2215,7 @@ impl App {
                 self.commits.pull_opened(&full_name, c.number, &c.url);
                 let (title, draft) = self.pull_meta.take().unwrap_or_default();
                 let author = self.data.profile.login.clone();
-                self.data.pulls.insert(0, model::Pull { labels: Vec::new(),
+                self.data.pulls.insert(0, model::Pull { labels: Vec::new(), assignees: Vec::new(), review_requested: false,
                     number: c.number, title, repo: full_name.clone(), author,
                     state: if draft { PullState::Draft } else { PullState::Open },
                     checks: None, updated_at: self.now, comments: 0, url: c.url,
@@ -2277,6 +2318,7 @@ impl App {
                 self.notify(format!("{} pull request #{n}", if open { "Reopened" } else { "Closed" }));
             }
             github::Done::Release(r) => self.release_done(&full_name, *r),
+            github::Done::Triaged { number, change, applied } => self.apply_triaged(&full_name, number, change, applied),
             github::Done::Reran { run_id, failed_only } => {
                 for r in self.data.runs.iter_mut().filter(|r| r.id == run_id && same_repo(&r.repo, &full_name)) {
                     r.checks = model::Checks::Running;
@@ -2492,6 +2534,9 @@ impl App {
         let (full, branch, name) = id.clone();
         let epoch = self.load_gen;
         net::spawn(h, move || async move { notes::delete(&full, &branch, &name).await }, move |s: &mut App, r| {
+            if r.is_ok() {
+                s.sync_saved(&id);
+            }
             s.apply_note_op(epoch, id, r);
         });
     }
@@ -2587,9 +2632,9 @@ impl App {
     }
 
     fn write_board(&mut self) {
-        let Some(b) = self.board.as_ref() else { return };
+        let Some(b) = self.board.as_mut() else { return };
         let id = (b.repo.clone(), b.branch.clone(), b.name.clone());
-        let json = b.to_json();
+        let json = b.save_json();
         self.write_note(id, json);
     }
 
@@ -2600,8 +2645,14 @@ impl App {
         self.saving_notes.insert(id.clone(), NoteOp::Save(json.clone()));
         let (repo, branch, name) = (id.0.clone(), id.1.clone(), id.2.clone());
         let epoch = self.load_gen;
-        net::spawn(h, move || async move { notes::save(&repo, &branch, &name, json).await }, move |s: &mut App, r| {
-            s.apply_note_op(epoch, id, r);
+        net::spawn(h, move || async move { notes::save(&repo, &branch, &name, json).await }, move |s: &mut App, r: Result<Option<String>, String>| {
+            if let Ok(merged) = &r {
+                if let Some(m) = merged {
+                    s.board_merged(&id, m);
+                }
+                s.sync_saved(&id);
+            }
+            s.apply_note_op(epoch, id, r.map(|_| ()));
         });
     }
 
@@ -2665,12 +2716,12 @@ impl App {
     /// Before the editor goes away: edits still waiting behind a running write (or after a failed
     /// one) are written now. Never starts a parallel write if one is already running.
     fn flush_board(&mut self) {
-        let Some(b) = self.board.as_ref() else { return };
+        let Some(b) = self.board.as_mut() else { return };
         if !b.save.pending() {
             return;
         }
         let id = (b.repo.clone(), b.branch.clone(), b.name.clone());
-        let json = b.to_json();
+        let json = b.save_json();
         if self.saving_notes.contains_key(&id) {
             self.pending_note_saves.insert(id, NoteOp::Save(json));
         } else {
@@ -3143,6 +3194,9 @@ fn init() -> App {
         reveal_tab: false,
         thread: None,
         thread_epoch: 0,
+        choices: triage::Cache::default(),
+        issue_picks: triage::Picks::default(),
+        saved_filters: None,
         open_run: None,
         run_epoch: 0,
         busy: std::collections::HashSet::new(),
@@ -3157,6 +3211,7 @@ fn init() -> App {
         note_log: Vec::new(),
         pending_note_saves: HashMap::new(),
         board: None,
+        sync: Default::default(),
         chats: HashMap::new(),
         claude_prompt: TextEdit::new(""),
         claude_mode: claude::Mode::Plan,
@@ -3256,6 +3311,10 @@ fn init() -> App {
             s.open_thread(&repo, number, false);
         }
     }
+    // `-- picker labels` (assignees, milestone, reviewers) opens that picker in the conversation
+    // (on a repository's page without one: the New issue form's), `-- edit title` (or `body`) the
+    // title's or the description's editor (headless stills).
+    s.triage_still(arg("picker"), arg("edit"));
     // `-- section appearance` picks the Settings page's section.
     if let Some(sec) = arg("section")
         && let Some(n) = state::SettingsSection::LABELS.iter().position(|l| l.eq_ignore_ascii_case(&sec))
@@ -3272,6 +3331,20 @@ fn init() -> App {
     // `-- tab commits` reads the history before the first frame; `-- commit 0123abc` (or `commit 2`,
     // the second in the list) opens a commit, `-- compare main...feature/x` compares two branches.
     s.commits_still(arg("commit"), arg("compare"));
+    // With `tab notes` the drawings are listed before the first frame (as the Changes above).
+    #[cfg(not(target_arch = "wasm32"))]
+    if s.tab == RepoTab::Notes
+        && matches!(s.page, Page::Repo(_))
+        && let Some((full, branch)) = s.notes_branch(0)
+        && let Ok(items) = pollster::block_on(notes::list(&full, &branch))
+    {
+        s.notes.insert((full, branch), notes::NotesView { items, state: state::Refresh::Fresh });
+    }
+    // `-- sync waiting` shows board sync in that state (synced, syncing, waiting, failed, public,
+    // setup, confirm), with `-- notes-repo owner/name`; for headless stills, it never runs.
+    if let Some(state) = arg("sync") {
+        s.sync_still(&state, arg("notes-repo"));
+    }
     // `-- tab releases` reads the releases before the first frame; `-- release new` (or `notes`,
     // `edit`, `publish`) opens the form. Any repository page reads its latest release.
     s.releases_still(arg("release"));
@@ -3297,6 +3370,10 @@ fn init() -> App {
         s.sort = l.sort;
         s.owner = l.owner.clone();
         s.saved_layout = Some(l);
+    }
+    // The list filters of last time (an account's own: the sample data starts with none).
+    if !s.data.sample {
+        s.restore_filters();
     }
     // The sample data has no places of its own to go back to.
     if arg("page").is_none() && !s.data.sample {
@@ -4166,7 +4243,7 @@ pub fn start() {
     if tray::keeps_running() {
         app = app.keep_running().on_close(on_close);
     }
-    let app = app.on_quit(|s: &mut App, _| s.save_layout());
+    let app = app.on_quit(|s: &mut App, _| { s.save_layout(); s.save_filters(); });
     let handle = app.handle();
     let h2 = handle.clone();
     handle.update(move |s: &mut App, _| {
@@ -5310,7 +5387,7 @@ mod fix60_tests {
         // 40 mixed PRs (12 open + 28 merged) shows "12+" on Overview and Sidebar; 39 shows "12".
         rt.update(|s, _| {
             s.page = crate::Page::Overview;
-            s.data.pulls = (0..crate::model::SEARCH_CAP).map(|i| crate::model::Pull { labels: Vec::new(),
+            s.data.pulls = (0..crate::model::SEARCH_CAP).map(|i| crate::model::Pull { labels: Vec::new(), assignees: Vec::new(), review_requested: false,
                 number: i as u32 + 1,
                 title: format!("PR #{i}"),
                 repo: "a/b".into(),
@@ -5464,7 +5541,7 @@ mod fix60_tests {
         s.data.repos[0].issues = 5;
 
         // Add a pull request and an issue belonging to external repo other-org/app
-        s.data.pulls.insert(0, crate::model::Pull { labels: Vec::new(),
+        s.data.pulls.insert(0, crate::model::Pull { labels: Vec::new(), assignees: Vec::new(), review_requested: false,
             number: 42,
             title: "External PR".into(),
             repo: "other-org/app".into(),
@@ -5745,7 +5822,7 @@ mod fix60_tests {
         // Generate enough PRs so the list extends well beyond a 720px viewport
         let mut prs = Vec::new();
         for i in 1..=20 {
-            prs.push(crate::model::Pull { labels: Vec::new(),
+            prs.push(crate::model::Pull { labels: Vec::new(), assignees: Vec::new(), review_requested: false,
                 number: i,
                 title: format!("Pull request #{i} with long description to take space"),
                 repo: "francescodibella.github.io".into(),
@@ -6043,7 +6120,7 @@ mod fix56_tests {
         let b = s.board.as_ref().unwrap();
         assert_eq!(b.save, Save::Saving { dirty: false });
         // The newly written JSON contains elem-1, elem-2, AND elem-3!
-        let json = b.to_json();
+        let json = b.json();
         assert!(json.contains("elem-1"));
         assert!(json.contains("elem-2"));
         assert!(json.contains("elem-3"));
@@ -6061,7 +6138,7 @@ mod fix56_tests {
         let id = (full.clone(), branch.clone(), "NewWhileSaving".into());
 
         // Simulate an old in-flight write (of an empty drawing) for this same drawing name
-        let empty = board::Board::new(&full, &branch, "NewWhileSaving").to_json();
+        let empty = board::Board::new(&full, &branch, "NewWhileSaving").save_json();
         s.saving_notes.insert(id.clone(), crate::NoteOp::Save(empty));
 
         // User creates new drawing with same name: it opens on the write that is running (its
@@ -6090,7 +6167,7 @@ mod fix56_tests {
         // It detects dirty: true, calls write_board() with elem-new, and transitions to dirty: false
         let b = s.board.as_ref().unwrap();
         assert_eq!(b.save, Save::Saving { dirty: false });
-        let json = b.to_json();
+        let json = b.json();
         assert!(json.contains("elem-new"));
 
         // When write for elem-new completes:
@@ -6120,7 +6197,7 @@ mod fix56_tests {
         });
 
         // 2. First write starts in-flight (snapshot 1)
-        let json_1 = b.to_json();
+        let json_1 = b.save_json();
         assert!(b.save.edit());
         s.saving_notes.insert(id.clone(), crate::NoteOp::Save(String::new()));
 
@@ -6382,7 +6459,7 @@ mod fix83_tests {
             id: tag.into(), kind: Kind::Rectangle, x: 1.0, y: 1.0, w: 10.0, h: 10.0, points: vec![],
             stroke: "#000".into(), fill: None, width: 2.0, text: String::new(), font: 20.0, seed: 1,
         });
-        b.to_json()
+        b.save_json()
     }
 
     fn id(s: &App, name: &str) -> (String, String, String) {
@@ -6400,12 +6477,12 @@ mod fix83_tests {
         s.open_board(0, "Arch".into(), false);
         let b = s.board.as_ref().unwrap();
         assert_eq!(b.save, Save::Saving { dirty: false }, "not Loading from the older file");
-        assert!(b.to_json().contains("newest"));
+        assert!(b.json().contains("newest"));
         // The write finishes: the board is Saved, with the same content.
         s.apply_note_op(s.load_gen, id, Ok(()));
         let b = s.board.as_ref().unwrap();
         assert_eq!(b.save, Save::Saved);
-        assert!(b.to_json().contains("newest"));
+        assert!(b.json().contains("newest"));
     }
 
     #[test]
@@ -6417,14 +6494,14 @@ mod fix83_tests {
         // The list doesn't show "Plan" yet, so the user types it again and presses New.
         s.open_board(0, "Plan".into(), true);
         let b = s.board.as_ref().unwrap();
-        assert!(b.to_json().contains("second"), "opened on the newest snapshot, not a blank board");
+        assert!(b.json().contains("second"), "opened on the newest snapshot, not a blank board");
         assert_eq!(b.save, Save::Saving { dirty: true }, "the snapshot is written after the running write");
         assert!(!s.pending_note_saves.contains_key(&id));
         // The running write ends; the open board's newest content is written next (no handle in
         // tests, so the write isn't sent, but the board moves on to writing it).
         s.apply_note_op(s.load_gen, id, Ok(()));
         assert_eq!(s.board.as_ref().unwrap().save, Save::Saving { dirty: false });
-        assert_eq!(s.note_log, [format!("save Plan: {}", s.board.as_ref().unwrap().to_json().len())]);
+        assert_eq!(s.note_log, [format!("save Plan: {}", s.board.as_ref().unwrap().json().len())]);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -6434,7 +6511,8 @@ mod fix83_tests {
         let mut s = app();
         let id = id(&s, "Arch");
         s.saving_notes.insert(id.clone(), NoteOp::Save(drawing("first")));
-        s.pending_note_saves.insert(id.clone(), NoteOp::Save(drawing("second")));
+        let second = drawing("second");
+        s.pending_note_saves.insert(id.clone(), NoteOp::Save(second.clone()));
         let before = s.load_gen;
         s.reset_account_state();
         assert!(s.load_gen != before);
@@ -6442,7 +6520,7 @@ mod fix83_tests {
         // The old write's result arrives after the switch: the queued snapshot is still written.
         s.apply_note_op(before, id.clone(), Ok(()));
         assert!(!s.pending_note_saves.contains_key(&id));
-        assert_eq!(s.note_log, [format!("save Arch: {}", drawing("second").len())], "the queued snapshot was written");
+        assert_eq!(s.note_log, [format!("save Arch: {}", second.len())], "the queued snapshot was written");
     }
 
     #[test]
@@ -7135,7 +7213,7 @@ mod fix58_tests {
         // When there are 0 open PRs, but closed_pulls_total has 200, prs_capped() must be false!
         let data = Data {
             pulls: vec![
-                model::Pull { labels: Vec::new(),
+                model::Pull { labels: Vec::new(), assignees: Vec::new(), review_requested: false,
                     number: 1,
                     title: "Closed PR".into(),
                     repo: "alice/repo1".into(),
@@ -8085,6 +8163,8 @@ mod fix67_tests {
             updated_at: s.now,
             comments: 0,
             labels: Vec::new(),
+            assignees: Vec::new(),
+            review_requested: false,
             url: "https://github.com/alice/app/pull/12".into(),
         }];
         s.open_run = Some(crate::runs_page::OpenRun {
@@ -8181,6 +8261,8 @@ mod perf61_tests {
                 comments: (i % 8) as u32,
                 url: format!("{}/pull/{}", r.url, 100 + i),
                 labels: vec![("performance".into(), 40.0)],
+                assignees: Vec::new(),
+                review_requested: false,
             });
             d.issues.push(Issue {
                 number: (200 + i) as u32,

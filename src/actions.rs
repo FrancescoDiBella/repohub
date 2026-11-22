@@ -34,7 +34,8 @@ impl Form {
         let body = self.body.text.trim().to_owned();
         match self.kind {
             Compose::Issue if title.is_empty() => Err("Give the issue a title."),
-            Compose::Issue => Ok(Write::Issue { title, body }),
+            // The labels and assignees picked are added by `App::submit_form` (`App::issue_picks`).
+            Compose::Issue => Ok(Write::Issue { title, body, labels: Vec::new(), assignees: Vec::new() }),
             Compose::Branch if !github::valid_branch(&title) => Err("Branch names can't have spaces or any of ~ ^ : ? * [ \\, start with - or /, or contain .."),
             Compose::Branch => Ok(Write::Branch { name: title, from: self.from.clone() }),
             Compose::Pull if self.from == self.into => Err("Pick a branch that differs from the one it goes into."),
@@ -141,7 +142,7 @@ pub fn form_panel(s: &App, k: &Kit, i: usize) -> El {
     let check = f.write();
     let blocked = blocked(s);
     let cancel = Button::new("Cancel").variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
-        .on_press(|s: &mut App| { s.form = None; s.picker = None; }).build(k).key("form-cancel");
+        .on_press(|s: &mut App| { s.form = None; s.picker = None; s.issue_picks = Default::default(); }).build(k).key("form-cancel");
     let submit_label = match (f.kind, sending) {
         (_, true) => "Sending…",
         (Compose::Issue, _) => "Create issue",
@@ -180,6 +181,9 @@ pub fn form_panel(s: &App, k: &Kit, i: usize) -> El {
                     .on_edit(|s: &mut App| &mut s.form.as_mut().expect("form open").title).build(k).key("form-title").w_full())
                 .child(TextArea::new(&f.body).placeholder("Description (Markdown)").label("Description").auto_grow(4, 12)
                     .on_edit(|s: &mut App| &mut s.form.as_mut().expect("form open").body).build(k).key("form-body").w_full());
+            if f.kind == Compose::Issue {
+                body = body.child(crate::triage_page::form_fields(s, k, f));
+            }
             if f.kind == Compose::Pull {
                 let draft = f.draft;
                 body = body.child(row().gap(10.0).center_y()

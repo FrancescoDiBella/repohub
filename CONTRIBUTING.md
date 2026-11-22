@@ -15,7 +15,11 @@
 | `src/config.rs` | `.env` parsing (desktop: the project file and the app's own settings file, where Settings saves the account) and `config.json` (web) |
 | `src/board.rs` | The Notes whiteboard: model, hand-drawn rendering, gestures, undo/redo, `.excalidraw` read/write |
 | `src/actions.rs` | The branch picker, the New issue / branch / pull request forms, Close and Merge on rows |
-| `src/notes.rs`, `src/notes_page.rs` | Notes storage (local folder on desktop, `/api/notes` on the web) and the Notes tab |
+| `src/notes.rs`, `src/notes_page.rs` | Notes storage (local folder on desktop, `/api/notes` on the web: saving that merges with a file changed underneath, conditional writes, the trash, the list of every drawing, sync's index) and the Notes tab |
+| `src/sync.rs` | Boards on every device, the engine (pure, tested): git blob ids and base64, notes-repository paths, the index, the decision table (`decide`, `plan`), merging two boards (`merge`), and the run over the `Remote` and `Local` traits, with fakes in its tests |
+| `src/sync_io.rs`, `src/sync_page.rs` | Board sync wired up: GitHub as the notes repository (`GhRemote`), the notes storage (`NotesLocal`), checking and choosing the repository, when sync runs, the app's sync state; the Notes header, the board marks and Settings → Account → Boards |
+| `src/board_file.rs` | **Export…** and **Import…** of one board: Rune's file dialogs on the desktop, a download and the file picker on the web, the `RepoHubNative` pickers on Android |
+| `src/triage.rs`, `src/triage_page.rs` | Triage: a repository's labels, assignable people and milestones (kept per repository), the picker (filter, ticks, what changed), each change's request and GitHub's answer, applying it to the conversation and the rows; the details block, the pickers, title and description editing, the New issue form's labels and assignees, the Overview's **Waiting for your review** |
 | `src/palette.rs` | The command palette (⌘K): the commands for the current state, the fuzzy ranking (both tested), the modal layer |
 | `src/update.rs` | In-app updates: the build's commit (`REPOHUB_BUILD`, set by the Desktop workflow), the Latest build's package for this platform, the SHA256SUMS check, install and restart |
 | `src/themes.rs`, `src/themes_page.rs` | Themes: the ready-made looks, yours (`Looks`, saved in the preferences), the `Kit` built from a look, background patterns and pictures; the gallery and editor in Settings |
@@ -31,7 +35,7 @@
 | `src/diffs.rs`, `src/changes_page.rs` | Diffs with rune-kit's `DiffView`: the local changes (`local::changes`, commit, push, pull) in the Changes tab, and a pull request's files (`github::load_pull_files`) with Merge, Squash and Rebase |
 | `src/clones.rs` | Finding and remembering each repository's local clone |
 | `assets/fonts/` | Inter and IBM Plex Mono (SIL OFL), bundled so mono text is monospaced everywhere |
-| `server/` | `repohub-server`: static files, `config.json`, the `/gh/*` GitHub proxy that holds the token, and `/api/notes` (drawings in `DATA_DIR`) |
+| `server/` | `repohub-server`: static files, `config.json`, the `/gh/*` GitHub proxy that holds the token, and `/api/notes` (drawings in `DATA_DIR`; `all`, conditional writes with `if=`, the trash, sync's `index`) |
 | `web/manifest.webmanifest`, `web/icon.svg` | Add to Home Screen on phones |
 | `web/index.html` | Page that loads the WebAssembly build (`app.js` and `app_bg.wasm` are build outputs) |
 | `Dockerfile`, `compose.yaml` | Container: builds the web app and the server, runs the server on port 8080 |
@@ -65,7 +69,10 @@ REPOHUB_BLOCKING=1 target/release/repohub --snap out.png --size 1180x760 -- page
 `REPOHUB_BLOCKING=1` loads the data before the first frame, so the snapshot shows it.
 Add `tab notes` (a section's name) after `page repo`, and `REPOHUB_TRACE=1` to print every state change.
 `REPOHUB_COMPACT=1` with `--size 390x844` starts in the phone layout.
-`thread 14` after `page pulls` (or `page issues`) opens that conversation.
+`thread 14` after `page pulls` (or `page issues`) opens that conversation; `picker labels` (or
+`assignees`, `milestone`, `reviewers`) then opens that picker in its details, and `edit title` (or
+`body`) the title's or the description's editor. After `page repo tab issues`, `picker labels` (or
+`assignees`) opens the New issue form with that picker.
 `diff 14` also opens that pull request's diff, and `section appearance` picks the Settings section.
 `tab commits` reads the history before the first frame; `commit 0123abc` (or `commit 2`, the
 second in the list) opens a commit, and `compare main...feature/x` compares two branches.
@@ -78,6 +85,10 @@ With `tab changes` and a clone found (`REPOHUB_REPOS_DIR`), its changes are read
 throwaway data folder and a made-up clone. `docs/notes.png`, `docs/terminal.png` and
 `docs/claude.png` need a drawing, a shell and Claude Code, and are taken by hand.
 After `page repo tab notes`, `board Name` opens that drawing and `zoom 3` zooms it (the phone's full-screen editor in the phone layout).
+With `tab notes` the drawings of the data folder are listed before the first frame. `sync waiting`
+shows board sync in that state from the sample data without running it (`synced`, `syncing`,
+`waiting`, `failed`, `public`, and in Settings `setup` and `confirm`), with
+`notes-repo owner/name` for the repository shown.
 The Android app is described in [`android/README.md`](android/README.md).
 
 ### Web build
@@ -109,10 +120,32 @@ the same; the clients bypass HTTP proxies for `localhost` and `NO_PROXY` hosts.
 
 - The board works in a fixed world of `board::WORLD` points (1200 × 720), which the canvas scales
   to the space it has. Gestures arrive in canvas points and are converted with the size in `Drag`.
-- The file format is a subset of Excalidraw's. Unknown element types are skipped on load, so a
-  file saved from excalidraw.com with images or frames loses those elements if it's saved again
-  from RepoHub.
-- `board::tests` drives a full gesture sequence and checks the `.excalidraw` round trip.
+- The file format is a subset of Excalidraw's. Unknown element types are skipped on load, but a
+  save merges with the file (`notes::save`), so images or frames from excalidraw.com stay in it.
+- Elements carry Excalidraw's `id` (random, as Excalidraw's), `version`, `versionNonce`,
+  `updated` (milliseconds) and `isDeleted`. `Board::save_json` gives every element changed since
+  the last write a new version, and keeps deleted ones as `isDeleted`, so another device's copy
+  learns which edit is newer and what was deleted. Undo brings old content back under a newer
+  version. Older files (every `version` 1, `updated` 0, ids that may repeat) still read.
+- `board::tests` drives a full gesture sequence and checks the `.excalidraw` round trip, versions
+  and deletions; `board_file::tests` checks that Export then Import gives the same board.
+
+### Board sync
+
+- The decision for each board is `sync::decide` (all 16 cells tested), the merge `sync::merge`.
+  When in doubt both copies are kept: a local write lands only if the file still has the blob id
+  the plan read (`notes::write_if`), a GitHub write only with the `sha` the plan read, and the
+  index records a board only once both sides hold the same content.
+- `sync::tests` runs whole syncs between fake devices and a fake GitHub (two devices converging,
+  deletions, a write refused because GitHub changed meanwhile, the editor saving during a sync,
+  boards that can't be merged, offline), and checks that no cell of the table loses a stroke.
+- `sync_io::tests::two_devices_through_a_mock_github` runs the real GitHub client and the real
+  notes storage against a mock of GitHub's Contents and Git Trees API on localhost, with two data
+  folders as two devices: drawn on one, opened on the other, changed on both, deleted. To try
+  the app or the server by hand, point `GITHUB_API_URL` at a server that answers those calls.
+- A board deleted here (by you or by sync) moves to `trash/<date>/<owner>/<repo>/<branch>/` in
+  the data folder and is removed after 30 days; to undo a wrong delete, move the file back into
+  `notes/`. Sync's index is `notes-sync/<owner>%2F<name>.json` (per notes repository).
 
 ## Guidelines
 
@@ -122,9 +155,15 @@ the same; the clients bypass HTTP proxies for `localhost` and `NO_PROXY` hosts.
 - Keep the proxy allowlist (`server/src/main.rs`, `allowed`) as narrow as the app needs. Add an
   endpoint there only together with the feature that uses it.
 - RepoHub creates issues, branches, pull requests and releases (drafts, and publishing them),
-  closes issues and merges pull requests, and nothing more: deleting repositories, branches,
-  releases or tags, uploading release files and rewriting history stay on GitHub. A new write
-  goes through `github::Write`, the proxy allowlist (`server/src/main.rs`) and its test.
+  closes issues, merges pull requests, edits an issue's or pull request's labels, assignees,
+  milestone, title and description and who is asked to review, and, in the notes repository the
+  user chose for board sync, writes and deletes board files under `boards/` (one commit each),
+  and nothing more: deleting repositories, branches, releases or tags, uploading release files
+  and rewriting history stay on GitHub. The only other `DELETE` in a repository takes back a
+  review request. A new write goes through `github::Write` (board sync through
+  `sync_io::GhRemote` on the same transport), the proxy allowlist (`server/src/main.rs`) and its
+  test. The board paths are checked on the raw address (`board_contents_path`), as narrowly as
+  the app writes them.
 - Text in the UI is plain and specific: say what happened and how to fix it.
 - Every action gives feedback when it finishes or fails: a toast (`notify`, `notify_problem`) or
   a message where it happened. Nothing returns silently.

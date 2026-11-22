@@ -16,6 +16,7 @@
 //! | [`RepoFilter`], [`RepoSort`] | | the Repositories list |
 //! | [`Account`] | Locked / SignedOut / SignedIn | the account form in Settings |
 //! | [`Toast`] | (none) → shown(kind) → (none) | the message at the bottom |
+//! | [`Facet`] | Labels / Assignees / Milestone / Reviewers | what the open triage picker edits |
 //! | [`Submit`] | Editing → Sending → (closed) / Failed | a form that writes to GitHub |
 //! | [`Compose`] | Issue / Branch / Pull | which form is open |
 //! | [`BranchSlot`] | View / From / Head / Base / CompareHead / CompareBase / ReleaseTarget | what the branch picker fills in |
@@ -170,6 +171,46 @@ impl Save {
     pub fn pending(&self) -> bool {
         matches!(self, Save::Saving { dirty: true } | Save::Failed(_))
     }
+}
+
+/// Syncing boards through the notes repository (`sync_io.rs`), as the Notes section's header
+/// says it.
+///
+/// ```text
+/// Off ──Use it──▶ Ready ──Notes opened, a save, Sync now, refresh──▶ Running ──▶ Done{at}
+///                                                                       └──────▶ Failed ──Retry──▶ Running
+/// any ──Stop syncing (or sample data, no token)──▶ Off
+/// ```
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum BoardSync {
+    /// No notes repository chosen, or nothing to sync with (sample data, no token).
+    #[default]
+    Off,
+    /// Chosen, not run yet.
+    Ready,
+    Running,
+    /// The last run ended (Unix seconds). Boards changed since wait for the next.
+    Done { at: i64 },
+    /// The last run stopped (offline, refused, rate-limited): why. Boards keep working here and
+    /// wait for the next run.
+    Failed(String),
+}
+
+/// Choosing the notes repository in Settings → Account → Boards.
+///
+/// ```text
+/// Idle ──Use it──▶ Checking ──private──▶ Idle (chosen)
+///                     ├──public──▶ ConfirmPublic ──Use it anyway──▶ Idle (chosen)
+///                     └──missing, no access──▶ Failed ──Use it──▶ Checking
+/// ```
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum NotesRepoCheck {
+    #[default]
+    Idle,
+    Checking,
+    /// The repository is public: everyone could see the boards. Asks before going on.
+    ConfirmPublic(String),
+    Failed(String),
 }
 
 /// The appearance. `System` follows the computer's light or dark setting.
@@ -468,6 +509,44 @@ pub enum BranchSlot {
     CompareBase,
     /// The branch a new release's tag is made from.
     ReleaseTarget,
+}
+
+/// What a triage picker edits on an issue or a pull request (see `triage`). One picker is open at
+/// a time: `None` (closed) → `Some(facet)` → Apply / Cancel → `None`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Facet {
+    Labels,
+    Assignees,
+    /// One choice, or none.
+    Milestone,
+    /// Pull requests only: who is asked to review.
+    Reviewers,
+}
+
+impl Facet {
+    /// The section's title, as the details block shows it.
+    pub fn title(self) -> &'static str {
+        match self {
+            Facet::Labels => "Labels",
+            Facet::Assignees => "Assignees",
+            Facet::Milestone => "Milestone",
+            Facet::Reviewers => "Reviewers",
+        }
+    }
+
+    /// A word for keys (`triage-edit-labels`) and the start-up argument (`-- picker labels`).
+    pub fn key(self) -> &'static str {
+        match self {
+            Facet::Labels => "labels",
+            Facet::Assignees => "assignees",
+            Facet::Milestone => "milestone",
+            Facet::Reviewers => "reviewers",
+        }
+    }
+
+    pub fn parse(word: &str) -> Option<Facet> {
+        [Facet::Labels, Facet::Assignees, Facet::Milestone, Facet::Reviewers].into_iter().find(|f| f.key().eq_ignore_ascii_case(word.trim()))
+    }
 }
 
 /// Which organizations' repositories to load (`REPOHUB_ORGS`).
