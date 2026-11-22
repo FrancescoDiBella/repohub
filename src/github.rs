@@ -910,7 +910,7 @@ impl Gh {
 
     /// Your unread notifications, newest first (the first 50).
     pub async fn notifications(&self) -> Result<Vec<Notification>, String> {
-        let v = self.get("/notifications?per_page=50").await?;
+        let v = self.get(&format!("/notifications?per_page={}", crate::inbox::READ_AT_MOST)).await?;
         Ok(v.as_array().into_iter().flatten().filter_map(parse_notification).collect())
     }
 

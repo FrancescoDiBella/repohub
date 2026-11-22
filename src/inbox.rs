@@ -11,6 +11,14 @@ use crate::state::Load;
 use crate::ui::{self, panel, rule};
 use crate::{App, icons, model};
 
+/// How many notifications are read: GitHub's newest 50 (`per_page=50`).
+pub const READ_AT_MOST: usize = 50;
+
+/// "3 unread", or "50 or more unread" when GitHub may have more than were read.
+pub fn unread_words(n: usize) -> String {
+    if n >= READ_AT_MOST { format!("{n} or more unread") } else { format!("{n} unread") }
+}
+
 /// What a notification is about.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Subject {
@@ -122,7 +130,12 @@ pub fn page(s: &App, k: &Kit) -> El {
                 }
                 groups = groups.child(p);
             }
-            (format!("{} unread. Click one to open it; it's marked as read.", list.len()), groups)
+            let how_many = if list.len() >= READ_AT_MOST {
+                format!("The {} newest unread: GitHub may have more, all of them are on GitHub.", list.len())
+            } else {
+                format!("{}.", unread_words(list.len()))
+            };
+            (format!("{how_many} Click one to open it; it's marked as read."), groups)
         }
     };
     col().w_full().gap(16.0).child(heading(k, "Notifications", &sub, Some(refresh))).child(body)

@@ -3881,7 +3881,7 @@ fn sidebar(s: &App, k: &Kit) -> El {
         .header(nav(s, k, "Pull requests", &icons::PULL, Page::Pulls, (open_prs > 0 || prs_capped).then(|| model::capped_if(open_prs, prs_capped))))
         .header(nav(s, k, "Issues", &icons::ISSUE, Page::Issues, (!s.data.issues.is_empty() || issues_capped).then(|| model::capped_if(s.data.issues.len(), issues_capped))))
         .header(nav(s, k, "Actions", &icons::PLAY, Page::Actions, None))
-        .header(nav(s, k, "Notifications", &icons::BELL, Page::Notifications, Some(s.unread()).filter(|n| *n > 0).map(|n| if n >= 50 { "50+".to_owned() } else { n.to_string() })))
+        .header(nav(s, k, "Notifications", &icons::BELL, Page::Notifications, Some(s.unread()).filter(|n| *n > 0).map(|n| if n >= inbox::READ_AT_MOST { format!("{n}+") } else { n.to_string() })))
         .section(SidebarSection::new("Pinned").count(pinned.len()).collapsed(!s.pinned_open)
             .on_toggle(|s: &mut App, _| s.pinned_open = !s.pinned_open).rows(pinned));
     if !org_rows.is_empty() {
@@ -4140,7 +4140,7 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
         // The phone has no sidebar: the bell is the way to the notifications.
         let unread = s.unread();
         let bell = IconButton::new(&icons::BELL).variant(if unread > 0 { IconButtonVariant::Contrast } else { IconButtonVariant::GhostMuted })
-            .label(if unread > 0 { format!("Notifications, {unread} unread") } else { "Notifications".to_owned() })
+            .label(if unread > 0 { format!("Notifications, {}", inbox::unread_words(unread)) } else { "Notifications".to_owned() })
             .expanded(s.page == Page::Notifications).on_press(|s: &mut App| s.go(Page::Notifications)).build(&k).key("open-notifications");
         mobile::shell(s, &k, cx.safe_area(), name, trailing.child(bell).child(theme).child(settings), main.grow(1.0).min_h(0.0))
     } else {
@@ -5171,6 +5171,26 @@ mod fix64_inbox_tests {
         assert_eq!(github::parse_notification(&odd), None);
         assert!(inbox::explain("GitHub refused (403): Resource not accessible by personal access token").contains("classic token"));
         assert_eq!(inbox::explain("Can't reach GitHub"), "Can't reach GitHub");
+    }
+
+    /// GitHub gives the 50 newest: with that many, the page and the phone's bell don't say "50
+    /// unread" as if that were all.
+    #[test]
+    fn fifty_notifications_are_said_to_be_the_newest_not_all() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = live();
+        s.inbox = Some(Load::Ready((0..50).map(|i| note(&i.to_string(), "octo/app", "Review this", Subject::Pull, Some(7))).collect()));
+        let mut rt = rune::Runtime::new(s, crate::view, (1180.0, 2400.0), rune::Env::new(true, 1.0));
+        rt.frame(0.0);
+        let texts: Vec<String> = rt.elements().iter().filter_map(|e| e.text.clone()).collect();
+        assert!(texts.iter().any(|t| t.starts_with("The 50 newest unread")), "{texts:?}");
+        assert!(!texts.iter().any(|t| t.starts_with("50 unread")));
+        let mut s = rt.state;
+        s.compact = true;
+        let mut rt = rune::Runtime::new(s, crate::view, (390.0, 844.0), rune::Env::new(true, 1.0));
+        rt.frame(0.0);
+        let bell = rt.elements().iter().find(|e| e.key.as_deref() == Some("open-notifications")).and_then(|e| e.label.clone());
+        assert_eq!(bell.as_deref(), Some("Notifications, 50 or more unread"));
     }
 
     #[test]
