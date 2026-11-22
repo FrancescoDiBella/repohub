@@ -645,8 +645,11 @@ impl App {
             },
             Host::Form => self.issue_picks.picker = picker,
         }
+        // Choices read before show at once and are read again behind the picker (with their tag,
+        // so an unchanged list costs a 304).
         if let Some(repo) = self.picker_repo(host) {
-            self.load_choices(&repo, Source::of(facet), false);
+            let again = matches!(self.choices.get(&repo, Source::of(facet)), Some(Load::Ready(_)));
+            self.load_choices(&repo, Source::of(facet), again);
         }
     }
 

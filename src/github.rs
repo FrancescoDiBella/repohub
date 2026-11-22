@@ -48,6 +48,11 @@ pub struct Gh {
     api_base: String,
     now: i64,
     retry_after: std::sync::Mutex<Option<u64>>,
+    /// At most this many requests at once (the parts of `load_all` run side by side).
+    gate: Option<net::Gate>,
+    /// The `etag` store's generation when this client was made: answers to an account that
+    /// was signed out of meanwhile aren't kept.
+    tags: u64,
 }
 
 const JSON: &str = "application/vnd.github+json";
@@ -105,7 +110,17 @@ pub fn next_page_path(link: Option<&str>, api_base: &str) -> Option<String> {
 
 impl Gh {
     pub fn new(cfg: &Config) -> Gh {
-        Gh { t: Transport::new(cfg), api_base: cfg.api.clone(), now: net::now(), retry_after: std::sync::Mutex::new(None) }
+        Gh { t: Transport::new(cfg), api_base: cfg.api.clone(), now: net::now(), retry_after: std::sync::Mutex::new(None), gate: None, tags: crate::etag::generation() }
+    }
+
+    /// The same client, sending at most `n` requests at once.
+    pub fn limited(self, n: usize) -> Gh {
+        Gh { gate: Some(net::Gate::new(n)), ..self }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_token(&self) -> bool {
+        self.t.has_token()
     }
 
     pub fn record_backoff(&self, secs: u64) {
@@ -207,8 +222,40 @@ impl Gh {
         }
     }
 
+    /// Every GET goes through here: with the tag of the answer it already has, so GitHub answers
+    /// 304 when nothing changed and the kept answer comes back as if it had been sent again
+    /// (searches excepted, see `etag`).
+    async fn fetch(&self, path: &str, accept: &str) -> Result<Resp, String> {
+        use crate::etag;
+        let key = etag::key(&self.api_base, accept, path);
+        let known = if etag::conditional(path) { etag::get(&key) } else { None };
+        let mut r = {
+            let _place = match &self.gate {
+                Some(g) => Some(g.enter().await),
+                None => None,
+            };
+            self.t.send_if(path, accept, known.as_ref().map(|k| k.etag.as_str())).await?
+        };
+        match (r.status, known) {
+            (304, Some(k)) => {
+                etag::reused();
+                r.status = 200;
+                r.body = k.body.to_string();
+                r.link = r.link.or(k.link);
+                r.etag = Some(k.etag);
+            }
+            (200, _) if etag::conditional(path) => {
+                if let Some(tag) = r.etag.clone() {
+                    etag::put(self.tags, key, etag::Entry { etag: tag, body: r.body.as_str().into(), link: r.link.clone() });
+                }
+            }
+            _ => {}
+        }
+        Ok(r)
+    }
+
     async fn get_resp(&self, path: &str) -> Result<(Value, Resp), String> {
-        let r = self.t.send("GET", path, JSON).await?;
+        let r = self.fetch(path, JSON).await?;
         match r.status {
             202 | 204 => Ok((Value::Null, r)),
             200..=299 => {
@@ -224,7 +271,7 @@ impl Gh {
     }
 
     async fn get_raw(&self, path: &str) -> Result<Option<String>, String> {
-        let r = self.t.send("GET", path, "application/vnd.github.raw+json").await?;
+        let r = self.fetch(path, "application/vnd.github.raw+json").await?;
         match r.status {
             200..=299 => Ok(Some(r.body)),
             404 => Ok(None),
@@ -258,7 +305,7 @@ impl Gh {
         Ok(Profile { login, name, bio: s(&v, "bio") })
     }
 
-    async fn viewer_login(&self) -> Option<String> {
+    pub(crate) async fn viewer_login(&self) -> Option<String> {
         if !self.t.has_token() {
             return None;
         }
@@ -1000,24 +1047,76 @@ impl Gh {
 
 /// Everything the overview and lists need, in one go (about 4 + 2 × `activity_repos` requests).
 pub async fn load_all(cfg: &Config) -> Result<Data, LoadError> {
-    let gh = Gh::new(cfg);
-    let profile = match gh.profile(cfg).await {
+    load_all_with(cfg, |_: Data| {}).await
+}
+
+/// How many requests a load sends at once.
+pub const AT_ONCE: usize = 4;
+
+/// [`load_all`], with the parts that don't need each other side by side (at most [`AT_ONCE`]
+/// requests at a time), and `early` called with the profile and the repositories as soon as
+/// they're in, while pull requests, issues, runs and activity still load.
+///
+/// The answer is the same as reading everything one after the other: the same lists, the same
+/// warnings in the same order (`load_tests` checks it against the sequential order).
+///
+/// ```text
+/// profile ─┬─ repositories ─┬─ issues (needs the organizations)
+/// (viewer) │                ├─ runs + activity of each active repository
+///          │                └─ (early: profile and repositories)
+///          └─ pull requests ── waiting for your review (needs your account)
+/// ```
+pub async fn load_all_with(cfg: &Config, early: impl Fn(Data) + net::MaybeSend + net::MaybeSync) -> Result<Data, LoadError> {
+    let gh = Gh::new(cfg).limited(AT_ONCE);
+    let gh = &gh;
+    // With a user name and a token: whether the token is that user's, next to the profile.
+    let ask_viewer = gh.t.has_token() && cfg.user.is_some();
+    let (profile, viewer) = net::join(gh.profile(cfg), async move { if ask_viewer { gh.viewer_login().await } else { None } }).await;
+    let profile = match profile {
         Ok(p) => p,
         Err(e) => return Err(LoadError::new(e, gh.retry_after())),
     };
     let own = gh.t.has_token() && match &cfg.user {
         None => true,
-        Some(u) => gh.viewer_login().await.is_some_and(|v| v.eq_ignore_ascii_case(u)),
+        Some(u) => viewer.is_some_and(|v| v.eq_ignore_ascii_case(u)),
     };
-    let mut warnings = Vec::new();
-    let (repos, repos_capped) = match gh.repos(cfg, &profile.login, own, &mut warnings).await {
-        Ok(r) => r,
+    let login = profile.login.as_str();
+    let early = &early;
+    let profile_ref = &profile;
+    let (head, tail) = net::join(
+        // The repositories, then what needs them.
+        async move {
+            let mut warnings = Vec::new();
+            let (repos, repos_capped) = gh.repos(cfg, login, own, &mut warnings).await?;
+            early(Data { profile: profile_ref.clone(), repos: repos.clone(), repos_capped, ..Data::default() });
+            // The organizations whose repositories were loaded: their issues too.
+            let mut orgs: Vec<String> = repos.iter().map(|r| r.owner.clone()).filter(|o| !o.eq_ignore_ascii_case(login)).collect();
+            orgs.sort_by_key(|o| o.to_lowercase());
+            orgs.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+            let active: Vec<String> = repos.iter().filter(|r| !r.archived).take(cfg.activity_repos).map(|r| r.full_name.clone()).collect();
+            let (issues, activity) = net::join(
+                async { gh.issues(login, &orgs).await },
+                net::join_all(active.iter().map(|full| net::join(gh.runs(full), gh.participation(full))).collect()),
+            ).await;
+            Ok::<_, String>((repos, repos_capped, warnings, issues, activity))
+        },
+        // Pull requests, then those waiting for your review (with a token: GitHub only knows
+        // whose review is asked for an account).
+        async move {
+            let pulls = gh.pulls(login).await;
+            let waiting = if own && pulls.is_ok() { Some(gh.review_requested(login).await) } else { None };
+            (pulls, waiting)
+        },
+    ).await;
+    let (repos, repos_capped, mut warnings, issues, activity_parts) = match head {
+        Ok(h) => h,
         Err(e) => return Err(LoadError::new(e, gh.retry_after())),
     };
+    let (pulls, waiting) = tail;
     let mut pulls_failed = false;
     let mut open_pulls_total = None;
     let mut closed_pulls_total = None;
-    let mut pulls = match gh.pulls(&profile.login).await {
+    let mut pulls = match pulls {
         Ok((p, open_tot, closed_tot)) => {
             open_pulls_total = Some(open_tot);
             closed_pulls_total = Some(closed_tot);
@@ -1029,25 +1128,19 @@ pub async fn load_all(cfg: &Config) -> Result<Data, LoadError> {
             Vec::new()
         }
     };
-    // Pull requests waiting for your review (with a token: GitHub only knows whose review is
-    // asked for an account). Each shows once; one not in the list yet joins it.
+    // Each pull request waiting for your review shows once; one not in the list yet joins it.
     let mut review_total = None;
-    if own && !pulls_failed {
-        match gh.review_requested(&profile.login).await {
-            Ok((waiting, total)) => {
-                review_total = Some(total);
-                merge_review_requested(&mut pulls, waiting, &mut open_pulls_total);
-            }
-            Err(e) => warnings.push(format!("Pull requests waiting for your review couldn't load: {e}")),
+    match waiting {
+        Some(Ok((waiting, total))) => {
+            review_total = Some(total);
+            merge_review_requested(&mut pulls, waiting, &mut open_pulls_total);
         }
+        Some(Err(e)) => warnings.push(format!("Pull requests waiting for your review couldn't load: {e}")),
+        None => {}
     }
-    // The organizations whose repositories were loaded: their issues too.
-    let mut orgs: Vec<String> = repos.iter().map(|r| r.owner.clone()).filter(|o| !o.eq_ignore_ascii_case(&profile.login)).collect();
-    orgs.sort_by_key(|o| o.to_lowercase());
-    orgs.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
     let mut issues_failed = false;
     let mut issues_total = None;
-    let issues = match gh.issues(&profile.login, &orgs).await {
+    let issues = match issues {
         Ok((i, total)) => {
             issues_total = Some(total);
             i
@@ -1058,14 +1151,14 @@ pub async fn load_all(cfg: &Config) -> Result<Data, LoadError> {
             Vec::new()
         }
     };
-    let active: Vec<String> = repos.iter().filter(|r| !r.archived).take(cfg.activity_repos).map(|r| r.full_name.clone()).collect();
     let mut runs: Vec<Run> = Vec::new();
     let mut runs_failed = false;
     let mut activity = vec![0u32; 26];
     let mut run_error: Option<String> = None;
     let mut participation_error: Option<String> = None;
-    for full in &active {
-        match gh.runs(full).await {
+    // In the repositories' order, as when they were read one after the other.
+    for (r, part) in activity_parts {
+        match r {
             Ok(r) => runs.extend(r),
             Err(e) => {
                 runs_failed = true;
@@ -1074,7 +1167,7 @@ pub async fn load_all(cfg: &Config) -> Result<Data, LoadError> {
                 }
             }
         }
-        match gh.participation(full).await {
+        match part {
             Ok(part) => {
                 for (i, w) in part.iter().enumerate() {
                     activity[i] += w;
@@ -1642,6 +1735,7 @@ mod tests {
             reset: None,
             retry_after: None,
             link: None,
+            etag: None,
         };
         let msg = gh.explain_actions_write(&resp);
         assert!(msg.contains("Actions write permission"), "{msg}");

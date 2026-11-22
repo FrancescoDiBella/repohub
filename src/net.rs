@@ -19,6 +19,8 @@ pub struct Resp {
     pub reset: Option<i64>,
     pub retry_after: Option<u64>,
     pub link: Option<String>,
+    /// The answer's `ETag`, to ask again with `If-None-Match` (see `etag`).
+    pub etag: Option<String>,
 }
 
 /// Runs `work` in the background and hands its result to `done` on the UI thread.
@@ -39,6 +41,70 @@ where
     });
 }
 
+/// Where background work reports: the app's handle, or, for the first load started before the
+/// window exists (and so before there is a handle), a [`Mailbox`] that keeps what arrives until
+/// the handle does.
+#[derive(Clone)]
+pub enum To {
+    Now(AppHandle<App>),
+    Later(Mailbox),
+}
+
+impl To {
+    pub fn post(&self, f: impl FnOnce(&mut App) + Send + 'static) {
+        match self {
+            To::Now(h) => h.update(move |s: &mut App, _| f(s)),
+            To::Later(m) => m.post(f),
+        }
+    }
+}
+
+type Posted = Box<dyn FnOnce(&mut App) + Send>;
+
+/// The handle once it exists, and what arrived before it.
+type Waiting = (Option<AppHandle<App>>, Vec<Posted>);
+
+/// Keeps what background work sends until the app's handle exists, then hands it over in order.
+#[derive(Clone, Default)]
+pub struct Mailbox(std::sync::Arc<std::sync::Mutex<Waiting>>);
+
+impl Mailbox {
+    pub fn post(&self, f: impl FnOnce(&mut App) + Send + 'static) {
+        let mut g = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        match &g.0 {
+            Some(h) => h.update(move |s: &mut App, _| f(s)),
+            None => g.1.push(Box::new(f)),
+        }
+    }
+
+    /// From now on, and for what's already here, through `h`.
+    pub fn attach(&self, h: AppHandle<App>) {
+        let mut g = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        for f in g.1.drain(..) {
+            h.update(move |s: &mut App, _| f(s));
+        }
+        g.0 = Some(h);
+    }
+}
+
+/// Runs `work` in the background and hands its result to `done` through `to`.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn spawn_to<R, Fut>(to: To, work: impl FnOnce() -> Fut + Send + 'static, done: impl FnOnce(&mut App, R) + Send + 'static)
+where
+    R: Send + 'static,
+    Fut: Future<Output = R> + 'static,
+{
+    match to {
+        To::Now(h) => spawn(h, work, done),
+        To::Later(m) => {
+            std::thread::spawn(move || {
+                let r = pollster::block_on(work());
+                m.post(move |s: &mut App| done(s, r));
+            });
+        }
+    }
+}
+
 /// Waits `ms` milliseconds without blocking the UI (call it inside `spawn`).
 pub async fn sleep(ms: u32) {
     #[cfg(not(target_arch = "wasm32"))]
@@ -52,6 +118,164 @@ pub async fn sleep(ms: u32) {
             }
         });
         let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+    }
+}
+
+/// `Send` on the desktop, where the parts of a load run on threads; nothing on the web, where
+/// they run on the page's one thread.
+#[cfg(not(target_arch = "wasm32"))]
+pub trait MaybeSend: Send {}
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: Send> MaybeSend for T {}
+#[cfg(target_arch = "wasm32")]
+pub trait MaybeSend {}
+#[cfg(target_arch = "wasm32")]
+impl<T> MaybeSend for T {}
+
+/// `Sync` on the desktop, nothing on the web (see [`MaybeSend`]).
+#[cfg(not(target_arch = "wasm32"))]
+pub trait MaybeSync: Sync {}
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: Sync> MaybeSync for T {}
+#[cfg(target_arch = "wasm32")]
+pub trait MaybeSync {}
+#[cfg(target_arch = "wasm32")]
+impl<T> MaybeSync for T {}
+
+/// Runs `a` and `b` at the same time and returns both answers. Desktop: `a` on a scoped thread
+/// over the blocking client, `b` on this one. Web: both futures polled together.
+pub async fn join<A, B>(a: A, b: B) -> (A::Output, B::Output)
+where
+    A: Future + MaybeSend,
+    B: Future,
+    A::Output: MaybeSend,
+{
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::thread::scope(|sc| {
+            let other = sc.spawn(move || pollster::block_on(a));
+            let rb = pollster::block_on(b);
+            (other.join().unwrap_or_else(|p| std::panic::resume_unwind(p)), rb)
+        })
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        use std::task::Poll;
+        let (mut a, mut b) = (Box::pin(a), Box::pin(b));
+        let (mut ra, mut rb) = (None, None);
+        std::future::poll_fn(move |cx| {
+            if ra.is_none() && let Poll::Ready(v) = a.as_mut().poll(cx) {
+                ra = Some(v);
+            }
+            if rb.is_none() && let Poll::Ready(v) = b.as_mut().poll(cx) {
+                rb = Some(v);
+            }
+            match (ra.take(), rb.take()) {
+                (Some(x), Some(y)) => Poll::Ready((x, y)),
+                (x, y) => {
+                    (ra, rb) = (x, y);
+                    Poll::Pending
+                }
+            }
+        }).await
+    }
+}
+
+/// Runs every future of `all` at the same time; the answers come back in `all`'s order.
+pub async fn join_all<F>(all: Vec<F>) -> Vec<F::Output>
+where
+    F: Future + MaybeSend,
+    F::Output: MaybeSend,
+{
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::thread::scope(|sc| {
+            let running: Vec<_> = all.into_iter().map(|f| sc.spawn(move || pollster::block_on(f))).collect();
+            running.into_iter().map(|h| h.join().unwrap_or_else(|p| std::panic::resume_unwind(p))).collect()
+        })
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        use std::task::Poll;
+        let mut futs: Vec<_> = all.into_iter().map(Box::pin).collect();
+        let mut out: Vec<Option<F::Output>> = futs.iter().map(|_| None).collect();
+        std::future::poll_fn(move |cx| {
+            for (f, o) in futs.iter_mut().zip(out.iter_mut()) {
+                if o.is_none() && let Poll::Ready(v) = f.as_mut().poll(cx) {
+                    *o = Some(v);
+                }
+            }
+            if out.iter().all(Option::is_some) { Poll::Ready(out.iter_mut().filter_map(Option::take).collect()) } else { Poll::Pending }
+        }).await
+    }
+}
+
+/// At most `n` requests at once (GitHub asks clients not to send many at the same time). A
+/// request takes a place with [`Gate::enter`] and gives it back when the returned guard drops.
+pub struct Gate {
+    #[cfg(not(target_arch = "wasm32"))]
+    free: std::sync::Mutex<usize>,
+    #[cfg(not(target_arch = "wasm32"))]
+    freed: std::sync::Condvar,
+    #[cfg(target_arch = "wasm32")]
+    free: std::cell::Cell<usize>,
+    #[cfg(target_arch = "wasm32")]
+    waiting: std::cell::RefCell<std::collections::VecDeque<std::task::Waker>>,
+}
+
+/// A place taken in a [`Gate`]; dropping it lets the next request in.
+pub struct Entered<'a>(&'a Gate);
+
+impl Gate {
+    pub fn new(n: usize) -> Gate {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Gate { free: std::sync::Mutex::new(n.max(1)), freed: std::sync::Condvar::new() }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Gate { free: std::cell::Cell::new(n.max(1)), waiting: Default::default() }
+        }
+    }
+
+    /// Waits for a free place (desktop: blocks this worker thread; web: yields).
+    pub async fn enter(&self) -> Entered<'_> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut free = self.free.lock().unwrap_or_else(|e| e.into_inner());
+            while *free == 0 {
+                free = self.freed.wait(free).unwrap_or_else(|e| e.into_inner());
+            }
+            *free -= 1;
+        }
+        #[cfg(target_arch = "wasm32")]
+        std::future::poll_fn(|cx| {
+            if self.free.get() > 0 {
+                self.free.set(self.free.get() - 1);
+                std::task::Poll::Ready(())
+            } else {
+                self.waiting.borrow_mut().push_back(cx.waker().clone());
+                std::task::Poll::Pending
+            }
+        }).await;
+        Entered(self)
+    }
+}
+
+impl Drop for Entered<'_> {
+    fn drop(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            *self.0.free.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+            self.0.freed.notify_one();
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.0.free.set(self.0.free.get() + 1);
+            if let Some(w) = self.0.waiting.borrow_mut().pop_front() {
+                w.wake();
+            }
+        }
     }
 }
 
@@ -83,13 +307,25 @@ impl Transport {
         self.send_body(method, path, accept, "").await
     }
 
+    /// A GET that GitHub may answer with 304 when `etag` still names its answer.
+    pub async fn send_if(&self, path: &str, accept: &str, etag: Option<&str>) -> Result<Resp, String> {
+        self.request("GET", path, accept, "", etag)
+    }
+
     /// `send` with a JSON body (empty: none).
     pub async fn send_body(&self, method: &str, path: &str, accept: &str, body: &str) -> Result<Resp, String> {
+        self.request(method, path, accept, body, None)
+    }
+
+    fn request(&self, method: &str, path: &str, accept: &str, body: &str, etag: Option<&str>) -> Result<Resp, String> {
         let mut r = self.agent.request(method, &format!("{}{}", self.api, path))
             .set("Accept", accept)
             .set("X-GitHub-Api-Version", "2022-11-28");
         if let Some(t) = &self.token {
             r = r.set("Authorization", &format!("Bearer {t}"));
+        }
+        if let Some(tag) = etag {
+            r = r.set("If-None-Match", tag);
         }
         let res = if !body.is_empty() {
             r.set("Content-Type", "application/json").send_string(body)
@@ -107,8 +343,9 @@ impl Transport {
         let reset = resp.header("x-ratelimit-reset").and_then(|v| v.parse().ok());
         let retry_after = resp.header("retry-after").and_then(|v| v.trim().parse().ok());
         let link = resp.header("link").map(str::to_owned);
+        let etag = resp.header("etag").map(str::to_owned);
         let body = resp.into_string().map_err(|e| e.to_string())?;
-        Ok(Resp { status, body, remaining, reset, retry_after, link })
+        Ok(Resp { status, body, remaining, reset, retry_after, link, etag })
     }
 }
 
@@ -146,32 +383,35 @@ globalThis.__repohubNative = (id, reply) => {
     if (done) done(reply);
 };
 export function native_exit() { if (globalThis.RepoHubNative) globalThis.RepoHubNative.exit(); }
-export async function gh_fetch(method, url, accept, body) {
+export async function gh_fetch(method, url, accept, body, etag) {
     if (globalThis.RepoHubNative) {
         return await new Promise((done) => {
             const id = ++nativeSeq;
             nativeWaiting.set(id, done);
-            globalThis.RepoHubNative.request(id, method, url, accept, body || '');
+            globalThis.RepoHubNative.request(id, method, url, accept, body || '', etag || '');
         });
     }
     try {
-        const init = { method, headers: { Accept: accept, 'X-RepoHub': '1' }, credentials: 'same-origin' };
+        const init = { method, headers: { Accept: accept, 'X-RepoHub': '1' }, credentials: 'same-origin', cache: 'no-store' };
         if (method !== 'GET' && method !== 'HEAD') {
             init.headers['Content-Type'] = 'application/json';
         }
+        // Set by hand, so a 304 comes back to the app (which keeps the answer) instead of
+        // being filled in from the browser's cache.
+        if (etag) { init.headers['If-None-Match'] = etag; }
         if (body) { init.body = body; }
         const r = await fetch(url, init);
         const text = await r.text();
-        return [r.status, text, r.headers.get('x-ratelimit-remaining') || '', r.headers.get('x-ratelimit-reset') || '', r.headers.get('retry-after') || '', r.headers.get('link') || ''];
+        return [r.status, text, r.headers.get('x-ratelimit-remaining') || '', r.headers.get('x-ratelimit-reset') || '', r.headers.get('retry-after') || '', r.headers.get('link') || '', r.headers.get('etag') || ''];
     } catch (e) {
-        return [0, String(e), '', '', '', ''];
+        return [0, String(e), '', '', '', '', ''];
     }
 }
 export function now_secs() { return Math.floor(Date.now() / 1000); }
 export function absolute_url(rel) { return new URL(rel, location.href).href; }
 ")]
     extern "C" {
-        pub async fn gh_fetch(method: &str, url: &str, accept: &str, body: &str) -> JsValue;
+        pub async fn gh_fetch(method: &str, url: &str, accept: &str, body: &str, etag: &str) -> JsValue;
         pub fn now_secs() -> f64;
         pub fn absolute_url(rel: &str) -> String;
         pub fn native_exit();
@@ -197,6 +437,11 @@ impl Transport {
         request(method, &format!("gh{path}"), accept, "").await
     }
 
+    /// A GET that GitHub may answer with 304 when `etag` still names its answer.
+    pub async fn send_if(&self, path: &str, accept: &str, etag: Option<&str>) -> Result<Resp, String> {
+        request_if("GET", &format!("gh{path}"), accept, "", etag.unwrap_or("")).await
+    }
+
     pub async fn send_body(&self, method: &str, path: &str, accept: &str, body: &str) -> Result<Resp, String> {
         request(method, &format!("gh{path}"), accept, body).await
     }
@@ -205,7 +450,12 @@ impl Transport {
 /// Web only: a request to `url` relative to the page (the RepoHub server).
 #[cfg(target_arch = "wasm32")]
 pub async fn request(method: &str, url: &str, accept: &str, body: &str) -> Result<Resp, String> {
-    let v = js::gh_fetch(method, url, accept, body).await;
+    request_if(method, url, accept, body, "").await
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn request_if(method: &str, url: &str, accept: &str, body: &str, etag: &str) -> Result<Resp, String> {
+    let v = js::gh_fetch(method, url, accept, body, etag).await;
     let a = js_sys::Array::from(&v);
     let status = a.get(0).as_f64().unwrap_or(0.0) as u16;
     let body = a.get(1).as_string().unwrap_or_default();
@@ -216,7 +466,8 @@ pub async fn request(method: &str, url: &str, accept: &str, body: &str) -> Resul
     let reset = a.get(3).as_string().and_then(|s| s.parse().ok());
     let retry_after = a.get(4).as_string().and_then(|s| s.trim().parse().ok());
     let link = a.get(5).as_string().filter(|s| !s.is_empty());
-    Ok(Resp { status, body, remaining, reset, retry_after, link })
+    let etag = a.get(6).as_string().filter(|s| !s.is_empty());
+    Ok(Resp { status, body, remaining, reset, retry_after, link, etag })
 }
 
 /// The Android app: leaves the app (the back button, with nowhere left to go back to).
@@ -240,7 +491,7 @@ pub fn now() -> i64 {
 /// Pages) means the sample data.
 #[cfg(target_arch = "wasm32")]
 pub async fn fetch_config() -> Option<Config> {
-    let v = js::gh_fetch("GET", "config.json", "application/json", "").await;
+    let v = js::gh_fetch("GET", "config.json", "application/json", "", "").await;
     let a = js_sys::Array::from(&v);
     if a.get(0).as_f64() != Some(200.0) {
         return None;
