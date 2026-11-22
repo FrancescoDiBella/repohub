@@ -19,6 +19,8 @@ use tiny_http::{Header, Method, Request, Response, Server};
 
 mod files;
 mod notes;
+#[cfg(test)]
+mod allowlist_cases;
 
 struct Cfg {
     token: Option<String>,

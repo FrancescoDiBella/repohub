@@ -86,6 +86,38 @@ The sections are **Added**, **Changed** and **Fixed**.
   same-background runs and skip rebuilding between shell outputs.
 
 ### Fixed
+- Board sync: pressing **Stop syncing** while a sync was running didn't forget what had been
+  synced, so choosing the same repository again later could delete from it, and from your other
+  devices, boards you had deleted on this one while sync was off. And a sync no longer starts
+  while another is still running (after switching accounts, or Stop then **Use it**).
+- **Esc** closes an open labels, assignees, milestone or reviewers picker, the title or
+  description being edited, the branch picker and the drawing's delete question, before the
+  conversation or page under them; and it no longer throws away a New issue or pull request
+  form left open on a repository's page, with what you typed, while you're on another page.
+- A New issue, branch or pull request that GitHub refused after you pressed **Cancel** (or left)
+  now says so in a toast instead of failing silently, and a form you opened meanwhile is no
+  longer closed or marked with the other one's result.
+- **Close pull request** offers **Undo** in its toast, as closing an issue does.
+- A repository's "open issues and pull requests" count didn't change when a pull request was
+  opened, merged, closed or reopened in RepoHub (only issues counted); it does now.
+- With only a token set, changing it outside the app to another person's showed the previous
+  account's saved lists (private repositories included) until the whole first load finished,
+  or for good if it failed; they're replaced as soon as the new account's profile arrives.
+- Switching the update channel in Settings while an update was downloading installed the other
+  channel's build anyway; the download now stops.
+- With 50 unread notifications (the most RepoHub reads), the Notifications page and the phone's
+  bell said "50 unread" as if that were all; they say these are the newest 50, or "50 or more".
+- A repository's Issues, Pull requests and Actions sections said "Nothing to show here" while
+  their lists were still loading; they say Loading….
+- The repository page had an extra gap under its section bar, and the Code tab under its
+  buttons. The pull request form's Draft switch showed its words twice.
+- The Notes section says drawings are also synced through your notes repository when board sync
+  is on (and that they're on the RepoHub server on the web), not only "saved on this computer".
+- On a phone, the theme editor's Background choices ran off the screen; the row scrolls now.
+- A job log larger than 10 MB says so in plain words instead of "response too big for
+  into_string".
+- The diff's and the file viewer's **GitHub** buttons say **Open on GitHub**, as every other
+  such button does, and **Push** has an icon of its own instead of the pull request one.
 - Screen readers and keyboard navigation: clickable workflow runs, compact repository rows and
   repository card titles now announce their role and label; search, branch filter, new drawing and
   local folder fields and the draft pull request switch are labelled; CI, pull request, issue and

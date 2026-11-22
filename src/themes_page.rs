@@ -142,7 +142,11 @@ fn editor(s: &App, k: &Kit, shown_dark: bool) -> El {
         SegmentedControl::new(labels, Some(at)).label(key.to_owned()).fit()
             .on_pick(move |s: &mut App, i, _| s.change_look(|t| f(t, i))).build(k).key(key.to_owned())
     };
-    let line = |name: &str, control: El| row().w_full().gap(12.0).center_y().flex_wrap().child(label(name)).child(control);
+    // On a phone a control wider than the screen (Background's seven choices) scrolls sideways.
+    let line = |name: &str, control: El| {
+        let control = if s.compact { row().w_full().scroll_x().key(format!("look-scroll-{name}")).child(control) } else { control };
+        row().w_full().gap(12.0).center_y().flex_wrap().child(label(name)).child(control)
+    };
     let names = |steps: &[(&'static str, f32)]| steps.iter().map(|s| s.0).collect::<Vec<_>>();
     let mut background = col().w_full().gap(10.0)
         .child(line("Background", seg(&Backdrop::LABELS, t.backdrop.index(), "look-backdrop", |t, i| t.backdrop = Backdrop::ALL[i])));
@@ -209,6 +213,34 @@ fn editor(s: &App, k: &Kit, shown_dark: bool) -> El {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+
+    /// On a phone (390 points wide) the editor's name, colour rows and buttons stay inside the
+    /// screen (#65).
+    #[test]
+    fn the_editor_fits_a_phone() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _tmp = crate::load_gen_tests::TempDataDir::new("theme-editor-phone");
+        let mut s = crate::init();
+        s.pending_place = None;
+        s.compact = true;
+        s.page = crate::Page::Settings;
+        s.settings_section = crate::state::SettingsSection::Appearance;
+        let dark = s.theme.is_dark(true);
+        let base_id = s.looks.active(dark).id.clone();
+        s.duplicate_look(&base_id, dark);
+        s.toast = None;
+        let mut rt = rune::Runtime::new(s, crate::view, (390.0, 844.0), rune::Env::new(true, 1.0));
+        rt.reduced_motion = true;
+        rt.frame(0.0);
+        let els = rt.elements();
+        // What's inside a row that scrolls sideways may be wider than the screen; the row may not.
+        let scrolling: Vec<String> = els.iter().filter(|e| e.key.as_deref().is_some_and(|k| k.starts_with("look-scroll-"))).map(|e| format!("{}/", e.path)).collect();
+        let editor: Vec<_> = els.iter().filter(|e| e.key.as_deref().is_some_and(|k| k.starts_with("look-")) && !scrolling.iter().any(|p| e.path.starts_with(p.as_str()))).collect();
+        assert!(editor.iter().any(|e| e.key.as_deref() == Some("look-color-0")), "the editor is open");
+        for e in editor {
+            assert!(e.rect[0] >= 0.0 && e.rect[0] + e.rect[2] <= 390.5, "{:?} at {:?} leaves the screen", e.key, e.rect);
+        }
+    }
 
     #[test]
     fn editor_warns_on_low_contrast_and_fix_contrast_resolves_it() {

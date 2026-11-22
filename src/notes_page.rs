@@ -95,8 +95,14 @@ pub fn notes_tab(s: &App, k: &Kit, i: usize) -> El {
             }
         }
     }
+    // Where the drawings are: here, and in the notes repository while sync is on.
+    let here = if s.cfg.device { "this device" } else if cfg!(target_arch = "wasm32") { "the RepoHub server" } else { "this computer" };
+    let synced = match (&s.sync.repo, s.sync_blocked()) {
+        (Some(repo), None) => format!(" and synced through {repo}"),
+        _ => String::new(),
+    };
     col().w_full().gap(12.0)
-        .child(text("Drawings, diagrams and annotations for this repository, saved on this computer. Each branch has its own set.").font(k.ty.small).color(k.c.text_muted).wrap())
+        .child(text(format!("Drawings, diagrams and annotations for this repository, saved on {here}{synced}. Each branch has its own set.")).font(k.ty.small).color(k.c.text_muted).wrap())
         .child(crate::sync_page::header(s, k))
         .child(picker)
         .child(new_panel)

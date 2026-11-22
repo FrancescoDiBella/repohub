@@ -244,6 +244,22 @@ mod tests {
         assert!(has(&rt, "Syncing with me/repohub-notes…"));
     }
 
+    /// The Notes section's first line says where the drawings are: here only, or here and in
+    /// the notes repository once sync is on.
+    #[test]
+    fn the_notes_section_says_the_boards_also_go_to_the_notes_repository() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _dir = crate::load_gen_tests::TempDataDir::new("sync-where");
+        let mut s = app();
+        notes_page(&mut s);
+        let mut rt = rune::Runtime::new(s, crate::view, (1180.0, 2400.0), rune::Env::new(true, 1.0));
+        rt.frame(0.0);
+        assert!(has(&rt, "for this repository, saved on this computer. Each branch"), "{:?}", texts(&rt));
+        rt.update(|s, _| s.sync_still("synced", Some("me/repohub-notes".into())));
+        rt.frame(0.1);
+        assert!(has(&rt, "saved on this computer and synced through me/repohub-notes. Each branch"), "{:?}", texts(&rt));
+    }
+
     #[test]
     fn settings_warns_about_a_public_repository_and_stop_syncing_leaves_everything() {
         let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());

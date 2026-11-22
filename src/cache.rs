@@ -682,7 +682,19 @@ impl App {
     /// The profile and the repositories of a load that's still running: shown when nothing else
     /// is on screen (the first start), so the page doesn't wait for the slowest list.
     pub(crate) fn apply_early(&mut self, epoch: u64, d: Data) {
-        if epoch != self.load_gen || self.status != state::Status::Loading || !self.data.is_empty() {
+        if epoch != self.load_gen || self.status != state::Status::Loading {
+            return;
+        }
+        // The saved copy on screen is another account's (only a token is set, and it changed
+        // outside the app): it goes now, with what was kept of that account, rather than at the
+        // end of the load (or never, if the rest of it fails).
+        let another = self.fresh.from_copy && !d.profile.login.is_empty() && !d.profile.login.eq_ignore_ascii_case(&self.data.profile.login);
+        if another {
+            state::trace("shown", &"saved copy", &"another account");
+            self.forget_copy();
+            self.details.clear();
+            self.loaded_at = None;
+        } else if !self.data.is_empty() {
             return;
         }
         self.data = d;

@@ -383,7 +383,7 @@ pub fn settings(s: &App, k: &Kit) -> El {
         ("⌘/Ctrl + ,", "Settings"),
         ("⌘/Ctrl + R", "Refresh from GitHub"),
         ("⌘/Ctrl + [", "Back: out of a conversation, a commit or a comparison, or from a repository to the list"),
-        ("Esc", "Close what's open: a confirmation, a form, a diff, a conversation, a commit, a comparison, a file, a message"),
+        ("Esc", "Close what's open, the newest first: a question, a picker, an editor, a form, a diff, a conversation, a run, a commit, a comparison, a file, a message"),
         ("Ctrl + Shift + Tab", "Leave the terminal, so the keyboard reaches the rest of the app"),
         ("↑ ↓ in ⌘K", "Move through the results; Enter runs the one highlighted"),
     ].iter().fold(keys, |p, (key, what)| p.child(rule(k)).child(info(k, key, (*what).to_owned())));
@@ -580,7 +580,7 @@ pub fn repo_settings(s: &App, k: &Kit, r: &Repo) -> El {
         .child(rule(k)).child(info(k, "Default branch", r.branch.clone()))
         .child(rule(k)).child(info(k, "Last push", r.updated_ago(s.now)));
     col().w_full().gap(16.0).child(general).child(danger.child(row().h(0.0)))
-        .child(Button::new("Open the repository on GitHub").variant(ButtonVariant::Ghost).icon(&icons::EXTERNAL).control_size(ControlSize::Small)
+        .child(Button::new("Open on GitHub").variant(ButtonVariant::Ghost).icon(&icons::EXTERNAL).control_size(ControlSize::Small)
             .on_press_tx({ let u = r.url.clone(); move |_: &mut App, tx| { let _ = tx.open_url(&u); } }).build(k).self_start())
 }
 

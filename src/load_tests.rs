@@ -101,7 +101,7 @@ fn repo(owner: &str, i: usize) -> Value {
     json!({
         "full_name": format!("{owner}/r{i}"), "name": format!("r{i}"), "owner": {"login": owner},
         "description": format!("Repository {i}"), "language": "Rust", "stargazers_count": i * 3, "forks_count": i,
-        "open_issues_count": i % 4, "pushed_at": format!("2026-11-{:02}T10:00:00Z", 20 - i), "private": i % 3 == 0,
+        "open_issues_count": i % 4, "pushed_at": format!("2026-11-{:02}T10:00:00Z", 20 - i), "private": i.is_multiple_of(3),
         "fork": false, "archived": i == 7, "default_branch": "main", "topics": ["x"], "html_url": format!("https://github.com/{owner}/r{i}"),
     })
 }
@@ -109,13 +109,13 @@ fn repo(owner: &str, i: usize) -> Value {
 fn item(n: u32, repo: &str, pull: bool, state: &str) -> Value {
     let mut v = json!({
         "number": n, "title": format!("Item {n}"), "repository_url": format!("https://api.github.com/repos/{repo}"),
-        "user": {"login": if n % 2 == 0 { "octo" } else { "alice" }}, "state": state, "draft": n % 5 == 0,
+        "user": {"login": if n.is_multiple_of(2) { "octo" } else { "alice" }}, "state": state, "draft": n.is_multiple_of(5),
         "labels": [{"name": "bug", "color": "d73a4a"}], "assignees": [{"login": "octo"}],
         "created_at": "2026-11-10T10:00:00Z", "updated_at": format!("2026-11-{:02}T10:00:00Z", 1 + n % 20), "comments": n % 3,
         "html_url": format!("https://github.com/{repo}/issues/{n}"),
     });
     if pull {
-        v["pull_request"] = json!({ "merged_at": if state == "closed" && n % 2 == 0 { json!("2026-11-11T10:00:00Z") } else { Value::Null } });
+        v["pull_request"] = json!({ "merged_at": if state == "closed" && n.is_multiple_of(2) { json!("2026-11-11T10:00:00Z") } else { Value::Null } });
     }
     v
 }
@@ -552,6 +552,15 @@ fn the_first_part_of_a_load_shows_with_the_other_lists_loading() {
     rt.update(|s, _| s.go(crate::Page::Overview));
     rt.frame(0.1);
     assert!(rt.find("skeleton-pulls").is_some() && rt.find("skeleton-recent").is_none(), "repositories shown, pull requests loading");
+    // A repository's Issues, Pull requests and Actions sections too.
+    for tab in [crate::state::RepoTab::Issues, crate::state::RepoTab::Pulls, crate::state::RepoTab::Actions] {
+        rt.update(|s, _| {
+            s.open(0);
+            s.set_tab(0, tab);
+        });
+        rt.frame(0.15);
+        assert!(rt.find("repo-list-loading").is_some(), "{tab:?}: loading, not \"Nothing to show here\"");
+    }
     rt.update(|s, _| s.apply(epoch, Ok(full)));
     rt.frame(0.2);
     assert!(!rt.state.lists_loading() && rt.find("skeleton-pulls").is_none());
@@ -595,4 +604,59 @@ fn conversations_and_repository_pages_read_before_show_at_once() {
     // A failed read behind it keeps the page.
     s.apply_detail(s.load_gen, key.clone(), crate::model::Detail { error: Some("offline".into()), ..Default::default() });
     assert!(matches!(s.details.get(&key), Some(crate::state::Load::Ready(d)) if d.readme.as_deref() == Some("old")));
+}
+
+/// Only a token is set, and it was changed outside the app to another account's: the copy
+/// (named after the host, not an account) is the previous account's. It goes as soon as the
+/// new account's profile and repositories are in, not after the whole load (nor never, when
+/// the rest of the load fails).
+#[test]
+fn another_accounts_copy_goes_as_soon_as_its_profile_is_in() {
+    let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _tmp = crate::load_gen_tests::TempDataDir::new("saved-copy-other");
+    etag::clear();
+    let token_only = |s: &mut crate::App| {
+        let mut cfg = (*s.cfg).clone();
+        cfg.user = None;
+        s.cfg = Arc::new(cfg);
+    };
+    let mut first = live_app("octo");
+    token_only(&mut first);
+    first.refresh();
+    let epoch = first.load_gen;
+    first.apply(epoch, Ok(loaded("octo")));
+    assert_eq!(copies(), vec![cache::file(&first.cfg.api, "")], "the token's copy");
+
+    // The next start, with another account's token in the same place.
+    let mut next = live_app("octo");
+    token_only(&mut next);
+    next.show_saved_copy();
+    assert_eq!(next.data.profile.login, "octo");
+    next.refresh();
+    let epoch = next.load_gen;
+    let mut alice = loaded("alice");
+    (alice.pulls, alice.issues, alice.runs) = (Vec::new(), Vec::new(), Vec::new());
+    next.apply_early(epoch, alice);
+    assert_eq!(next.data.profile.login, "alice", "the other account's lists are gone");
+    assert!(next.data.repos.iter().all(|r| r.owner == "alice"));
+    assert!(!next.fresh.from_copy && next.lists_loading(), "the rest of the lists are loading");
+    assert!(copies().is_empty(), "and its copy");
+    next.apply(epoch, Err("GitHub is down".into()));
+    assert_eq!(next.data.profile.login, "alice", "a failure doesn't bring it back");
+
+    // The same account's copy stays on screen until the whole load is in.
+    let mut same = live_app("octo");
+    token_only(&mut same);
+    let mut octo = loaded("octo");
+    octo.repos.truncate(1);
+    same.data = loaded("octo");
+    same.data_changed();
+    same.fresh.from_copy = true;
+    same.refresh();
+    let epoch = same.load_gen;
+    let shown = same.data.repos.len();
+    same.apply_early(epoch, octo);
+    assert_eq!(same.data.repos.len(), shown);
+    assert!(same.fresh.from_copy);
+    etag::clear();
 }

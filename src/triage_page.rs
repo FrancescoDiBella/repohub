@@ -156,13 +156,19 @@ fn noun(f: Facet) -> &'static str {
     }
 }
 
+/// Esc in a picker's filter or an editor closes it at once (the field would only lose its
+/// focus), as Esc elsewhere does (`App::escape`).
+fn esc_closes(s: &mut App, ev: &rune::KeyEvent, tx: &mut rune::Tx) -> bool {
+    ev.key == rune::Key::Escape && ev.mods == rune::Mods::default() && s.escape(tx)
+}
+
 /// A picker in place: a filter, the repository's choices as a checklist (one choice for the
 /// milestone), **Apply** and **Cancel**.
 pub fn picker_panel(s: &App, k: &Kit, host: Host, repo: &str, p: &Picker, hidden: Option<&str>) -> El {
     let source = Source::of(p.facet);
     let what = noun(p.facet);
     let filter = TextInput::new(&p.filter).leading_icon(k.glyph.search).placeholder(format!("Filter {what}")).label(format!("Filter {what}"))
-        .on_edit(move |s: &mut App| &mut s.picker_mut(host).expect("picker open").filter).build(k).key("triage-filter").w_full();
+        .on_edit(move |s: &mut App| &mut s.picker_mut(host).expect("picker open").filter).on_key(esc_closes).build(k).key("triage-filter").w_full();
     let mut list = col().w_full().gap(2.0).key("triage-choices");
     match s.choices.get(repo, source) {
         None | Some(Load::Loading) => {
@@ -274,7 +280,7 @@ pub fn title(s: &App, k: &Kit, o: &Open, t: &Thread) -> El {
         return col().w_full().gap(8.0).key("triage-title")
             .child(TextInput::new(e).label("Title").placeholder("Title")
                 .on_edit(|s: &mut App| s.thread.as_mut().and_then(|o| o.edit.title.as_mut()).expect("editing the title"))
-                .on_submit(|s: &mut App, _| s.save_title()).build(k).key("triage-title-input").w_full())
+                .on_submit(|s: &mut App, _| s.save_title()).on_key(esc_closes).build(k).key("triage-title-input").w_full())
             .child(edit_buttons(k, saving, off, |s| s.save_title(), |s| if let Some(o) = s.thread.as_mut() { o.edit.title = None }, "title"))
             .children(edit_notes(s, k, o, "title"));
     }
@@ -305,7 +311,7 @@ pub fn body_editor(s: &App, k: &Kit, o: &Open, first: &Entry, e: &TextEdit) -> E
         .child(col().w_full().padding(16.0).gap(10.0)
             .child(TextArea::new(e).label("Description").placeholder("Description (Markdown)").auto_grow(6, 24)
                 .on_edit(|s: &mut App| s.thread.as_mut().and_then(|o| o.edit.body.as_mut()).expect("editing the description"))
-                .build(k).key("triage-body-input").w_full())
+                .on_key(esc_closes).build(k).key("triage-body-input").w_full())
             .child(edit_buttons(k, saving, off, |s| s.save_body(), |s| if let Some(o) = s.thread.as_mut() { o.edit.body = None }, "body"))
             .children(edit_notes(s, k, o, "body")))
 }

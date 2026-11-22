@@ -124,7 +124,7 @@ pub fn viewer(s: &App, k: &Kit, i: usize, r: &Repo) -> Option<El> {
             .on_press_tx(move |s: &mut App, tx| { tx.copy(body.clone()); s.notify("File copied"); }).build(k).key("file-copy"));
     }
     tools = tools
-        .child(Button::new("GitHub").icon(&icons::EXTERNAL).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
+        .child(Button::new("Open on GitHub").icon(&icons::EXTERNAL).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
             .help("The committed version on GitHub").on_press_tx(move |_: &mut App, tx| { let _ = tx.open_url(&gh); }).build(k).key("file-github"))
         .child(rune_kit::IconButton::new(&icons::CROSS).variant(rune_kit::IconButtonVariant::GhostMuted).label("Close the file")
             .on_press(|s: &mut App| s.local_file = None).build(k).key("file-close"));

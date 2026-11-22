@@ -186,9 +186,7 @@ pub fn form_panel(s: &App, k: &Kit, i: usize) -> El {
             }
             if f.kind == Compose::Pull {
                 let draft = f.draft;
-                body = body.child(row().gap(10.0).center_y()
-                    .child(rune_kit::Switch::new(draft).label("Draft: not ready for review yet").on_toggle(|s: &mut App| if let Some(f) = s.form.as_mut() { f.draft = !f.draft; }).build(k).key("form-draft"))
-                    .child(text("Draft: not ready for review yet").font(k.ty.small).color(k.c.text_base)));
+                body = body.child(rune_kit::Switch::new(draft).label("Draft: not ready for review yet").on_toggle(|s: &mut App| if let Some(f) = s.form.as_mut() { f.draft = !f.draft; }).build(k).key("form-draft"));
             }
         }
     }
@@ -306,5 +304,38 @@ mod tests {
         assert!(form(Compose::Pull, "Title", "main", "main").write().is_err(), "a branch can't go into itself");
         assert!(matches!(form(Compose::Pull, "Title", "feature/x", "main").write(), Ok(Write::Pull(p)) if p.head == "feature/x" && p.base == "main"));
         assert_eq!(busy_key("Octo/Repo", 3), "octo/repo#3");
+    }
+
+    /// The repository page has one gap under its section bar when no form is open, and the
+    /// Code tab one under its buttons when no branch picker is: nothing invisible takes a second.
+    /// The pull request form's Draft switch says its words once.
+    #[test]
+    fn no_gap_for_what_isnt_open_and_the_draft_switch_says_it_once() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = crate::init();
+        s.data = crate::model::Data::sample();
+        s.data_changed();
+        s.pending_place = None;
+        s.open(0);
+        let mut rt = rune::Runtime::new(s, crate::view, (1180.0, 2400.0), rune::Env::new(true, 1.0));
+        rt.reduced_motion = true;
+        rt.frame(0.0);
+        rt.frame(1.0);
+        let els = rt.elements();
+        let rect = |key: &str| els.iter().find(|e| e.key.as_deref() == Some(key)).unwrap_or_else(|| panic!("{key}")).rect;
+        // How far below an element the next thing with a height starts, in the page's column.
+        let gap_under = |r: [f32; 4]| {
+            let bottom = r[1] + r[3];
+            els.iter().filter(|e| e.rect[3] > 0.5 && e.rect[0] >= r[0] - 0.5 && e.rect[0] < r[0] + r[2] && e.rect[1] >= bottom - 0.5)
+                .map(|e| e.rect[1] - bottom).fold(f32::MAX, f32::min)
+        };
+        let tabs = rect("tabs");
+        assert!((gap_under(tabs) - 16.0).abs() < 1.0, "one 16-point gap under the section bar: {}", gap_under(tabs));
+        let branch = rect("branch");
+        assert!((gap_under(branch) - 12.0).abs() < 1.0, "one 12-point gap under the Code tab's buttons: {}", gap_under(branch));
+        rt.update(|s, _| s.open_form(0, Compose::Pull));
+        rt.frame(2.0);
+        let draft = rt.elements().iter().filter(|e| e.text.as_deref() == Some("Draft: not ready for review yet")).count();
+        assert_eq!(draft, 1, "the switch's own label, once");
     }
 }

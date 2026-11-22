@@ -38,6 +38,8 @@
 | `src/diffs.rs`, `src/changes_page.rs` | Diffs with rune-kit's `DiffView`: the local changes (`local::changes`, commit, push, pull) in the Changes tab, and a pull request's files (`github::load_pull_files`) with Merge, Squash and Rebase |
 | `src/clones.rs` | Finding and remembering each repository's local clone |
 | `assets/fonts/` | Inter and IBM Plex Mono (SIL OFL), bundled so mono text is monospaced everywhere |
+| `server/allowlist.txt` | Every GitHub request the app makes, and ones it must never make: the proxy (`server/src/allowlist_cases.rs`), the Android app (`BackendTest.sharedAllowlist`) and the app's own requests (`src/allowlist_tests.rs`) are all tested against it, so the three allowlists stay equal |
+| `src/test_env.rs` | The tests' environment: taking `ENV_LOCK` clears the machine's account (`GITHUB_TOKEN`, a project `.env`, the saved one), so no test reaches GitHub or depends on who runs it |
 | `server/` | `repohub-server`: static files (`files.rs`: the precompressed `.br`/`.gz` copy the browser accepts, `Cache-Control` and `ETag`), `config.json`, the `/gh/*` GitHub proxy that holds the token, and `/api/notes` (drawings in `DATA_DIR`; `all`, conditional writes with `if=`, the trash, sync's `index`) |
 | `web/manifest.webmanifest`, `web/icon.svg` | Add to Home Screen on phones |
 | `web/index.html` | Page that loads the WebAssembly build (`app.js` and `app_bg.wasm` are build outputs) |
@@ -63,6 +65,11 @@ cargo test --release                                      # app tests (.env pars
 cargo test --release --manifest-path server/Cargo.toml    # proxy allowlist and helpers
 cargo run --release                                       # desktop app
 ```
+
+The tests don't use the account of the machine running them: a test that touches the
+environment or builds the app (`crate::init()`) takes `crate::ENV_LOCK`, which clears
+`GITHUB_TOKEN`, `GITHUB_USER`, `GITHUB_API_URL` and the project `.env` first, and sets the data
+it needs itself (`s.data = Data::sample()` then `s.data_changed()`).
 
 Headless screenshots (Rune renders without a window, on the same renderer):
 
@@ -244,7 +251,9 @@ works too (without its first-frame time). Times include the headless renderer's 
   and rewriting history stay on GitHub. The only other `DELETE` in a repository takes back a
   review request. A new write goes through `github::Write` (board sync through
   `sync_io::GhRemote` on the same transport), the proxy allowlist (`server/src/main.rs`) and its
-  test. The board paths are checked on the raw address (`board_contents_path`), as narrowly as
+  test. Every new request, read or write, is added to `server/allowlist.txt` (with its refused
+  neighbours as `deny` lines): the app's test fails until it's there, and the proxy's and the
+  Android app's tests until both allowlists take it. The board paths are checked on the raw address (`board_contents_path`), as narrowly as
   the app writes them.
 - Text in the UI is plain and specific: say what happened and how to fix it.
 - Every action gives feedback when it finishes or fails: a toast (`notify`, `notify_problem`) or

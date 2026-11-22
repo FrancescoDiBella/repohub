@@ -350,9 +350,7 @@ mod tests {
     #[test]
     fn two_hundred_issues_filter_in_no_time() {
         let list: Vec<Issue> = (0..200).map(|n| issue(n, &format!("Issue about thing {n}"), if n % 2 == 0 { "octo/app" } else { "octo/site" }, &[if n % 3 == 0 { "bug" } else { "idea" }], &[])).collect();
-        let mut f = ListFilter::default();
-        f.search = TextEdit::new("thing 1");
-        f.label = Some("bug".into());
+        let f = ListFilter { search: TextEdit::new("thing 1"), label: Some("bug".into()), ..ListFilter::default() };
         let started = std::time::Instant::now();
         let mut kept = 0;
         for _ in 0..100 {

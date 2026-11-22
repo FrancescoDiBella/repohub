@@ -455,8 +455,8 @@ impl Config {
         let (env_file, account_locked, token, user, api, sources, ignored_keys) =
             (loaded.env_file, loaded.account_locked, loaded.token, loaded.user, loaded.api, loaded.sources, loaded.ignored_keys);
         #[cfg(target_arch = "wasm32")]
-        let (env_file, account_locked, token, user, api, sources, ignored_keys): (Option<String>, bool, Option<String>, Option<String>, String, ConfigSources, Vec<String>) =
-            (None, true, None, None, "https://api.github.com".into(), ConfigSources::default(), Vec::new());
+        let (env_file, account_locked, token, user, api, sources, ignored_keys) =
+            (None::<String>, true, None::<String>, None::<String>, String::from("https://api.github.com"), ConfigSources::default(), Vec::<String>::new());
 
         let get = |k: &str| -> Option<String> {
             #[cfg(not(target_arch = "wasm32"))]

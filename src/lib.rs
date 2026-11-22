@@ -72,12 +72,15 @@ mod themes_page;
 mod tray;
 mod ui;
 mod update;
+#[cfg(test)]
+mod test_env;
 
 use config::Config;
 
-/// Tests that change process environment variables hold this, so they don't race.
+/// Tests that change process environment variables hold this, so they don't race; taking it
+/// also clears any account the machine has (see `test_env`).
 #[cfg(test)]
-pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static ENV_LOCK: test_env::Lock = test_env::Lock::new();
 use model::{Data, Detail, PullState, same_repo};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1033,6 +1036,10 @@ impl App {
         }
         self.update_channel = channel;
         channel.save();
+        // A download from the other channel stops (unless it's already being installed).
+        if matches!(self.update, update::Update::Downloading { .. }) {
+            self.cancel_update();
+        }
         // What was found on the other channel doesn't count here.
         if !matches!(self.update, update::Update::Unavailable(_) | update::Update::Downloading { .. } | update::Update::Installing) {
             self.update = update::Update::Idle;
@@ -1490,6 +1497,7 @@ impl App {
                 self.reopening.push(issue);
                 self.write(&repo, github::Write::ReopenIssue(number));
             }
+            state::Undo::ReopenPull { repo, number } => self.write(&repo, github::Write::SetPullOpen { number, open: true }),
         }
     }
 
@@ -2126,23 +2134,30 @@ impl App {
         let Some(h) = self.handle.clone() else { return };
         let cfg = self.cfg.clone();
         let epoch = self.load_gen;
-        net::spawn(h, move || async move { github::run(&cfg, &repo, w).await }, move |s: &mut App, r| {
-            if s.load_gen != epoch {
-                return;
-            }
-            match r {
-                Ok(done) => {
-                    s.form = None;
-                    s.picker = None;
-                    s.apply_done(&repo_cb, done);
+        net::spawn(h, move || async move { github::run(&cfg, &repo, w).await }, move |s: &mut App, r| s.form_sent(epoch, &repo_cb, r));
+    }
+
+    /// The form's write finished: the form closes, or stays with what was typed and GitHub's
+    /// reason. A form opened since (or none, after Cancel) is left as it is, and a failure is
+    /// then said in a toast.
+    fn form_sent(&mut self, epoch: u64, repo: &str, r: Result<github::Done, String>) {
+        if self.load_gen != epoch {
+            return;
+        }
+        let ours = self.form.as_ref().is_some_and(|f| f.repo.eq_ignore_ascii_case(repo) && f.submit.is_sending());
+        match r {
+            Ok(done) => {
+                if ours {
+                    self.form = None;
+                    self.picker = None;
                 }
-                Err(e) => {
-                    if let Some(f) = s.form.as_mut() {
-                        f.submit = Submit::Failed(e);
-                    }
-                }
+                self.apply_done(repo, done);
             }
-        });
+            Err(e) => match self.form.as_mut().filter(|_| ours) {
+                Some(f) => f.submit = Submit::Failed(e),
+                None => self.notify_problem(e),
+            },
+        }
     }
 
     /// Runs a row's write (close an issue, merge a pull request, re-run a workflow) on repository `repo`.
@@ -2273,6 +2288,10 @@ impl App {
                 if let Some(t) = self.data.open_pulls_total.as_mut() {
                     *t += 1;
                 }
+                // GitHub's count of a repository's open issues includes its pull requests.
+                if let Some(r) = self.data.repos.iter_mut().find(|r| r.full_name.eq_ignore_ascii_case(&full_name)) {
+                    r.issues += 1;
+                }
                 self.notify(format!("Opened pull request #{}", c.number));
             }
             github::Done::Closed(n) => {
@@ -2344,6 +2363,9 @@ impl App {
                     if let Some(t) = self.data.closed_pulls_total.as_mut() {
                         *t += 1;
                     }
+                    if let Some(r) = self.data.repos.iter_mut().find(|r| r.full_name.eq_ignore_ascii_case(&full_name)) {
+                        r.issues = r.issues.saturating_sub(1);
+                    }
                 }
                 self.notify(format!("Merged pull request #{n}"));
             }
@@ -2364,8 +2386,15 @@ impl App {
                     if let Some(t) = to.as_mut() {
                         *t += 1;
                     }
+                    if let Some(r) = self.data.repos.iter_mut().find(|r| r.full_name.eq_ignore_ascii_case(&full_name)) {
+                        r.issues = if open { r.issues + 1 } else { r.issues.saturating_sub(1) };
+                    }
                 }
-                self.notify(format!("{} pull request #{n}", if open { "Reopened" } else { "Closed" }));
+                if open {
+                    self.notify(format!("Reopened pull request #{n}"));
+                } else {
+                    self.notify_undo(format!("Closed pull request #{n}"), state::Undo::ReopenPull { repo: full_name.clone(), number: n });
+                }
             }
             github::Done::Release(r) => self.release_done(&full_name, *r),
             github::Done::Triaged { number, change, applied } => self.apply_triaged(&full_name, number, change, applied),
@@ -3156,6 +3185,54 @@ impl App {
         }
     }
 
+    /// Esc: closes what's open on top of the page, the most recent first (a question, a picker,
+    /// an editor, then a form, a conversation…). Only what's on screen: a form left on another
+    /// repository's page stays. True when it closed something.
+    pub(crate) fn escape(&mut self, tx: &mut Tx) -> bool {
+        let form_shown = matches!(&self.page, Page::Repo(full) if self.form.as_ref().is_some_and(|f| f.repo.eq_ignore_ascii_case(full)));
+        let thread_edit = self.thread.as_mut().map(|t| &mut t.edit);
+        if self.confirm_merge.is_some() {
+            self.confirm_merge = None;
+        } else if self.confirm_delete.is_some() {
+            self.confirm_delete = None;
+        } else if self.picker.is_some() {
+            self.picker = None;
+        } else if let Some(e) = thread_edit.filter(|e| e.picker.is_some() || e.title.is_some() || e.body.is_some()) {
+            // A picker, or the title or description being edited: closed without saving.
+            if e.picker.is_some() {
+                e.picker = None;
+            } else if e.title.is_some() {
+                e.title = None;
+            } else {
+                e.body = None;
+            }
+        } else if form_shown && self.issue_picks.picker.is_some() {
+            self.issue_picks.picker = None;
+        } else if form_shown {
+            self.form = None;
+            self.issue_picks = Default::default();
+        } else if self.release_escape() {
+            // The publish question, GitHub's notes on offer, or the release form.
+        } else if self.pull_diff_of.is_some() {
+            self.close_pull_diff();
+        } else if self.thread.is_some() {
+            self.thread = None;
+        } else if self.open_run.is_some() {
+            self.open_run = None;
+        } else if self.commits.open.is_some() {
+            self.close_commit(Some(tx));
+        } else if self.commits.compare.is_some() {
+            self.close_compare();
+        } else if self.local_file.is_some() && matches!(self.page, Page::Repo(_)) {
+            self.local_file = None;
+        } else if self.toast.is_some() {
+            self.toast = None;
+        } else {
+            return false;
+        }
+        true
+    }
+
     fn starred_count(&self) -> u32 {
         self.data.repos.iter().map(|r| r.stars).sum()
     }
@@ -3818,7 +3895,7 @@ fn sidebar(s: &App, k: &Kit) -> El {
         .header(nav(s, k, "Pull requests", &icons::PULL, Page::Pulls, (open_prs > 0 || prs_capped).then(|| model::capped_if(open_prs, prs_capped))))
         .header(nav(s, k, "Issues", &icons::ISSUE, Page::Issues, (!s.data.issues.is_empty() || issues_capped).then(|| model::capped_if(s.data.issues.len(), issues_capped))))
         .header(nav(s, k, "Actions", &icons::PLAY, Page::Actions, None))
-        .header(nav(s, k, "Notifications", &icons::BELL, Page::Notifications, Some(s.unread()).filter(|n| *n > 0).map(|n| if n >= 50 { "50+".to_owned() } else { n.to_string() })))
+        .header(nav(s, k, "Notifications", &icons::BELL, Page::Notifications, Some(s.unread()).filter(|n| *n > 0).map(|n| if n >= inbox::READ_AT_MOST { format!("{n}+") } else { n.to_string() })))
         .section(SidebarSection::new("Pinned").count(pinned.len()).collapsed(!s.pinned_open)
             .on_toggle(|s: &mut App, _| s.pinned_open = !s.pinned_open).rows(pinned));
     if !org_rows.is_empty() {
@@ -4077,7 +4154,7 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
         // The phone has no sidebar: the bell is the way to the notifications.
         let unread = s.unread();
         let bell = IconButton::new(&icons::BELL).variant(if unread > 0 { IconButtonVariant::Contrast } else { IconButtonVariant::GhostMuted })
-            .label(if unread > 0 { format!("Notifications, {unread} unread") } else { "Notifications".to_owned() })
+            .label(if unread > 0 { format!("Notifications, {}", inbox::unread_words(unread)) } else { "Notifications".to_owned() })
             .expanded(s.page == Page::Notifications).on_press(|s: &mut App| s.go(Page::Notifications)).build(&k).key("open-notifications");
         mobile::shell(s, &k, cx.safe_area(), name, trailing.child(bell).child(theme).child(settings), main.grow(1.0).min_h(0.0))
     } else {
@@ -4241,30 +4318,7 @@ fn shortcuts(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
     }
     // Esc closes what's open on top of the page, the most recent first.
     if ev.key == rune::Key::Escape && ev.mods == rune::Mods::default() {
-        if s.confirm_merge.is_some() {
-            s.confirm_merge = None;
-        } else if s.form.is_some() {
-            s.form = None;
-        } else if s.release_escape() {
-            // The publish question, GitHub's notes on offer, or the release form.
-        } else if s.pull_diff_of.is_some() {
-            s.close_pull_diff();
-        } else if s.thread.is_some() {
-            s.thread = None;
-        } else if s.open_run.is_some() {
-            s.open_run = None;
-        } else if s.commits.open.is_some() {
-            s.close_commit(Some(tx));
-        } else if s.commits.compare.is_some() {
-            s.close_compare();
-        } else if s.local_file.is_some() {
-            s.local_file = None;
-        } else if s.toast.is_some() {
-            s.toast = None;
-        } else {
-            return false;
-        }
-        return true;
+        return s.escape(tx);
     }
     // ⌘/Ctrl+1…5 jump to the main pages, ⌘/Ctrl+, to Settings.
     for (c, page) in [('1', Page::Overview), ('2', Page::Repos), ('3', Page::Pulls), ('4', Page::Issues), ('5', Page::Actions), (',', Page::Settings)] {
@@ -4341,7 +4395,7 @@ pub fn start() {
         // The web build asks repohub-server for its configuration; a static host (GitHub Pages)
         // has none, and then shows the sample data.
         #[cfg(target_arch = "wasm32")]
-        net::spawn(h2.clone(), || net::fetch_config(), |s: &mut App, cfg| {
+        net::spawn(h2.clone(), net::fetch_config, |s: &mut App, cfg| {
             let live = cfg.as_ref().is_some_and(|c| c.live());
             // The phone app has a configuration before it has an account.
             if let Some(cfg) = cfg.filter(|c| live || c.device) {
@@ -4368,6 +4422,8 @@ pub fn start() {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod load_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod allowlist_tests;
 
 #[cfg(test)]
 mod pin_tests {
@@ -5131,6 +5187,26 @@ mod fix64_inbox_tests {
         assert_eq!(inbox::explain("Can't reach GitHub"), "Can't reach GitHub");
     }
 
+    /// GitHub gives the 50 newest: with that many, the page and the phone's bell don't say "50
+    /// unread" as if that were all.
+    #[test]
+    fn fifty_notifications_are_said_to_be_the_newest_not_all() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = live();
+        s.inbox = Some(Load::Ready((0..50).map(|i| note(&i.to_string(), "octo/app", "Review this", Subject::Pull, Some(7))).collect()));
+        let mut rt = rune::Runtime::new(s, crate::view, (1180.0, 2400.0), rune::Env::new(true, 1.0));
+        rt.frame(0.0);
+        let texts: Vec<String> = rt.elements().iter().filter_map(|e| e.text.clone()).collect();
+        assert!(texts.iter().any(|t| t.starts_with("The 50 newest unread")), "{texts:?}");
+        assert!(!texts.iter().any(|t| t.starts_with("50 unread")));
+        let mut s = rt.state;
+        s.compact = true;
+        let mut rt = rune::Runtime::new(s, crate::view, (390.0, 844.0), rune::Env::new(true, 1.0));
+        rt.frame(0.0);
+        let bell = rt.elements().iter().find(|e| e.key.as_deref() == Some("open-notifications")).and_then(|e| e.label.clone());
+        assert_eq!(bell.as_deref(), Some("Notifications, 50 or more unread"));
+    }
+
     #[test]
     fn the_page_groups_by_repository_and_says_why_it_is_empty() {
         let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -5296,6 +5372,64 @@ mod fix69_tests {
         key(&mut rt, Key::Command('['), cmd, &mut t);
         assert!(rt.state.thread.is_none() && rt.state.page == Page::Repos, "and out of a conversation");
     }
+
+    /// Esc closes what's on top first (a picker, an editor, a question), and never a form that
+    /// isn't on screen: an issue being written on a repository's page stays when Esc closes a
+    /// conversation on another page.
+    #[test]
+    fn esc_closes_pickers_and_editors_first_and_never_a_form_out_of_sight() {
+        use crate::state::{BranchSlot, Compose, Facet};
+        use crate::triage::Host;
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut rt = app(Page::Pulls);
+        let mut t = 0.0;
+        let pr = rt.state.data.pulls.iter().find(|p| p.number == 14).unwrap().clone();
+        rt.update(|s, _| s.open_thread(&pr.repo, 14, true));
+        rt.frame(0.1);
+        rt.update(|s, _| s.open_picker(Host::Thread, Facet::Labels));
+        rt.frame(0.2);
+        key(&mut rt, Key::Escape, Mods::default(), &mut t);
+        assert!(rt.state.picker(Host::Thread).is_none(), "the labels picker closes");
+        assert!(rt.state.thread.is_some(), "the conversation under it stays");
+        for edit in ["title", "body"] {
+            rt.update(|s, _| if edit == "title" { s.edit_title() } else { s.edit_body() });
+            rt.frame(t + 0.01);
+            key(&mut rt, Key::Escape, Mods::default(), &mut t);
+            let e = &rt.state.thread.as_ref().expect("the conversation stays").edit;
+            assert!(e.title.is_none() && e.body.is_none(), "the {edit} editor closes");
+        }
+        assert!(rt.state.choices.sent.is_empty(), "nothing was sent");
+        key(&mut rt, Key::Escape, Mods::default(), &mut t);
+        assert!(rt.state.thread.is_none(), "then the conversation");
+
+        // An issue being written on a repository's page, left for another page.
+        rt.update(|s, _| {
+            s.open(0);
+            s.open_form(0, Compose::Issue);
+            s.form.as_mut().unwrap().title = rune::TextEdit::new("Half-written issue");
+            s.go(Page::Pulls);
+            s.open_thread(&pr.repo, 14, true);
+        });
+        rt.frame(t + 0.01);
+        key(&mut rt, Key::Escape, Mods::default(), &mut t);
+        assert!(rt.state.thread.is_none(), "Esc closes the conversation on screen");
+        assert_eq!(rt.state.form.as_ref().map(|f| f.title.text.as_str()), Some("Half-written issue"), "not the issue on the repository's page");
+        // Back there: the branch picker, then the form's labels picker, then the form.
+        rt.update(|s, _| {
+            let full = s.data.repos[0].full_name.clone();
+            s.go(Page::Repo(full));
+            s.picker = Some(BranchSlot::View);
+        });
+        rt.frame(t + 0.01);
+        key(&mut rt, Key::Escape, Mods::default(), &mut t);
+        assert!(rt.state.picker.is_none() && rt.state.form.is_some(), "the branch picker first");
+        rt.update(|s, _| s.open_picker(Host::Form, Facet::Labels));
+        rt.frame(t + 0.01);
+        key(&mut rt, Key::Escape, Mods::default(), &mut t);
+        assert!(rt.state.picker(Host::Form).is_none() && rt.state.form.is_some(), "the form's picker next");
+        key(&mut rt, Key::Escape, Mods::default(), &mut t);
+        assert!(rt.state.form.is_none(), "then the form");
+    }
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -5374,6 +5508,79 @@ mod fix66_tests {
         assert!(s.git_job.is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    /// A repository's "open issues and pull requests" count (GitHub's `open_issues_count`)
+    /// follows pull requests too, as it follows issues: opened, merged, closed, reopened.
+    #[test]
+    fn the_repositorys_open_count_follows_pull_requests_too() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = app();
+        let p = s.data.pulls.iter().find(|p| p.state == crate::model::PullState::Open).unwrap().clone();
+        let count = |s: &App| s.data.repos.iter().find(|r| crate::model::same_repo(&r.full_name, &p.repo)).unwrap().issues;
+        let before = count(&s);
+        s.pull_meta = Some(("New".into(), false));
+        s.apply_done(&p.repo, github::Done::Pull(github::Created { number: 900, url: String::new() }));
+        assert_eq!(count(&s), before + 1, "a new pull request");
+        s.apply_done(&p.repo, github::Done::Merged(900));
+        assert_eq!(count(&s), before, "merged");
+        s.apply_done(&p.repo, github::Done::PullOpen(p.number, false));
+        assert_eq!(count(&s), before - 1, "closed");
+        s.apply_done(&p.repo, github::Done::PullOpen(p.number, true));
+        assert_eq!(count(&s), before, "reopened");
+        s.apply_done(&p.repo, github::Done::Merged(900));
+        assert_eq!(count(&s), before, "merging again changes nothing");
+    }
+
+    /// Closing a pull request changes GitHub as closing an issue does: its toast offers Undo,
+    /// which reopens it.
+    #[test]
+    fn a_closed_pull_request_offers_undo() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = app();
+        let p = s.data.pulls.iter().find(|p| p.state == crate::model::PullState::Open).unwrap().clone();
+        s.apply_done(&p.repo, github::Done::PullOpen(p.number, false));
+        let undo = s.toast.as_ref().and_then(|t| t.undo.clone());
+        assert!(matches!(&undo, Some(state::Undo::ReopenPull { number, .. }) if *number == p.number), "{undo:?}");
+        // Reopening it isn't undone in turn.
+        s.apply_done(&p.repo, github::Done::PullOpen(p.number, true));
+        assert!(s.toast.as_ref().is_some_and(|t| t.undo.is_none() && t.text.starts_with("Reopened")));
+    }
+
+    /// GitHub's answer to a New issue form belongs to that form: a form opened since keeps
+    /// what's typed in it, and a failure after the form was closed is still said.
+    #[test]
+    fn a_forms_answer_reaches_that_form_or_a_toast() {
+        use crate::state::{Compose, Submit};
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = app();
+        let (a, b) = (s.data.repos[0].full_name.clone(), s.data.repos[1].full_name.clone());
+        let epoch = s.load_gen;
+        let typed = |s: &mut App, i: usize, title: &str| {
+            s.open_form(i, Compose::Issue);
+            s.form.as_mut().unwrap().title = rune::TextEdit::new(title);
+        };
+        // Sent, then Cancel: GitHub refuses. Nothing on screen would say it otherwise.
+        typed(&mut s, 0, "First");
+        s.form.as_mut().unwrap().submit = Submit::Sending;
+        s.form = None;
+        s.toast = None;
+        s.form_sent(epoch, &a, Err("GitHub refused: Issues are disabled".into()));
+        assert!(s.toast.as_ref().is_some_and(|t| t.text.contains("Issues are disabled")), "the failure is said");
+        // Sent, then another form opened and typed in: the first's answer leaves it alone.
+        typed(&mut s, 0, "Second");
+        s.form.as_mut().unwrap().submit = Submit::Sending;
+        typed(&mut s, 1, "Half-written");
+        s.form_sent(epoch, &a, Err("GitHub refused".into()));
+        let f = s.form.as_ref().expect("the open form stays");
+        assert_eq!((f.repo.as_str(), f.title.text.as_str(), f.submit.is_sending() || matches!(f.submit, Submit::Failed(_))), (b.as_str(), "Half-written", false));
+        s.form_sent(epoch, &a, Ok(github::Done::Issue(github::Created { number: 99, url: String::new() })));
+        assert_eq!(s.form.as_ref().map(|f| f.title.text.as_str()), Some("Half-written"), "still open after the other one's success");
+        assert!(s.data.issues.iter().any(|x| x.number == 99), "and the new issue is listed");
+        // Its own answer closes it.
+        s.form.as_mut().unwrap().submit = Submit::Sending;
+        s.form_sent(epoch, &b, Ok(github::Done::Issue(github::Created { number: 100, url: String::new() })));
+        assert!(s.form.is_none());
+    }
 }
 
 #[cfg(test)]
@@ -5433,6 +5640,29 @@ mod fix60_tests {
         // Once already Installing, cancel_update is a no-op.
         s.cancel_update();
         assert_eq!(s.update, crate::update::Update::Installing);
+    }
+
+    /// Switching where updates come from while one downloads stops that download (it's the
+    /// other channel's build) instead of installing it anyway; once installing, it's too late.
+    #[test]
+    fn switching_channel_mid_download_stops_the_other_channels_build() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _dir = crate::load_gen_tests::TempDataDir::new("update-channel");
+        let mut s = crate::init();
+        let rel = sample_release();
+        s.update_channel = crate::update::Channel::Preview;
+        let job = crate::UpdateJob::new();
+        s.update_cancel = Some(job.clone());
+        s.update = crate::update::Update::Downloading { release: rel.clone(), percent: 30 };
+        s.set_update_channel(crate::update::Channel::Stable);
+        assert!(job.was_cancelled() && !job.begin_install(), "the Latest build's download stops");
+        assert!(s.update_cancel.is_none());
+        assert!(matches!(s.update, crate::update::Update::Idle | crate::update::Update::Checking), "{:?}", s.update);
+        // Already installing: nothing changes but the channel.
+        s.update = crate::update::Update::Installing;
+        s.set_update_channel(crate::update::Channel::Preview);
+        assert_eq!(s.update, crate::update::Update::Installing);
+        crate::update::Channel::Stable.save();
     }
 
     #[test]
@@ -7995,7 +8225,7 @@ mod phone_sizes {
         assert_eq!(crate::terminal_page::term_h(&s), 520.0);
         s.compact = true;
         let h = crate::terminal_page::term_h(&s);
-        assert!(h < 844.0 - 250.0 && h >= 240.0, "{h}");
+        assert!((240.0..844.0 - 250.0).contains(&h), "{h}");
         s.backdrop_size = [390.0, 400.0];
         assert_eq!(crate::terminal_page::term_h(&s), 240.0, "never smaller than a few lines");
     }
@@ -8051,6 +8281,9 @@ mod fix67_tests {
     fn actions_filters_and_run_detail_view_jobs_steps_and_logs() {
         let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut s = crate::init();
+        // The sample runs, whatever account the machine has.
+        s.data = crate::model::Data::sample();
+        s.data_changed();
         s.pending_place = None;
         s.toast = None;
         s.page = Page::Actions;
