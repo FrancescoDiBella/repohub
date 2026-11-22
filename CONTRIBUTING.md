@@ -38,12 +38,14 @@
 | `src/diffs.rs`, `src/changes_page.rs` | Diffs with rune-kit's `DiffView`: the local changes (`local::changes`, commit, push, pull) in the Changes tab, and a pull request's files (`github::load_pull_files`) with Merge, Squash and Rebase |
 | `src/clones.rs` | Finding and remembering each repository's local clone |
 | `assets/fonts/` | Inter and IBM Plex Mono (SIL OFL), bundled so mono text is monospaced everywhere |
-| `server/` | `repohub-server`: static files, `config.json`, the `/gh/*` GitHub proxy that holds the token, and `/api/notes` (drawings in `DATA_DIR`; `all`, conditional writes with `if=`, the trash, sync's `index`) |
+| `server/` | `repohub-server`: static files (`files.rs`: the precompressed `.br`/`.gz` copy the browser accepts, `Cache-Control` and `ETag`), `config.json`, the `/gh/*` GitHub proxy that holds the token, and `/api/notes` (drawings in `DATA_DIR`; `all`, conditional writes with `if=`, the trash, sync's `index`) |
 | `web/manifest.webmanifest`, `web/icon.svg` | Add to Home Screen on phones |
 | `web/index.html` | Page that loads the WebAssembly build (`app.js` and `app_bg.wasm` are build outputs) |
 | `Dockerfile`, `compose.yaml` | Container: builds the web app and the server, runs the server on port 8080 |
 | `packaging/` | Desktop packaging: the icon, the macOS bundle script and `Info.plist`, the Linux launcher and installer |
 | `CHANGELOG.md`, `scripts/release-notes.sh` | Release notes: one section per version, printed by the script for the Desktop workflow |
+| `scripts/web-build.sh`, `scripts/install-wasm-opt.sh` | The web build that Docker, Android and Pages ship: cargo's `web` profile, wasm-bindgen, wasm-opt, the versioned page, `--precompress`; and the pinned wasm-opt it needs |
+| `scripts/size.sh`, `scripts/size-baseline.json` | What we ship, measured (see [Size](#size)), and the numbers CI compares with |
 | `.github/workflows/` | CI (tests and builds), image publishing (GHCR), GitHub Pages, desktop builds and releases (`release.yml`) |
 
 ## How data flows
@@ -98,23 +100,81 @@ The Android app is described in [`android/README.md`](android/README.md).
 
 ### Web build
 
-You need the `wasm32-unknown-unknown` target and `wasm-bindgen-cli` at the version in
-`Cargo.lock` (0.2.129):
+You need the `wasm32-unknown-unknown` target, `wasm-bindgen-cli` at the version in
+`Cargo.lock` (0.2.129) and `wasm-opt` (Binaryen):
 
 ```sh
 rustup target add wasm32-unknown-unknown
 cargo install wasm-bindgen-cli --version 0.2.129 --locked
-cargo build --release --lib --target wasm32-unknown-unknown
-wasm-bindgen --target web --out-dir web --out-name app target/wasm32-unknown-unknown/release/repohub.wasm
+scripts/install-wasm-opt.sh ~/.local/bin        # Linux; on a Mac, brew install binaryen
+scripts/web-build.sh dist/web                   # the page, app.js, app_bg.wasm (add --precompress for .br/.gz)
 ```
 
+`scripts/web-build.sh` is the build the Docker image, the Android app and GitHub Pages ship
+(the `web` profile, wasm-bindgen, wasm-opt, and the page naming the files with the build's hash).
 Then serve it with the proxy:
 
 ```sh
-cargo run --release --manifest-path server/Cargo.toml      # WEB_DIR=web, REPOHUB_ADDR=127.0.0.1:8080
+WEB_DIR=dist/web cargo run --release --manifest-path server/Cargo.toml    # REPOHUB_ADDR=127.0.0.1:8080
+```
+
+While working on the app, the quicker build is the release profile without wasm-opt, into `web/`
+(the server's default `WEB_DIR`):
+
+```sh
+cargo build --release --lib --target wasm32-unknown-unknown
+wasm-bindgen --target web --out-dir web --out-name app target/wasm32-unknown-unknown/release/repohub.wasm
+cargo run --release --manifest-path server/Cargo.toml
 ```
 
 The server reads its settings from the environment, using the same variables as `.env`.
+
+### Size
+
+`scripts/size.sh` measures what RepoHub ships that a Linux machine can build: the desktop
+program, the web build at each step (the `.wasm` from cargo, after wasm-bindgen, after wasm-opt,
+and with gzip and brotli, which is what a browser downloads) and how many copies of each font
+the two carry. It builds nothing, so build first:
+
+```sh
+cargo build --profile dist --bin repohub    # the program, as the Desktop workflow builds it
+scripts/web-build.sh dist/web               # the web build, as Docker, Android and Pages make it
+scripts/size.sh                             # the table
+scripts/size.sh --crates                    # and the biggest crates (cargo install cargo-bloat twiggy);
+                                            # this rebuilds the program with symbols
+```
+
+The profiles (`Cargo.toml`):
+
+- `release` (`cargo run`, `cargo test --release`): optimized for size, thin LTO. Quick to build.
+- `dist` (the desktop packages): `release` with fat LTO and one codegen unit. Measured on Linux
+  x86_64: the program 22% smaller (32.8 → 25.5 MB, the font copies Rune and RepoHub both
+  embed are merged too), the 500-repository timing test 4–7% faster, frame times the same. A
+  rebuild after a change takes longer, as fat LTO runs on one core (2.3 → 3.9 minutes on a busy
+  4-core machine; a build from scratch about the same, 7–8 minutes).
+  `opt-level = "z"` would make the program another 10% smaller, but typing in the palette 15%
+  slower, so it isn't used.
+- `web` (the web build): `release` with fat LTO and one codegen unit. wasm-opt runs light
+  (`-O1`): `-Oz` makes the file 10% smaller but its gzip and brotli 2–4% bigger, and the browser
+  downloads it compressed.
+
+Panics unwind in every desktop profile (Rune's image decoder catches a codec's panic);
+`src/main.rs` refuses to compile with `panic = "abort"`. Rune's `embedded-fonts` feature is
+off: RepoHub registers the same fonts itself (`FONTS` in `src/lib.rs`), and with the feature the
+web build carried them twice.
+
+`repohub-server` sends the `.br` or `.gz` copy that `scripts/web-build.sh --precompress` made
+(the Docker image has them) to a browser that accepts it, with a year's `Cache-Control` for the
+versioned names (`app.js?v=…`) and `no-cache` with an `ETag` for the page (`server/src/files.rs`).
+The Android APK compresses the files itself, and R8 shrinks its code.
+
+CI's `size` job builds `dist` and `web` and runs
+`scripts/size.sh --compare scripts/size-baseline.json`: the table goes to the job summary, with a
+warning (never a failure) when the program, the `.wasm` or the brotli download grows by more than
+3%. The baseline is a committed file rather than `main`'s last build, so CI builds once, and
+growth that comes 1% at a time still adds up to a warning. It changes only on purpose: when a
+pull request's growth is worth it, put its run's `size` artifact (`size.json`) in
+`scripts/size-baseline.json` in the same pull request, and say why.
 
 ### Testing without a real token
 

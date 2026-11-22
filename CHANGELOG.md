@@ -59,6 +59,11 @@ The sections are **Added**, **Changed** and **Fixed**.
   panels.
 
 ### Changed
+- **Smaller downloads.** The desktop app is about a fifth smaller (on Linux the program went
+  from 32.8 to 25.5 MB) and no slower. In Docker, the server now sends the web app compressed:
+  the first visit downloads 2.4 MB (brotli) or 3.5 MB (gzip) instead of 16.8 MB, and the browser
+  keeps the files until the next version instead of downloading them again on every visit. The
+  Android app's APK is several megabytes smaller: its page is now compressed inside it.
 - Loading is about 2.5 times faster: the parts of a load run side by side (at most four requests
   at a time), and on a first start your repositories show before pull requests, issues and runs
   are in.

@@ -1,5 +1,8 @@
 target/
 server/target/
+# scripts/web-build.sh's usual folder, the release workflow's packages, the Pages build
+/dist/
+/_site/
 .env
 .env.*
 !.env.example

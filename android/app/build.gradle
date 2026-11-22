@@ -38,7 +38,11 @@ android {
 
     buildTypes {
         release {
-            minifyEnabled false
+            // R8 shrinks the app's own code and drops unused resources. The page calls the
+            // bridge's @JavascriptInterface methods by name: proguard-rules.pro keeps them.
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
             signingConfig keystore ? signingConfigs.release : signingConfigs.debug
         }
     }
@@ -48,10 +52,9 @@ android {
         targetCompatibility JavaVersion.VERSION_17
     }
 
-    // The WebView reads the wasm straight from the APK: don't compress it twice.
-    androidResources {
-        noCompress += ["wasm"]
-    }
+    // The page's files (assets/web) are compressed in the APK like any asset: the .wasm shrinks
+    // to about a third, and MainActivity reads it through AssetManager, which inflates it.
+    // There are no .br or .gz copies of them: the WebView wouldn't decode those.
 
     lint {
         abortOnError false

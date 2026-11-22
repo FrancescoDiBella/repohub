@@ -18,6 +18,8 @@
 <div id="status">Loading RepoHub…</div>
 
 <script type="module">
+// scripts/web-build.sh adds the build's hash to the two file names below (`?v=…`), so the
+// browser can keep both files until the next version.
 import init, { repohub_back } from './app.js';
 // The Android app's back button (android/): the app goes back, or asks to be left.
 globalThis.__repohubBack = repohub_back;
@@ -26,7 +28,7 @@ try {
     if (!navigator.gpu) throw new Error(window.isSecureContext
         ? 'This browser has no WebGPU. Use a current Chrome, Edge or Safari (iOS 26 or later).'
         : 'RepoHub needs HTTPS (or localhost): browsers only offer WebGPU on secure pages. See "On your phone" in the README.');
-    await init();
+    await init({ module_or_path: './app_bg.wasm' });
     document.querySelector('#status').remove();
 } catch (error) {
     document.querySelector('#status').textContent = String(error);

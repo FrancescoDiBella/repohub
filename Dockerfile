@@ -6,22 +6,20 @@
 FROM rust:1-bookworm AS build
 WORKDIR /src
 # The toolchain version is pinned by rust-toolchain.toml; rustup installs it on first use.
+# wasm-opt shrinks the .wasm; brotli and gzip make the copies the server sends to browsers.
 COPY rust-toolchain.toml ./
+COPY scripts/install-wasm-opt.sh scripts/
 RUN rustup target add wasm32-unknown-unknown \
- && cargo install wasm-bindgen-cli --version 0.2.129 --locked
+ && cargo install wasm-bindgen-cli --version 0.2.129 --locked \
+ && scripts/install-wasm-opt.sh /usr/local/bin \
+ && apt-get update && apt-get install -y --no-install-recommends brotli && rm -rf /var/lib/apt/lists/*
 COPY . .
-ENV CARGO_PROFILE_RELEASE_OPT_LEVEL=s \
-    CARGO_PROFILE_RELEASE_LTO=thin \
-    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
-    CARGO_PROFILE_RELEASE_DEBUG=0 \
-    CARGO_PROFILE_RELEASE_STRIP=debuginfo
+# The web app is built with the `web` profile (Cargo.toml), the server with its own.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target \
     --mount=type=cache,target=/src/server/target \
-    cargo build --release --lib --target wasm32-unknown-unknown \
- && wasm-bindgen --target web --out-dir /out/web --out-name app target/wasm32-unknown-unknown/release/repohub.wasm \
- && cp web/index.html web/manifest.webmanifest web/icon.svg /out/web/ \
+    scripts/web-build.sh /out/web --precompress \
  && cargo build --release --manifest-path server/Cargo.toml \
  && cp server/target/release/repohub-server /out/ \
  && mkdir -p /out/data
