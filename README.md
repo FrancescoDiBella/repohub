@@ -75,7 +75,9 @@ What this means for the token:
 - The server forwards only the exact endpoints RepoHub uses (`allowed()` in `server/src/main.rs`):
   reads, starring, creating issues, branches and pull requests, comments and reviews, closing and
   reopening issues and pull requests, merging pull requests, and marking notifications as read.
-  Nothing that deletes or rewrites repositories.
+  Nothing that deletes or rewrites repositories. Paths are checked before they're decoded: no
+  encoded dot or slash, and a branch name with `%` (sent as `%25`) passes only where a branch is
+  named, never as something a second decoding could turn into another character.
 - When `REPOHUB_ALLOW_WRITES` is off (the default whenever binding to a non-loopback address),
   all write methods (`POST`, `PUT`, `PATCH`, `DELETE`) are rejected with `403 Forbidden`.
 - The server compares the full `Origin` (scheme, host and port) against `Host`, requires `X-RepoHub: 1`
@@ -111,7 +113,8 @@ phone and allow the installation.
   view** drags the drawing, and plus and minus zoom. Drawings are kept on the phone and, with a
   notes repository chosen in Settings, [sync](#boards-on-every-device) with your other devices.
   **Export** opens the phone's "save to" picker; **Import…** its file picker.
-- **Back:** the back button closes what's open, then goes up a page, then leaves the app.
+- **Back:** the back button closes what's open in the order Esc does (a question, a picker, an
+  editor, a form, a diff, a conversation), then goes up a page, then leaves the app.
 - **Not on the phone:** the terminal, Claude, local clones and plugins need a computer.
 - **Needs:** Android 12 or later with a current Android System WebView (121 or later).
 - **Updates:** unless the build is signed with your own key, remove the app before installing a
@@ -297,7 +300,10 @@ menu and in Settings, which also says when the next refresh is due. ⌘R (Ctrl+R
 
 **Opening at once.** After each load RepoHub saves a copy of the lists (and of the repository
 pages you opened), and the next start shows it in the first frame with "Updating…" until GitHub
-answers. If GitHub can't be reached, the copy stays and the banner says how old it is.
+answers. If GitHub can't be reached, the copy stays and the banner says how old it is. With only
+a token and no user name, the copy waits for GitHub's first answer (`/user`), which says whose
+the token is: a token changed outside the app never shows the previous account's lists, which
+are removed then.
 - Desktop: `<data dir>/cache/<host>-<account>.json` (`~/.local/share/repohub` on Linux,
   `~/Library/Application Support/RepoHub` on macOS, `%APPDATA%\RepoHub` on Windows), readable by
   you only. Web and Android: the browser's storage, when it fits (the largest parts are left out
@@ -365,11 +371,19 @@ With a token that has write access, the everyday changes happen in RepoHub:
 | Releases tab | **New release**: a tag (the next versions are offered), the branch a new tag is made from, title, Markdown notes with **Generate notes**, pre-release. **Save draft**, or **Publish release** after a question. On a draft: **Edit** and **Publish** (it asks first). |
 | Changes tab: merging | **Merge a branch** into the one checked out: pick it to preview its commits and the diff it brings, then merge. If there are conflicts, it lists the files and offers **Abort merge**. Fix them in your editor or the Terminal, then **Commit** finishes the merge. Commit refuses files that still have conflict markers. |
 
-What GitHub creates shows at once; the lists catch up on the next refresh. GitHub's error, if
+What GitHub creates shows at once; the lists catch up on the next refresh. A change made while
+a refresh runs (closing an issue, merging, a new issue, a star) stays when the refresh lands,
+and isn't counted twice when GitHub's lists already show it. GitHub's error, if
 any, shows in the form (for example "A pull request already exists"). A label, assignee,
 milestone, reviewer, title or description change updates the conversation and the list rows
 without a reload, with a message; when GitHub refuses (the token may only read the
 repository), the details say so once and keep the old values.
+
+**What you type isn't lost by accident.** Esc, **Cancel**, opening another form (for any
+repository) or leaving a conversation asks "Discard what you typed?" (**Discard** or **Keep
+editing**) when a New issue, branch or pull request form, the release form, an edited title or
+description, or a comment (in a conversation or on a diff's lines) holds text not sent yet. An
+empty one closes at once.
 
 RepoHub still doesn't delete repositories, branches, releases or tags, upload files to a release,
 or rewrite history: those stay on GitHub.
@@ -663,11 +677,11 @@ GitHub Enterprise.
 | Page | Data and actions | API |
 | --- | --- | --- |
 | Overview | totals, commits over the last 26 weeks, recent repositories, what waits for your review, open pull requests | `/user` or `/users/{u}`, `/user/repos` or `/users/{u}/repos`, `/search/issues` (with `review-requested:{u}`), `/repos/{r}/stats/participation` |
-| Repositories | search by name, description and topic; public, private and fork filters; star | `/user/starred`, `PUT`/`DELETE /user/starred/{r}` |
+| Repositories | search by name, description and topic; public, private and fork filters; star (on the sample data, on screen only, and it says so) | `/user/starred`, `PUT`/`DELETE /user/starred/{r}` |
 | Repository | root files, README, languages, last commit, copy clone URL, open on GitHub | `/repos/{r}/contents`, `/readme`, `/languages`, `/commits` |
 | Repository → Commits | a branch's history (30 at a time), one commit with its diff, two branches compared and whether a pull request is open between them | `/repos/{r}/commits?sha={branch}&per_page=30&page={n}`, `/repos/{r}/commits/{sha}`, `/repos/{r}/compare/{base}...{head}`, `/search/issues?q=is:pr is:open repo:{r} head:{head} base:{base}` |
 | Repository → Releases | releases (20 at a time) with notes and files, the latest release (also in the header), tags without a release; draft, edit and publish a release, generated notes | `/repos/{r}/releases?per_page=20&page={n}`, `/repos/{r}/releases/latest`, `/repos/{r}/tags?per_page=50`, `POST /repos/{r}/releases`, `POST /repos/{r}/releases/generate-notes`, `PATCH /repos/{r}/releases/{id}` |
-| Pull requests | pull requests you're involved in or whose review is asked of you: open, draft, merged, closed; filters; click to read the conversation, its checks and its diff | `/search/issues?q=is:pr involves:{u}`, `/search/issues?q=is:pr is:open review-requested:{u}`, `/repos/{r}/pulls/{n}`, `/files`, `/reviews`, `/comments`, `/commits/{sha}/check-runs` |
+| Pull requests | pull requests you're involved in or whose review is asked of you: open, draft, merged, closed; filters; click to read the conversation, its checks and its diff (the first 100 checks and line comments; it says when GitHub has more) | `/search/issues?q=is:pr involves:{u}`, `/search/issues?q=is:pr is:open review-requested:{u}`, `/repos/{r}/pulls/{n}`, `/files`, `/reviews`, `/comments?per_page=100`, `/commits/{sha}/check-runs?per_page=100` (its `total_count`) |
 | Issues | open issues in your repositories; filters; click to read and answer; new issue with labels and assignees | `/search/issues?q=is:issue is:open user:{u}`, `/repos/{r}/issues/{n}`, `/comments`, `POST /repos/{r}/issues` |
 | Conversation details | labels, assignees, milestone, reviewers; edit them, the title and the description | the repository's choices: `/repos/{r}/labels`, `/assignees`, `/milestones?state=open` (the first 100 of each; it says when there are more); changes: `PATCH /repos/{r}/issues/{n}` (`labels`, `assignees`, `milestone`, `title`, `body`), `POST` and `DELETE /repos/{r}/pulls/{n}/requested_reviewers` |
 | Notifications | your unread notifications; mark as read | `/notifications`, `PATCH /notifications/threads/{id}` |
