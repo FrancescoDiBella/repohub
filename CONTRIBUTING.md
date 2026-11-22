@@ -4,7 +4,20 @@
 
 | Path | What |
 | --- | --- |
-| `src/lib.rs` | App state, background loading, sidebar, toolbar, banners |
+| `src/lib.rs` | The crate root: the `mod` lines, `ENV_LOCK`, and the re-exports that keep the paths the crate names (`crate::App`, `crate::Page`, `crate::view`, `crate::init`, …) |
+| `src/app/mod.rs` | The app's state: `App` and its fields, `Page`, the small types the fields use, and `init` (with the `-- page …` start-up arguments). The `impl App` blocks are in the files below, which share its imports |
+| `src/app/frame.rs` | Start-up and the frame loop: `start`, the fonts, `poll`, the 30-second `tick`, closing the window, the Android back button |
+| `src/app/nav.rs` | Moving between places: `go`, `open`, `set_tab` and `leave_tab`, the place saved for the next start, what Esc (`escape`) and the back button close |
+| `src/app/loading.rs` | Loading from GitHub: `refresh` and `apply`, a repository's details and branches, the branch picked, loading more pull requests and issues |
+| `src/app/writes.rs` | Writes and their feedback: the toasts (`notify`, `notify_undo`, `undo`), the forms, `write` and `apply_done` |
+| `src/app/conversations.rs` | What opens in place of the page: notifications, a conversation, a workflow run, a pull request's diff and its line comments |
+| `src/app/git.rs` | The local clone (finding it, its files), git (changes, commit, merge), the terminal, Claude, running a coding assistant |
+| `src/app/drawings.rs` | Notes: the drawings list, the board editor, one write or delete at a time per drawing |
+| `src/app/repos.rs` | The repository lists, pins and organizations cached between frames (`data_gen`), pinning and starring |
+| `src/app/updates.rs` | Updating RepoHub itself, and the status-bar widget's menu |
+| `src/app/settings.rs` | What Settings changes: the account and signing out, the theme and looks, plugins, coding assistants |
+| `src/app/chrome.rs`, `src/app/keys.rs` | The window around the pages (`view`: sidebar, toolbar, banners, the toast) and the keyboard shortcuts |
+| `src/tests/` | Tests that build the whole app and drive it headless, one module per file (`fix58_tests`, …; `load_gen_tests` has `TempDataDir`); `every_page` draws every page and section on a computer and a phone |
 | `src/pages.rs`, `src/lists.rs` | Pages: overview, repositories, repository detail, pull requests, issues, Actions, settings |
 | `src/mobile.rs` | The phone layout (top bar and bottom tab bar) used below `mobile::BREAKPOINT`; pages read `App::compact` |
 | `src/ui.rs`, `src/icons.rs` | Small building blocks and the icon set |
@@ -48,7 +61,7 @@
 | `CHANGELOG.md`, `scripts/release-notes.sh` | Release notes: one section per version, printed by the script for the Desktop workflow |
 | `scripts/web-build.sh`, `scripts/install-wasm-opt.sh` | The web build that Docker, Android and Pages ship: cargo's `web` profile, wasm-bindgen, wasm-opt, the versioned page, `--precompress`; and the pinned wasm-opt it needs |
 | `scripts/size.sh`, `scripts/size-baseline.json` | What we ship, measured (see [Size](#size)), and the numbers CI compares with |
-| `.github/workflows/` | CI (tests and builds), image publishing (GHCR), GitHub Pages, desktop builds and releases (`release.yml`) |
+| `.github/workflows/` | CI (tests, clippy and builds), image publishing (GHCR), GitHub Pages, desktop builds and releases (`release.yml`) |
 
 ## How data flows
 
@@ -63,6 +76,7 @@
 ```sh
 cargo test --release                                      # app tests (.env parser, dates, config.json)
 cargo test --release --manifest-path server/Cargo.toml    # proxy allowlist and helpers
+cargo clippy --release --all-targets -- -D warnings       # lints, as CI runs them (the server: add --manifest-path)
 cargo run --release                                       # desktop app
 ```
 
@@ -167,8 +181,8 @@ The profiles (`Cargo.toml`):
 
 Panics unwind in every desktop profile (Rune's image decoder catches a codec's panic);
 `src/main.rs` refuses to compile with `panic = "abort"`. Rune's `embedded-fonts` feature is
-off: RepoHub registers the same fonts itself (`FONTS` in `src/lib.rs`), and with the feature the
-web build carried them twice.
+off: RepoHub registers the same fonts itself (`FONTS` in `src/app/frame.rs`), and with the
+feature the web build carried them twice.
 
 `repohub-server` sends the `.br` or `.gz` copy that `scripts/web-build.sh --precompress` made
 (the Docker image has them) to a browser that accepts it, with a year's `Cache-Control` for the
