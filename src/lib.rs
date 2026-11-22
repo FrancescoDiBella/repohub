@@ -213,6 +213,10 @@ pub struct App {
     issue_filter: filters::ListFilter,
     /// What the Actions page is narrowed to.
     pub(crate) runs_filter: runs_page::RunsFilter,
+    /// The issue or pull request whose conversation is on screen, in place of the page.
+    thread: Option<thread::Open>,
+    /// Counts conversation loads (see [`thread::Open::epoch`]).
+    thread_epoch: u64,
     /// The repositories' labels, assignable people and milestones, kept once loaded (triage).
     choices: triage::Cache,
     /// The labels and assignees picked in the New issue form.
@@ -220,10 +224,6 @@ pub struct App {
     /// The list filters last saved in the preferences (`filters::Saved`), so they're written only
     /// when they change.
     saved_filters: Option<String>,
-    /// The issue or pull request whose conversation is on screen, in place of the page.
-    thread: Option<thread::Open>,
-    /// Counts conversation loads (see [`thread::Open::epoch`]).
-    thread_epoch: u64,
     /// The workflow run whose jobs and log are on screen, in place of the page.
     pub(crate) open_run: Option<runs_page::OpenRun>,
     /// Counts workflow run detail loads (see [`runs_page::OpenRun::epoch`]).
@@ -3131,11 +3131,11 @@ fn init() -> App {
         pull_filter: filters::ListFilter::default(),
         issue_filter: filters::ListFilter::default(),
         runs_filter: runs_page::RunsFilter::default(),
+        thread: None,
+        thread_epoch: 0,
         choices: triage::Cache::default(),
         issue_picks: triage::Picks::default(),
         saved_filters: None,
-        thread: None,
-        thread_epoch: 0,
         open_run: None,
         run_epoch: 0,
         busy: std::collections::HashSet::new(),

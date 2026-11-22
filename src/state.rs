@@ -16,10 +16,10 @@
 //! | [`RepoFilter`], [`RepoSort`] | | the Repositories list |
 //! | [`Account`] | Locked / SignedOut / SignedIn | the account form in Settings |
 //! | [`Toast`] | (none) → shown(kind) → (none) | the message at the bottom |
+//! | [`Facet`] | Labels / Assignees / Milestone / Reviewers | what the open triage picker edits |
 //! | [`Submit`] | Editing → Sending → (closed) / Failed | a form that writes to GitHub |
 //! | [`Compose`] | Issue / Branch / Pull | which form is open |
 //! | [`BranchSlot`] | View / From / Head / Base | what the branch picker fills in |
-//! | [`Facet`] | Labels / Assignees / Milestone / Reviewers | what the open triage picker edits |
 
 /// Where the data on screen comes from.
 ///

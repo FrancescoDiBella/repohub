@@ -890,25 +890,6 @@ impl Gh {
         self.write("PATCH", &format!("/repos/{full}/issues/{number}"), json!({ "state": "closed", "state_reason": "completed" })).await.map(|_| ())
     }
 
-    /// The files a pull request changes, with each one's patch (GitHub leaves out the patch of
-    /// very large or binary files). At most 300 files.
-    pub async fn pull_files(&self, full: &str, number: u32) -> Result<Vec<PullFile>, String> {
-        let mut out = Vec::new();
-        for page in 1..=3 {
-            let v = self.get(&format!("/repos/{full}/pulls/{number}/files?per_page=100&page={page}")).await?;
-            let list = v.as_array().cloned().unwrap_or_default();
-            let n = list.len();
-            out.extend(list.iter().map(|f| {
-                let s = |k: &str| f.get(k).and_then(Value::as_str).map(str::to_owned);
-                PullFile { path: s("filename").unwrap_or_default(), previous: s("previous_filename"), status: s("status").unwrap_or_default(), patch: s("patch") }
-            }));
-            if n < 100 {
-                break;
-            }
-        }
-        Ok(out)
-    }
-
     /// A repository's labels, assignable people or open milestones (the first 100).
     pub async fn choices(&self, full: &str, source: crate::triage::Source) -> Result<crate::triage::Choices, String> {
         let (v, resp) = self.get_resp(&source.path(full)).await?;
@@ -933,6 +914,25 @@ impl Gh {
     pub async fn review_requested(&self, login: &str) -> Result<(Vec<Pull>, usize), String> {
         let (items, total) = self.search_page(&format!("is:pr is:open review-requested:{login}"), 1).await?;
         Ok((items.iter().map(parse_pull).map(|p| Pull { review_requested: true, ..p }).collect(), total))
+    }
+
+    /// The files a pull request changes, with each one's patch (GitHub leaves out the patch of
+    /// very large or binary files). At most 300 files.
+    pub async fn pull_files(&self, full: &str, number: u32) -> Result<Vec<PullFile>, String> {
+        let mut out = Vec::new();
+        for page in 1..=3 {
+            let v = self.get(&format!("/repos/{full}/pulls/{number}/files?per_page=100&page={page}")).await?;
+            let list = v.as_array().cloned().unwrap_or_default();
+            let n = list.len();
+            out.extend(list.iter().map(|f| {
+                let s = |k: &str| f.get(k).and_then(Value::as_str).map(str::to_owned);
+                PullFile { path: s("filename").unwrap_or_default(), previous: s("previous_filename"), status: s("status").unwrap_or_default(), patch: s("patch") }
+            }));
+            if n < 100 {
+                break;
+            }
+        }
+        Ok(out)
     }
 
     pub async fn merge_pull(&self, full: &str, number: u32, method: &str) -> Result<(), String> {

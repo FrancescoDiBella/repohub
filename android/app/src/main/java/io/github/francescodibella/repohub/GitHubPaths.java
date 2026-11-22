@@ -172,12 +172,12 @@ final class GitHubPaths {
         }
     }
 
+    private static boolean starred(String[] seg) {
+        return seg.length == 4 && seg[0].equals("user") && seg[1].equals("starred") && !seg[2].isEmpty() && !seg[3].isEmpty();
+    }
+
     /** `/repos/{o}/{r}/pulls/{digits}/requested_reviewers`, nothing under it. */
     private static boolean requestedReviewers(boolean repo, String[] rest) {
         return repo && rest.length == 3 && rest[0].equals("pulls") && number(rest[1]) && rest[2].equals("requested_reviewers");
-    }
-
-    private static boolean starred(String[] seg) {
-        return seg.length == 4 && seg[0].equals("user") && seg[1].equals("starred") && !seg[2].isEmpty() && !seg[3].isEmpty();
     }
 }

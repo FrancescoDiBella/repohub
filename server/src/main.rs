@@ -491,9 +491,7 @@ fn check_origin_and_preflight(req: &Request, host_header: &str) -> Result<(), (u
 
 /// Which proxied API calls are allowed: the exact read endpoints RepoHub uses, starring, and the few
 /// writes the app makes (create an issue, a branch or a pull request, close an issue, merge a
-/// pull request, edit an issue's labels, assignees, milestone, title and description, ask for and
-/// take back a review). Nothing that deletes, rewrites, or exposes administrative repository data:
-/// the only `DELETE` in a repository takes back a review request.
+/// pull request). Nothing that deletes, rewrites, or exposes administrative repository data.
 fn allowed(method: &Method, path: &str) -> bool {
     let p = path.split('?').next().unwrap_or("");
     let seg: Vec<&str> = p.trim_start_matches('/').split('/').collect();
@@ -559,7 +557,9 @@ fn allowed(method: &Method, path: &str) -> bool {
             false
         }
         Method::Put if repo && rest.len() == 3 && rest[0] == "pulls" && number(rest[1]) && rest[2] == "merge" => true,
-        // Taking back a review request on one pull request; nothing else in a repository is deleted.
+        // Triage also edits an issue's labels, assignees, milestone, title and description (the
+        // PATCH below) and asks for reviews (POST). Taking back a review request on one pull
+        // request is the only DELETE in a repository.
         Method::Delete if repo && rest.len() == 3 && rest[0] == "pulls" && number(rest[1]) && rest[2] == "requested_reviewers" => true,
         Method::Put | Method::Delete => seg.len() == 4 && seg[0] == "user" && seg[1] == "starred" && !seg[2].is_empty() && !seg[3].is_empty(),
         // Creating an issue, a pull request or a branch; commenting; reviewing a pull request; asking
