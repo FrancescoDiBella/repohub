@@ -1,6 +1,9 @@
 //! Loading from a mock GitHub: pages, caps, partial failures, rate limits, and loading more.
 
 use crate::*;
+use crate::config::Config;
+use crate::model::{Data, Detail};
+use crate::state::Load;
 use crate::net::Resp;
 use std::io::{Read, Write};
 use std::net::TcpListener;

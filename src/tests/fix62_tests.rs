@@ -1,6 +1,12 @@
 //! Loading, failed and empty: skeletons, the error with Retry, and the empty messages.
 
+use std::sync::Arc;
+
+use rune::TextEdit;
+
 use crate::*;
+use crate::model::{Data, Detail};
+use crate::state::Load;
 
 struct IsolatedEnv {
     prev_data_dir: Option<String>,
