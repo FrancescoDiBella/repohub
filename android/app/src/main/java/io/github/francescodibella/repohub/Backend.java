@@ -124,14 +124,17 @@ final class Backend {
         }
         int q = pathAndQuery.indexOf('?');
         String rawPath = q < 0 ? pathAndQuery : pathAndQuery.substring(0, q);
-        String decoded = GitHubPaths.decode(rawPath);
+        // A board in the notes repository keeps its `%` signs: checked strictly before decoding.
+        String board = GitHubPaths.boardContentsPath(rawPath);
+        String decoded = board != null ? board : GitHubPaths.decode(rawPath);
         if (decoded == null) {
             return Reply.text(403, "Path traversal or invalid characters in path");
         }
         if (!GitHubPaths.allowed(method, decoded)) {
             return Reply.text(403, "This request isn't one RepoHub makes");
         }
-        if (body.length() > (1 << 16)) {
+        // A board (base64 in JSON) may be large; anything else is a short JSON body.
+        if (body.length() > (board != null ? (16 << 20) : (1 << 16))) {
             return Reply.text(413, "Too much text to send");
         }
         try {
@@ -153,7 +156,7 @@ final class Backend {
         if (u.startsWith("gh/")) {
             return github(method, u.substring(2), accept, body);
         }
-        if (path.equals("api/notes") || path.equals("api/notes/file")) {
+        if (path.equals("api/notes") || path.equals("api/notes/file") || path.equals("api/notes/all") || path.equals("api/notes/index")) {
             return notes.handle(method, u, body);
         }
         if (path.equals("config.json")) {

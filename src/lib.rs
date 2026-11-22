@@ -52,6 +52,10 @@ mod prefs;
 mod state;
 mod review;
 mod runs_page;
+mod sync;
+mod sync_io;
+mod sync_page;
+mod board_file;
 mod terminal;
 mod thread;
 mod thread_page;
@@ -243,6 +247,8 @@ pub struct App {
     pending_note_saves: HashMap<(String, String, String), NoteOp>,
     /// The drawing open in the Notes tab, if any.
     board: Option<board::Board>,
+    /// Boards on every device: the notes repository and how syncing with it goes.
+    sync: sync_io::SyncState,
     // Claude tab (desktop): one conversation per repository, run in its local clone.
     chats: HashMap<String, claude::Chat>,
     claude_prompt: TextEdit,
@@ -802,7 +808,10 @@ impl App {
         self.tab = tab;
         self.save_place();
         match tab {
-            RepoTab::Notes => self.load_notes(i),
+            RepoTab::Notes => {
+                self.load_notes(i);
+                self.sync_now();
+            }
             RepoTab::Terminal => self.open_terminal(i),
             RepoTab::Changes => self.load_changes(i),
             RepoTab::Commits => self.load_history(i, false),
@@ -1540,6 +1549,7 @@ impl App {
                 self.restore_place();
                 // With the lists, what's waiting for you.
                 self.load_inbox();
+                self.sync_after_load();
             }
             Err(e) => {
                 if let Some(ra) = e.retry_after {
@@ -2477,6 +2487,9 @@ impl App {
         let (full, branch, name) = id.clone();
         let epoch = self.load_gen;
         net::spawn(h, move || async move { notes::delete(&full, &branch, &name).await }, move |s: &mut App, r| {
+            if r.is_ok() {
+                s.sync_saved(&id);
+            }
             s.apply_note_op(epoch, id, r);
         });
     }
@@ -2572,9 +2585,9 @@ impl App {
     }
 
     fn write_board(&mut self) {
-        let Some(b) = self.board.as_ref() else { return };
+        let Some(b) = self.board.as_mut() else { return };
         let id = (b.repo.clone(), b.branch.clone(), b.name.clone());
-        let json = b.to_json();
+        let json = b.save_json();
         self.write_note(id, json);
     }
 
@@ -2585,8 +2598,14 @@ impl App {
         self.saving_notes.insert(id.clone(), NoteOp::Save(json.clone()));
         let (repo, branch, name) = (id.0.clone(), id.1.clone(), id.2.clone());
         let epoch = self.load_gen;
-        net::spawn(h, move || async move { notes::save(&repo, &branch, &name, json).await }, move |s: &mut App, r| {
-            s.apply_note_op(epoch, id, r);
+        net::spawn(h, move || async move { notes::save(&repo, &branch, &name, json).await }, move |s: &mut App, r: Result<Option<String>, String>| {
+            if let Ok(merged) = &r {
+                if let Some(m) = merged {
+                    s.board_merged(&id, m);
+                }
+                s.sync_saved(&id);
+            }
+            s.apply_note_op(epoch, id, r.map(|_| ()));
         });
     }
 
@@ -2650,12 +2669,12 @@ impl App {
     /// Before the editor goes away: edits still waiting behind a running write (or after a failed
     /// one) are written now. Never starts a parallel write if one is already running.
     fn flush_board(&mut self) {
-        let Some(b) = self.board.as_ref() else { return };
+        let Some(b) = self.board.as_mut() else { return };
         if !b.save.pending() {
             return;
         }
         let id = (b.repo.clone(), b.branch.clone(), b.name.clone());
-        let json = b.to_json();
+        let json = b.save_json();
         if self.saving_notes.contains_key(&id) {
             self.pending_note_saves.insert(id, NoteOp::Save(json));
         } else {
@@ -3140,6 +3159,7 @@ fn init() -> App {
         note_log: Vec::new(),
         pending_note_saves: HashMap::new(),
         board: None,
+        sync: Default::default(),
         chats: HashMap::new(),
         claude_prompt: TextEdit::new(""),
         claude_mode: claude::Mode::Plan,
@@ -3255,6 +3275,20 @@ fn init() -> App {
     // `-- tab commits` reads the history before the first frame; `-- commit 0123abc` (or `commit 2`,
     // the second in the list) opens a commit, `-- compare main...feature/x` compares two branches.
     s.commits_still(arg("commit"), arg("compare"));
+    // With `tab notes` the drawings are listed before the first frame (as the Changes above).
+    #[cfg(not(target_arch = "wasm32"))]
+    if s.tab == RepoTab::Notes
+        && matches!(s.page, Page::Repo(_))
+        && let Some((full, branch)) = s.notes_branch(0)
+        && let Ok(items) = pollster::block_on(notes::list(&full, &branch))
+    {
+        s.notes.insert((full, branch), notes::NotesView { items, state: state::Refresh::Fresh });
+    }
+    // `-- sync waiting` shows board sync in that state (synced, syncing, waiting, failed, public,
+    // setup, confirm), with `-- notes-repo owner/name`; for headless stills, it never runs.
+    if let Some(state) = arg("sync") {
+        s.sync_still(&state, arg("notes-repo"));
+    }
     // `-- board Name` opens a drawing of that section (for headless stills); `zoom 2` zooms it.
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(name) = arg("board")
@@ -6018,7 +6052,7 @@ mod fix56_tests {
         let b = s.board.as_ref().unwrap();
         assert_eq!(b.save, Save::Saving { dirty: false });
         // The newly written JSON contains elem-1, elem-2, AND elem-3!
-        let json = b.to_json();
+        let json = b.json();
         assert!(json.contains("elem-1"));
         assert!(json.contains("elem-2"));
         assert!(json.contains("elem-3"));
@@ -6036,7 +6070,7 @@ mod fix56_tests {
         let id = (full.clone(), branch.clone(), "NewWhileSaving".into());
 
         // Simulate an old in-flight write (of an empty drawing) for this same drawing name
-        let empty = board::Board::new(&full, &branch, "NewWhileSaving").to_json();
+        let empty = board::Board::new(&full, &branch, "NewWhileSaving").save_json();
         s.saving_notes.insert(id.clone(), crate::NoteOp::Save(empty));
 
         // User creates new drawing with same name: it opens on the write that is running (its
@@ -6065,7 +6099,7 @@ mod fix56_tests {
         // It detects dirty: true, calls write_board() with elem-new, and transitions to dirty: false
         let b = s.board.as_ref().unwrap();
         assert_eq!(b.save, Save::Saving { dirty: false });
-        let json = b.to_json();
+        let json = b.json();
         assert!(json.contains("elem-new"));
 
         // When write for elem-new completes:
@@ -6095,7 +6129,7 @@ mod fix56_tests {
         });
 
         // 2. First write starts in-flight (snapshot 1)
-        let json_1 = b.to_json();
+        let json_1 = b.save_json();
         assert!(b.save.edit());
         s.saving_notes.insert(id.clone(), crate::NoteOp::Save(String::new()));
 
@@ -6357,7 +6391,7 @@ mod fix83_tests {
             id: tag.into(), kind: Kind::Rectangle, x: 1.0, y: 1.0, w: 10.0, h: 10.0, points: vec![],
             stroke: "#000".into(), fill: None, width: 2.0, text: String::new(), font: 20.0, seed: 1,
         });
-        b.to_json()
+        b.save_json()
     }
 
     fn id(s: &App, name: &str) -> (String, String, String) {
@@ -6375,12 +6409,12 @@ mod fix83_tests {
         s.open_board(0, "Arch".into(), false);
         let b = s.board.as_ref().unwrap();
         assert_eq!(b.save, Save::Saving { dirty: false }, "not Loading from the older file");
-        assert!(b.to_json().contains("newest"));
+        assert!(b.json().contains("newest"));
         // The write finishes: the board is Saved, with the same content.
         s.apply_note_op(s.load_gen, id, Ok(()));
         let b = s.board.as_ref().unwrap();
         assert_eq!(b.save, Save::Saved);
-        assert!(b.to_json().contains("newest"));
+        assert!(b.json().contains("newest"));
     }
 
     #[test]
@@ -6392,14 +6426,14 @@ mod fix83_tests {
         // The list doesn't show "Plan" yet, so the user types it again and presses New.
         s.open_board(0, "Plan".into(), true);
         let b = s.board.as_ref().unwrap();
-        assert!(b.to_json().contains("second"), "opened on the newest snapshot, not a blank board");
+        assert!(b.json().contains("second"), "opened on the newest snapshot, not a blank board");
         assert_eq!(b.save, Save::Saving { dirty: true }, "the snapshot is written after the running write");
         assert!(!s.pending_note_saves.contains_key(&id));
         // The running write ends; the open board's newest content is written next (no handle in
         // tests, so the write isn't sent, but the board moves on to writing it).
         s.apply_note_op(s.load_gen, id, Ok(()));
         assert_eq!(s.board.as_ref().unwrap().save, Save::Saving { dirty: false });
-        assert_eq!(s.note_log, [format!("save Plan: {}", s.board.as_ref().unwrap().to_json().len())]);
+        assert_eq!(s.note_log, [format!("save Plan: {}", s.board.as_ref().unwrap().json().len())]);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -6409,7 +6443,8 @@ mod fix83_tests {
         let mut s = app();
         let id = id(&s, "Arch");
         s.saving_notes.insert(id.clone(), NoteOp::Save(drawing("first")));
-        s.pending_note_saves.insert(id.clone(), NoteOp::Save(drawing("second")));
+        let second = drawing("second");
+        s.pending_note_saves.insert(id.clone(), NoteOp::Save(second.clone()));
         let before = s.load_gen;
         s.reset_account_state();
         assert!(s.load_gen != before);
@@ -6417,7 +6452,7 @@ mod fix83_tests {
         // The old write's result arrives after the switch: the queued snapshot is still written.
         s.apply_note_op(before, id.clone(), Ok(()));
         assert!(!s.pending_note_saves.contains_key(&id));
-        assert_eq!(s.note_log, [format!("save Arch: {}", drawing("second").len())], "the queued snapshot was written");
+        assert_eq!(s.note_log, [format!("save Arch: {}", second.len())], "the queued snapshot was written");
     }
 
     #[test]

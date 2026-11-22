@@ -6,6 +6,8 @@
 //! arrows, lines, freehand strokes and text; select and move, delete, undo and redo.
 //!
 //! Elements live in a fixed world of `WORLD` points; the canvas scales it to the space it has.
+use std::collections::{HashMap, HashSet};
+
 use rune::{Color, Drag, El, LineCap, Phase, Shape, TextEdit, TextStyle, canvas, col, el, row, text, text_input};
 use serde_json::{Value, json};
 
@@ -267,6 +269,22 @@ pub struct Board {
     pub view: View,
     mode: Mode,
     next: u32,
+    /// Excalidraw's `version`, `versionNonce` and `updated` of each element, drawn or deleted,
+    /// by id: what tells another device's copy which of two edits is newer.
+    meta: HashMap<String, Meta>,
+    /// Deleted elements, written with `isDeleted` so another device's copy learns of it.
+    deleted: Vec<Element>,
+    /// The elements as last written, to tell which changed since ([`Board::save_json`]).
+    stamped: HashMap<String, Element>,
+}
+
+/// An element's Excalidraw bookkeeping.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Meta {
+    version: u64,
+    nonce: u32,
+    /// Milliseconds since 1970.
+    updated: i64,
 }
 
 /// A deterministic value in [-1, 1] for (seed, i).
@@ -301,7 +319,15 @@ impl Board {
             view: View { zoom: 0.0, x: WORLD[0] / 2.0, y: WORLD[1] / 2.0 },
             mode: Mode::Idle,
             next: 1,
+            meta: HashMap::new(),
+            deleted: Vec::new(),
+            stamped: HashMap::new(),
         }
+    }
+
+    /// True while a gesture or a text is in progress: nothing replaces the drawing then.
+    pub fn busy(&self) -> bool {
+        self.mode != Mode::Idle
     }
 
     fn snapshot(&mut self) {
@@ -352,10 +378,17 @@ impl Board {
         true
     }
 
+    /// A new element's id and seed. Ids are random, as Excalidraw's are, so two devices drawing
+    /// on the same board never make the same one.
     fn new_id(&mut self) -> (String, u32) {
         self.next += 1;
-        let seed = self.next.wrapping_mul(2_654_435_761) ^ self.elements.len() as u32;
-        (format!("rh{}-{}", self.next, seed % 100_000), seed)
+        let (a, b) = (crate::sync::random(), crate::sync::random());
+        const DIGITS: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+        let id: String = (0..20).map(|i| {
+            let v = if i < 10 { a >> (i * 6) } else { b >> ((i - 10) * 6) };
+            DIGITS[(v % 62) as usize] as char
+        }).collect();
+        (id, (b >> 32) as u32 ^ self.next)
     }
 
     fn hit(&self, p: [f32; 2]) -> Option<usize> {
@@ -599,15 +632,52 @@ impl Board {
 
     // ---------------------------------------------------------------- file format
 
-    /// The drawing as an Excalidraw document.
-    pub fn to_json(&self) -> String {
-        let els: Vec<Value> = self.elements.iter().enumerate().map(|(i, e)| {
+    /// Gives every element that changed since the last write a new version (and every element
+    /// gone since a deletion mark), as Excalidraw does on each edit. Undo and redo bring back
+    /// older content under a newer version, so they win over the copy they replace.
+    fn stamp(&mut self) {
+        let now = crate::sync::now_ms();
+        let bump = |meta: &mut HashMap<String, Meta>, id: &str| {
+            let m = meta.entry(id.to_owned()).or_insert(Meta { version: 0, nonce: 0, updated: 0 });
+            m.version += 1;
+            m.nonce = crate::sync::random() as u32;
+            m.updated = now.max(m.updated);
+        };
+        let here: HashSet<&str> = self.elements.iter().map(|e| e.id.as_str()).collect();
+        for e in &self.elements {
+            if self.stamped.get(&e.id) != Some(e) {
+                bump(&mut self.meta, &e.id);
+            }
+        }
+        let mut gone: Vec<&Element> = self.stamped.values().filter(|e| !here.contains(e.id.as_str()) && !self.deleted.iter().any(|d| d.id == e.id)).collect();
+        gone.sort_by(|a, b| a.id.cmp(&b.id));
+        for e in gone {
+            bump(&mut self.meta, &e.id);
+            self.deleted.push(e.clone());
+        }
+        self.deleted.retain(|d| !here.contains(d.id.as_str()));
+        self.stamped = self.elements.iter().map(|e| (e.id.clone(), e.clone())).collect();
+    }
+
+    /// The drawing as an Excalidraw document. Elements changed since the last call get a new
+    /// version first.
+    pub fn save_json(&mut self) -> String {
+        self.stamp();
+        self.json()
+    }
+
+    /// The drawing as an Excalidraw document, as last stamped (tests read it without writing).
+    pub fn json(&self) -> String {
+        let live = self.elements.iter().map(|e| (e, false));
+        let gone = self.deleted.iter().map(|e| (e, true));
+        let els: Vec<Value> = live.chain(gone).enumerate().map(|(i, (e, is_deleted))| {
+            let m = self.meta.get(&e.id).copied().unwrap_or(Meta { version: 1, nonce: e.seed ^ 0x5bd1, updated: 0 });
             let mut v = json!({
                 "id": e.id, "type": e.kind.excalidraw(), "x": e.x, "y": e.y, "width": e.w, "height": e.h,
                 "angle": 0, "strokeColor": e.stroke, "backgroundColor": e.fill.clone().unwrap_or_else(|| "transparent".into()),
                 "fillStyle": "solid", "strokeWidth": e.width, "strokeStyle": "solid", "roughness": 1, "opacity": 100,
-                "groupIds": [], "frameId": null, "roundness": null, "seed": e.seed, "version": 1, "versionNonce": e.seed ^ 0x5bd1,
-                "isDeleted": false, "boundElements": null, "updated": 0, "link": null, "locked": false, "index": format!("a{i}"),
+                "groupIds": [], "frameId": null, "roundness": null, "seed": e.seed, "version": m.version, "versionNonce": m.nonce,
+                "isDeleted": is_deleted, "boundElements": null, "updated": m.updated, "link": null, "locked": false, "index": format!("a{i}"),
             });
             if e.kind.uses_points() {
                 v["points"] = json!(e.points);
@@ -648,35 +718,7 @@ impl Board {
 
     /// Reads an Excalidraw document; element types RepoHub doesn't draw are skipped.
     pub fn load_json(&mut self, src: &str) -> Result<(), String> {
-        let v: Value = serde_json::from_str(src).map_err(|e| format!("Not an Excalidraw file: {e}"))?;
-        let f = |e: &Value, k: &str| e.get(k).and_then(Value::as_f64).unwrap_or(0.0) as f32;
-        let st = |e: &Value, k: &str| e.get(k).and_then(Value::as_str).unwrap_or("").to_owned();
-        self.elements = v.get("elements").and_then(Value::as_array).cloned().unwrap_or_default().iter().filter_map(|e| {
-            if e.get("isDeleted").and_then(Value::as_bool) == Some(true) {
-                return None;
-            }
-            let kind = Kind::from_excalidraw(&st(e, "type"))?;
-            let fill = Some(st(e, "backgroundColor")).filter(|c| !c.is_empty() && c != "transparent");
-            Some(Element {
-                id: st(e, "id"),
-                kind,
-                x: f(e, "x"),
-                y: f(e, "y"),
-                w: f(e, "width"),
-                h: f(e, "height"),
-                points: e.get("points").and_then(Value::as_array).map(|a| a.iter().filter_map(|p| {
-                    let p = p.as_array()?;
-                    Some([p.first()?.as_f64()? as f32, p.get(1)?.as_f64()? as f32])
-                }).collect()).unwrap_or_default(),
-                stroke: Some(st(e, "strokeColor")).filter(|c| !c.is_empty()).unwrap_or_else(|| STROKES[0].into()),
-                fill,
-                width: f(e, "strokeWidth").max(1.0),
-                text: st(e, "text"),
-                font: Some(f(e, "fontSize")).filter(|s| *s > 0.0).unwrap_or(20.0),
-                seed: e.get("seed").and_then(Value::as_u64).unwrap_or(1) as u32,
-            })
-        }).collect();
-        self.next = self.elements.len() as u32 + 1;
+        self.read_elements(src)?;
         self.undo.clear();
         self.redo.clear();
         self.selected = None;
@@ -696,6 +738,107 @@ impl Board {
         self.view = View { zoom: 0.0, x: centre[0], y: centre[1] };
         Ok(())
     }
+
+    /// Reads the elements of an Excalidraw document (drawn and deleted) and their versions,
+    /// leaving the view and the tools as they are.
+    fn read_elements(&mut self, src: &str) -> Result<(), String> {
+        let v: Value = serde_json::from_str(src).map_err(|e| format!("Not an Excalidraw file: {e}"))?;
+        let f = |e: &Value, k: &str| e.get(k).and_then(Value::as_f64).unwrap_or(0.0) as f32;
+        let st = |e: &Value, k: &str| e.get(k).and_then(Value::as_str).unwrap_or("").to_owned();
+        let (mut live, mut gone, mut meta) = (Vec::new(), Vec::new(), HashMap::new());
+        let mut ids: HashSet<String> = HashSet::new();
+        for (n, e) in v.get("elements").and_then(Value::as_array).into_iter().flatten().enumerate() {
+            let Some(kind) = Kind::from_excalidraw(&st(e, "type")) else { continue };
+            let fill = Some(st(e, "backgroundColor")).filter(|c| !c.is_empty() && c != "transparent");
+            let seed = e.get("seed").and_then(Value::as_u64).unwrap_or(1) as u32;
+            // An element needs an id of its own, the same on every device: a missing one is made
+            // from its content (as `sync::merge` matches it), a repeated one (older files) from
+            // its place.
+            let mut id = st(e, "id");
+            if id.is_empty() {
+                id = crate::sync::derived_id(e);
+            }
+            if ids.contains(&id) {
+                id = format!("{id}~{n}");
+            }
+            ids.insert(id.clone());
+            let el = Element {
+                id: id.clone(),
+                kind,
+                x: f(e, "x"),
+                y: f(e, "y"),
+                w: f(e, "width"),
+                h: f(e, "height"),
+                points: e.get("points").and_then(Value::as_array).map(|a| a.iter().filter_map(|p| {
+                    let p = p.as_array()?;
+                    Some([p.first()?.as_f64()? as f32, p.get(1)?.as_f64()? as f32])
+                }).collect()).unwrap_or_default(),
+                stroke: Some(st(e, "strokeColor")).filter(|c| !c.is_empty()).unwrap_or_else(|| STROKES[0].into()),
+                fill,
+                width: f(e, "strokeWidth").max(1.0),
+                text: st(e, "text"),
+                font: Some(f(e, "fontSize")).filter(|s| *s > 0.0).unwrap_or(20.0),
+                seed,
+            };
+            meta.insert(id, Meta {
+                version: e.get("version").and_then(Value::as_u64).unwrap_or(1).max(1),
+                nonce: e.get("versionNonce").and_then(Value::as_u64).map(|n| n as u32).unwrap_or(seed ^ 0x5bd1),
+                updated: e.get("updated").and_then(Value::as_i64).unwrap_or(0),
+            });
+            if e.get("isDeleted").and_then(Value::as_bool) == Some(true) {
+                gone.push(el);
+            } else {
+                live.push(el);
+            }
+        }
+        self.stamped = live.iter().map(|e: &Element| (e.id.clone(), e.clone())).collect();
+        self.elements = live;
+        self.deleted = gone;
+        self.meta = meta;
+        self.next = self.elements.len() as u32 + 1;
+        Ok(())
+    }
+
+    /// Shows `src` in place of what's drawn, keeping the view (the file changed underneath and
+    /// nothing here is unsaved). Undo starts afresh.
+    pub fn reload_json(&mut self, src: &str) -> Result<(), String> {
+        let selected = self.selected.and_then(|i| self.elements.get(i)).map(|e| e.id.clone());
+        self.read_elements(src)?;
+        self.undo.clear();
+        self.redo.clear();
+        self.selected = selected.and_then(|id| self.elements.iter().position(|e| e.id == id));
+        Ok(())
+    }
+
+    /// Takes in another copy of this drawing (the file changed underneath: another device's
+    /// edits arrived): elements from it that are newer, or that this copy doesn't have, come
+    /// in; this copy's own newer edits stay. Returns true when something came in; undo then
+    /// starts afresh, so it can't take the other device's edits away.
+    pub fn merge_json(&mut self, src: &str) -> Result<bool, String> {
+        let mine = self.save_json();
+        let Some(merged) = crate::sync::merge(&mine, src, crate::sync::Tie::First)? else { return Ok(false) };
+        let selected = self.selected.and_then(|i| self.elements.get(i)).map(|e| e.id.clone());
+        self.read_elements(&merged)?;
+        self.undo.clear();
+        self.redo.clear();
+        self.selected = selected.and_then(|id| self.elements.iter().position(|e| e.id == id));
+        Ok(true)
+    }
+}
+
+/// An `.excalidraw` file as a new board (Import): what RepoHub draws of it, with its ids,
+/// versions and deletions, then how many elements that is and how many it skipped.
+pub fn import(src: &str) -> Result<(String, usize, usize), String> {
+    let v: Value = serde_json::from_str(src).map_err(|e| format!("it isn't JSON ({e})"))?;
+    let Some(els) = v.get("elements").and_then(Value::as_array) else { return Err("it has no elements".into()) };
+    let skipped = els.iter()
+        .filter(|e| e.get("isDeleted").and_then(Value::as_bool) != Some(true))
+        .filter(|e| Kind::from_excalidraw(e.get("type").and_then(Value::as_str).unwrap_or("")).is_none())
+        .count();
+    let mut b = Board::new("", "", "");
+    b.load_json(src)?;
+    let kept = b.elements.len();
+    Ok((b.save_json(), kept, skipped))
 }
 
 // -------------------------------------------------------------------- drawing
@@ -948,10 +1091,97 @@ mod tests {
         a.on_drag(drag(Phase::Move, 1100.0, 200.0, 900.0, 100.0));
         a.on_drag(drag(Phase::Up, 1100.0, 200.0, 900.0, 100.0));
         let mut b = Board::new("o/r", "main", "t");
-        b.load_json(&a.to_json()).unwrap();
+        b.load_json(&a.save_json()).unwrap();
         let size = [360.0, 540.0];
         let o = b.view.origin(size);
         assert!(o[0] > 700.0 && o[0] + b.view.visible(size)[0] >= 1100.0, "{o:?}");
+    }
+
+    #[test]
+    fn edits_get_new_versions_and_deletions_are_kept() {
+        let mut b = Board::new("o/r", "main", "t");
+        b.tool = Tool::Rectangle;
+        b.on_drag(drag(Phase::Down, 100.0, 100.0, 100.0, 100.0));
+        b.on_drag(drag(Phase::Move, 300.0, 200.0, 100.0, 100.0));
+        assert!(b.on_drag(drag(Phase::Up, 300.0, 200.0, 100.0, 100.0)));
+        let v = |b: &mut Board, i: usize| -> Value { serde_json::from_str::<Value>(&b.save_json()).unwrap()["elements"][i].clone() };
+        let first = v(&mut b, 0);
+        assert_eq!(first["version"], 1);
+        assert!(first["updated"].as_i64().unwrap() > 0 && first["id"].as_str().unwrap().len() == 20);
+        // Saving again without a change keeps the version.
+        assert_eq!(v(&mut b, 0)["version"], 1);
+        // Moved: a new version. Undo brings the old place back under a newer one still.
+        b.tool = Tool::Select;
+        b.on_drag(drag(Phase::Down, 100.0, 150.0, 100.0, 150.0));
+        b.on_drag(drag(Phase::Move, 150.0, 150.0, 100.0, 150.0));
+        assert!(b.on_drag(drag(Phase::Up, 150.0, 150.0, 100.0, 150.0)));
+        assert_eq!(v(&mut b, 0)["version"], 2);
+        assert!(b.undo());
+        let back = v(&mut b, 0);
+        assert_eq!((back["version"].as_u64(), back["x"].as_f64()), (Some(3), Some(100.0)));
+        // Deleted: written with isDeleted and a newer version, and read back as deleted.
+        b.selected = Some(0);
+        assert!(b.delete_selected());
+        let gone = v(&mut b, 0);
+        assert_eq!((gone["isDeleted"].as_bool(), gone["version"].as_u64()), (Some(true), Some(4)));
+        let mut c = Board::new("o/r", "main", "t");
+        c.load_json(&b.save_json()).unwrap();
+        assert!(c.elements.is_empty());
+        assert_eq!(c.json(), b.json(), "the deletion survives a round trip");
+        // Undoing the deletion brings it back, newer than the deletion.
+        assert!(b.undo());
+        let again = v(&mut b, 0);
+        assert_eq!((again["isDeleted"].as_bool(), again["version"].as_u64()), (Some(false), Some(5)));
+    }
+
+    #[test]
+    fn elements_without_ids_stay_one_through_saves() {
+        let file = serde_json::json!({ "type": "excalidraw", "elements": [
+            { "type": "rectangle", "x": 10, "y": 10, "width": 50, "height": 40 },
+            { "id": "dup", "type": "ellipse", "x": 100, "y": 10, "width": 50, "height": 40 },
+            { "id": "dup", "type": "diamond", "x": 200, "y": 10, "width": 50, "height": 40 },
+        ] }).to_string();
+        let mut b = Board::new("o/r", "main", "t");
+        b.load_json(&file).unwrap();
+        assert_eq!(b.elements.len(), 3);
+        let ids: std::collections::HashSet<&str> = b.elements.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids.len(), 3, "every element has an id of its own");
+        // What a save writes over the file (merging with it) adds nothing, again and again.
+        let mine = b.save_json();
+        let merged = crate::sync::merge(&mine, &file, crate::sync::Tie::First).unwrap();
+        assert!(merged.is_none(), "{merged:?}");
+        assert!(!b.merge_json(&file).unwrap());
+        assert_eq!(b.elements.len(), 3);
+    }
+
+    #[test]
+    fn another_copy_comes_in_without_losing_what_is_drawn_here() {
+        let mut here = Board::new("o/r", "main", "t");
+        here.tool = Tool::Pen;
+        for (x, y) in [(100.0, 100.0), (400.0, 300.0)] {
+            here.on_drag(drag(Phase::Down, x, y, x, y));
+            here.on_drag(drag(Phase::Move, x + 40.0, y + 30.0, x, y));
+            assert!(here.on_drag(drag(Phase::Up, x + 40.0, y + 30.0, x, y)));
+        }
+        let saved = here.save_json();
+        let mut there = Board::new("o/r", "main", "t");
+        there.load_json(&saved).unwrap();
+        there.tool = Tool::Pen;
+        there.on_drag(drag(Phase::Down, 600.0, 100.0, 600.0, 100.0));
+        there.on_drag(drag(Phase::Move, 650.0, 160.0, 600.0, 100.0));
+        assert!(there.on_drag(drag(Phase::Up, 650.0, 160.0, 600.0, 100.0)));
+        there.selected = Some(0);
+        assert!(there.delete_selected());
+        // Here a third stroke, unsaved, while the other copy arrives.
+        here.on_drag(drag(Phase::Down, 800.0, 500.0, 800.0, 500.0));
+        here.on_drag(drag(Phase::Move, 850.0, 560.0, 800.0, 500.0));
+        assert!(here.on_drag(drag(Phase::Up, 850.0, 560.0, 800.0, 500.0)));
+        assert!(here.merge_json(&there.save_json()).unwrap());
+        assert_eq!(here.elements.len(), 3, "the deletion came in, the new stroke there too, and this one stays");
+        assert!(!here.merge_json(&there.save_json()).unwrap(), "nothing new the second time");
+        // Reloading shows the file exactly.
+        here.reload_json(&saved).unwrap();
+        assert_eq!(here.elements.len(), 2);
     }
 
     #[test]
@@ -993,7 +1223,7 @@ mod tests {
         b.on_drag(drag(Phase::Down, 10.0, 10.0, 10.0, 10.0));
         b.on_drag(drag(Phase::Move, 90.0, 60.0, 10.0, 10.0));
         assert!(b.on_drag(drag(Phase::Up, 90.0, 60.0, 10.0, 10.0)));
-        let json = b.to_json();
+        let json = b.save_json();
         let mut c = Board::new("o/r", "main", "t");
         c.load_json(&json).unwrap();
         assert_eq!(c.elements.len(), 3);

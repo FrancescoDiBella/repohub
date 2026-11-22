@@ -107,7 +107,7 @@ public class BackendTest {
             "/repos/o/r/pulls/12", "/repos/o/r/pulls/12/reviews", "/repos/o/r/actions/runs/42/jobs", "/repos/o/r/actions/jobs/99/logs"}) {
             assertTrue(p, GitHubPaths.allowed("GET", p));
         }
-        for (String p : new String[] {"/user/emails", "/user/keys", "/repos/o/r", "/repos/o/r/hooks", "/repos/o/r/pulls/x/files", "/gists",
+        for (String p : new String[] {"/user/emails", "/user/keys", "/repos/o/r/hooks", "/repos/o/r/pulls/x/files", "/gists",
             "/repos/o/r/actions/secrets", "/orgs/acme/members", "/repos/o/r/git/ref/heads/", "/repos/o/r/issues/x", "/repos/o/r/issues/7/events",
             "/repos/o/r/pulls/12/commits", "/repos/o/r/pulls/12/reviews/3", "/repos/o/r/actions/runs/x/jobs", "/repos/o/r/actions/jobs/x/logs",
             "/repos/o/r/actions/runs/42/logs"}) {
@@ -138,6 +138,92 @@ public class BackendTest {
         assertTrue(GitHubPaths.allowed("PATCH", "/repos/o/r/issues/7"));
         assertFalse(GitHubPaths.allowed("PATCH", "/repos/o/r"));
         assertFalse(GitHubPaths.allowed("TRACE", "/user"));
+    }
+
+    @Test
+    public void boardSyncPathsAreAsNarrowAsTheServers() {
+        String board = "/repos/me/repohub-notes/contents/boards/octo/app/feature%2Fx%20y/Plan%20%28v2%29.excalidraw";
+        for (String m : new String[] {"GET", "PUT", "DELETE"}) {
+            assertTrue(m, GitHubPaths.allowed(m, board));
+            assertTrue(m, GitHubPaths.allowed(m, "/repos/me/notes/contents/boards/o/r/main/Plan.excalidraw"));
+        }
+        assertFalse(GitHubPaths.allowed("POST", board));
+        assertFalse(GitHubPaths.allowed("PATCH", board));
+        assertTrue(GitHubPaths.allowed("GET", "/repos/me/repohub-notes"));
+        assertTrue(GitHubPaths.allowed("GET", "/repos/me/repohub-notes/git/trees/main?recursive=1"));
+        assertFalse(GitHubPaths.allowed("PUT", "/repos/me/repohub-notes"));
+        assertFalse(GitHubPaths.allowed("DELETE", "/repos/me/repohub-notes"));
+        assertFalse(GitHubPaths.allowed("GET", "/repos/me/repohub-notes/git/trees/feature/x"));
+        assertFalse(GitHubPaths.allowed("GET", "/repos/me/repohub-notes/git/blobs/abc123"));
+        for (String bad : new String[] {"/repos/o/r/contents/README.md", "/repos/o/r/contents/.github/workflows/x.yml", "/repos/o/r/contents/boards/../x",
+            "/repos/o/r/contents/boards/o/r/main/x.json", "/repos/o/r/contents/boards/o/r/main/.excalidraw", "/repos/o/r/contents/boards/o/r/x.excalidraw",
+            "/repos/o/r/contents/boards/o/r/main/sub/x.excalidraw", "/repos/o/r/contents/boards/o//main/x.excalidraw", "/repos/o/r/contents/boards/o/r/../x.excalidraw",
+            "/repos/o/r/contents/boards/o/r/main/.hidden.excalidraw", "/repos/o/r/contents/boards/o/r/main/a b.excalidraw", "/repos/o/r/contents/notes/o/r/main/x.excalidraw",
+            "/repos/o/r/contents"}) {
+            assertFalse("PUT " + bad, GitHubPaths.allowed("PUT", bad));
+            assertFalse("DELETE " + bad, GitHubPaths.allowed("DELETE", bad));
+        }
+        assertFalse(GitHubPaths.allowed("GET", "/repos/o/r/contents/README.md"));
+        // Checked on the raw address before decoding: %25XX only, never an encoded slash or dot.
+        String raw = "/repos/me/notes/contents/boards/octo/app/feature%252Fx%2520y/Plan%2520%2528v2%2529.excalidraw";
+        assertEquals("/repos/me/notes/contents/boards/octo/app/feature%2Fx%20y/Plan%20%28v2%29.excalidraw", GitHubPaths.boardContentsPath(raw));
+        assertNotNull(GitHubPaths.boardContentsPath("/repos/me/notes/contents/boards/o/r/%252E./x.excalidraw"));
+        for (String bad : new String[] {"/repos/me/notes/contents/boards/o/r/feature%2Fx/x.excalidraw", "/repos/me/notes/contents/boards/o/r/%2e%2e/x.excalidraw",
+            "/repos/me/notes/contents/boards/o/r/../x.excalidraw", "/repos/me/notes/contents/boards/o/r/main/.x.excalidraw", "/repos/me/notes/contents/boards/o/r//x.excalidraw",
+            "/repos/me/notes/contents/boards/o/r/main/x%25.excalidraw", "/repos/me/notes/contents/boards/o/r/main/x%252.excalidraw", "/repos/me/notes/contents/boards/o/r/main/x%5Cy.excalidraw",
+            "/repos/me/notes/contents/README.md", "/repos/me/notes/contents/boards/o/r/main/sub/x.excalidraw"}) {
+            assertNull(bad, GitHubPaths.boardContentsPath(bad));
+        }
+        assertNull(GitHubPaths.decode("/repos/me/notes/contents/boards/o/r/feature%252Fx/x.excalidraw"));
+    }
+
+    @Test
+    public void boardRequestsReachGitHubWithLargeBodies() {
+        account.token = "ghp_secret";
+        String raw = "gh/repos/me/notes/contents/boards/octo/app/feature%252Fx/Plan.excalidraw";
+        StringBuilder big = new StringBuilder("{\"message\":\"Update\",\"content\":\"");
+        for (int i = 0; i < 200_000; i++) {
+            big.append('A');
+        }
+        big.append("\"}");
+        assertEquals(200, backend.handle("PUT", raw, "", big.toString()).status);
+        assertTrue(http.sent.get(0).startsWith("PUT https://api.github.com/repos/me/notes/contents/boards/octo/app/feature%252Fx/Plan.excalidraw token=ghp_secret"));
+        assertEquals(413, backend.handle("POST", "gh/repos/o/r/issues", "", big.toString()).status);
+        assertEquals(403, backend.handle("PUT", "gh/repos/me/notes/contents/README.md", "", "{}").status);
+        assertEquals(403, backend.handle("PUT", "gh/repos/me/notes/contents/boards/o/r/feature%2Fx/x.excalidraw", "", "{}").status);
+        assertEquals(1, http.sent.size());
+    }
+
+    @Test
+    public void conditionalWritesTheTrashAndTheIndex() throws Exception {
+        String f = "api/notes/file?repo=Octo%2FApp&branch=feature%2Fx&name=Plan";
+        String one = "{\"elements\":[1]}";
+        String two = "{\"elements\":[2]}";
+        assertEquals(204, backend.handle("PUT", f + "&if=none", "", one).status);
+        assertEquals(409, backend.handle("PUT", f + "&if=none", "", two).status);
+        assertEquals("ce013625030ba8dba906f756967f9e9ca394464a", Notes.blobSha("hello\n".getBytes("UTF-8")));
+        String sha = Notes.blobSha(one.getBytes("UTF-8"));
+        assertEquals(409, backend.handle("PUT", f + "&if=0000000000000000000000000000000000000000", "", two).status);
+        assertEquals(204, backend.handle("PUT", f + "&if=" + sha, "", two).status);
+        JSONArray all = new JSONArray(backend.handle("GET", "api/notes/all", "", "").body);
+        assertEquals(1, all.length());
+        assertEquals("octo/app", all.getJSONObject(0).getString("repo"));
+        assertEquals("feature/x", all.getJSONObject(0).getString("branch"));
+        assertEquals(Notes.blobSha(two.getBytes("UTF-8")), all.getJSONObject(0).getString("sha"));
+        assertEquals(409, backend.handle("DELETE", f + "&if=" + sha, "", "").status);
+        assertEquals(204, backend.handle("DELETE", f + "&if=" + Notes.blobSha(two.getBytes("UTF-8")), "", "").status);
+        assertEquals(404, backend.handle("GET", f, "", "").status);
+        String day = java.time.LocalDate.now(java.time.ZoneOffset.UTC).toString();
+        assertTrue("in the trash", new File(dir, "trash/" + day + "/octo/app/feature%2Fx/Plan.excalidraw").isFile());
+        assertEquals("[]", backend.handle("GET", "api/notes/all", "", "").body);
+        String i = "api/notes/index?repo=me%2Frepohub-notes";
+        assertEquals(404, backend.handle("GET", i, "", "").status);
+        assertEquals(204, backend.handle("PUT", i, "", "{\"version\":1}").status);
+        assertEquals("{\"version\":1}", backend.handle("GET", i, "", "").body);
+        assertEquals(400, backend.handle("PUT", i, "", "not json").status);
+        assertEquals(400, backend.handle("GET", "api/notes/index?repo=..%2Fetc", "", "").status);
+        assertEquals(204, backend.handle("DELETE", i, "", "").status);
+        assertEquals(404, backend.handle("GET", i, "", "").status);
     }
 
     @Test

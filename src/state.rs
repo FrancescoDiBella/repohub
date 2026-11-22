@@ -172,6 +172,46 @@ impl Save {
     }
 }
 
+/// Syncing boards through the notes repository (`sync_io.rs`), as the Notes section's header
+/// says it.
+///
+/// ```text
+/// Off ──Use it──▶ Ready ──Notes opened, a save, Sync now, refresh──▶ Running ──▶ Done{at}
+///                                                                       └──────▶ Failed ──Retry──▶ Running
+/// any ──Stop syncing (or sample data, no token)──▶ Off
+/// ```
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum BoardSync {
+    /// No notes repository chosen, or nothing to sync with (sample data, no token).
+    #[default]
+    Off,
+    /// Chosen, not run yet.
+    Ready,
+    Running,
+    /// The last run ended (Unix seconds). Boards changed since wait for the next.
+    Done { at: i64 },
+    /// The last run stopped (offline, refused, rate-limited): why. Boards keep working here and
+    /// wait for the next run.
+    Failed(String),
+}
+
+/// Choosing the notes repository in Settings → Account → Boards.
+///
+/// ```text
+/// Idle ──Use it──▶ Checking ──private──▶ Idle (chosen)
+///                     ├──public──▶ ConfirmPublic ──Use it anyway──▶ Idle (chosen)
+///                     └──missing, no access──▶ Failed ──Use it──▶ Checking
+/// ```
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum NotesRepoCheck {
+    #[default]
+    Idle,
+    Checking,
+    /// The repository is public: everyone could see the boards. Asks before going on.
+    ConfirmPublic(String),
+    Failed(String),
+}
+
 /// The appearance. `System` follows the computer's light or dark setting.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Theme {

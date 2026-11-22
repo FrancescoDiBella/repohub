@@ -3,7 +3,9 @@ package io.github.francescodibella.repohub;
 import android.app.Activity;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
+import android.database.Cursor;
 import android.net.Uri;
+import android.provider.OpenableColumns;
 import android.os.Bundle;
 import android.os.Message;
 import android.webkit.JavascriptInterface;
@@ -15,10 +17,14 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
 import org.json.JSONArray;
+import org.json.JSONObject;
 
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
@@ -39,6 +45,12 @@ public class MainActivity extends Activity {
     private Backend backend;
     /** True while the page on screen is the app's own: only then does the bridge answer. */
     private volatile boolean ownPage;
+    private static final int SAVE_FILE = 41;
+    private static final int OPEN_FILE = 42;
+    /** The board waiting for the "save to" picker (Export), and who asked. */
+    private String saveContent;
+    private int saveId;
+    private int openId;
 
     @Override
     protected void onCreate(Bundle saved) {
@@ -89,6 +101,77 @@ public class MainActivity extends Activity {
             });
         } else {
             finish();
+        }
+    }
+
+    /** Answers a picker the page asked for (see `src/board_file.rs`). */
+    private void fileReply(int id, Object reply) {
+        final String js = "globalThis.__repohubFile && globalThis.__repohubFile(" + id + "," + (reply instanceof String ? JSONObject.quote((String) reply) : String.valueOf(reply)) + ")";
+        runOnUiThread(() -> {
+            if (ownPage) {
+                web.evaluateJavascript(js, null);
+            }
+        });
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    protected void onActivityResult(int request, int result, Intent data) {
+        super.onActivityResult(request, result, data);
+        final Uri uri = data == null ? null : data.getData();
+        if (request == SAVE_FILE) {
+            final int id = saveId;
+            final byte[] bytes = saveContent == null ? new byte[0] : saveContent.getBytes(StandardCharsets.UTF_8);
+            saveContent = null;
+            if (result != RESULT_OK || uri == null) {
+                fileReply(id, "cancelled");
+                return;
+            }
+            pool.execute(() -> {
+                try (OutputStream out = getContentResolver().openOutputStream(uri, "wt")) {
+                    if (out == null) {
+                        throw new IOException("the file can't be written");
+                    }
+                    out.write(bytes);
+                    fileReply(id, "saved");
+                } catch (Exception e) {
+                    fileReply(id, "error: " + e.getMessage());
+                }
+            });
+        } else if (request == OPEN_FILE) {
+            final int id = openId;
+            if (result != RESULT_OK || uri == null) {
+                fileReply(id, JSONObject.NULL);
+                return;
+            }
+            pool.execute(() -> {
+                String name = "drawing.excalidraw";
+                try (Cursor c = getContentResolver().query(uri, new String[] {OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+                    if (c != null && c.moveToFirst() && !c.isNull(0)) {
+                        name = c.getString(0);
+                    }
+                } catch (Exception e) {
+                    // The name is only a suggestion.
+                }
+                try (InputStream in = getContentResolver().openInputStream(uri)) {
+                    if (in == null) {
+                        throw new IOException("the file can't be read");
+                    }
+                    ByteArrayOutputStream buf = new ByteArrayOutputStream();
+                    byte[] chunk = new byte[16 * 1024];
+                    int n;
+                    while ((n = in.read(chunk)) > 0) {
+                        buf.write(chunk, 0, n);
+                        if (buf.size() > Notes.MAX_BYTES) {
+                            fileReply(id, "error: the file is larger than 25 MB");
+                            return;
+                        }
+                    }
+                    fileReply(id, new JSONArray().put(name).put(new String(buf.toByteArray(), StandardCharsets.UTF_8)));
+                } catch (Exception e) {
+                    fileReply(id, "error: " + e.getMessage());
+                }
+            });
         }
     }
 
@@ -207,6 +290,46 @@ public class MainActivity extends Activity {
                         web.evaluateJavascript(js, null);
                     }
                 });
+            });
+        }
+
+        /** Export: the system's "save to" picker for `name`, then `content` is written there. */
+        @JavascriptInterface
+        @SuppressWarnings("deprecation")
+        public void saveFile(final int id, final String name, final String content) {
+            if (!ownPage) {
+                return;
+            }
+            runOnUiThread(() -> {
+                saveId = id;
+                saveContent = content;
+                Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+                    .setType("application/json").putExtra(Intent.EXTRA_TITLE, name);
+                try {
+                    startActivityForResult(i, SAVE_FILE);
+                } catch (ActivityNotFoundException e) {
+                    saveContent = null;
+                    fileReply(id, "error: this phone has no app to save files with");
+                }
+            });
+        }
+
+        /** Import: the system's file picker; the page gets the file's name and text. */
+        @JavascriptInterface
+        @SuppressWarnings("deprecation")
+        public void openFile(final int id) {
+            if (!ownPage) {
+                return;
+            }
+            runOnUiThread(() -> {
+                openId = id;
+                // Any type: phones rarely know .excalidraw, and the page checks the content.
+                Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*");
+                try {
+                    startActivityForResult(i, OPEN_FILE);
+                } catch (ActivityNotFoundException e) {
+                    fileReply(id, "error: this phone has no app to pick files with");
+                }
             });
         }
 

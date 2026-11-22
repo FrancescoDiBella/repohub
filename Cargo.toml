@@ -23,6 +23,9 @@ wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Export and Import of a board use the system's save and open dialogs (rfd on macOS and Windows,
+# the desktop portal on Linux). The web build can't have them.
+rune = { git = "https://github.com/anomalyco/rune", rev = "39301f6793266450a057f270da06b048a689be96", features = ["native-file-dialog"] }
 ureq = { version = "2.12", default-features = false, features = ["tls", "native-certs", "proxy-from-env"] }
 pollster = "0.4"
 portable-pty = "0.9"

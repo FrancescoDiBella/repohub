@@ -61,6 +61,46 @@ stateDiagram-v2
 One write runs at a time. Edits made meanwhile set `dirty` and are written next, so an older
 write can't land after a newer one. Closing the editor writes whatever is still pending.
 
+A write merges with the file if it changed underneath (sync brought another device's edits):
+`notes::save` reads, merges (`sync::merge`) and writes in one step, and the editor takes in the
+merge (`Board::merge_json`).
+
+## Boards on every device: `BoardSync` and `NotesRepoCheck`
+
+```mermaid
+stateDiagram-v2
+    [*] --> Off: no notes repository (or sample data, no token)
+    Off --> Ready: Use it (Settings)
+    Ready --> Running: Notes opened / a save, a few seconds later / Sync now / refresh
+    Running --> Done: run ended
+    Running --> Failed: offline, refused, rate-limited
+    Done --> Running: the same triggers
+    Failed --> Running: Retry
+    Done --> Off: Stop syncing
+    Failed --> Off: Stop syncing
+```
+
+A trigger while a run is `Running` sets `again`, and one more run follows. A run's result is
+dropped if a newer run started or the account changed (`sync.run`, `load_gen`). The boards
+still to send (`sync.to_send`) are counted live, so a save after the run shows at once.
+
+Choosing the repository in Settings:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle
+    Idle --> Checking: Use it
+    Checking --> Idle: private and writable (chosen)
+    Checking --> ConfirmPublic: public
+    ConfirmPublic --> Idle: Use it anyway (chosen) / Cancel
+    Checking --> Failed: missing, no access, not writable
+    Failed --> Checking: Use it
+```
+
+What a run does with each board is a pure function, `sync::decide`, of the local side and the
+remote side (unchanged, changed, deleted, new) against the index; `sync::tests` checks all 16
+cells.
+
 ## The canvas: `board::Mode`
 
 ```mermaid

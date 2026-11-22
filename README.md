@@ -13,7 +13,8 @@ app you can also:
   before opening a pull request;
 - work in a repository's **local clone** (desktop): its files, its changes as a diff, commit,
   push and pull, a **Terminal** and **Claude**;
-- keep **notes**: hand-drawn diagrams and sketches for each repository and branch;
+- keep **notes**: hand-drawn diagrams and sketches for each repository and branch, on every
+  device through a private repository of yours, and exported as `.excalidraw` files;
 - pick or make a **theme**, and add **plugins**.
 
 | | |
@@ -105,7 +106,9 @@ phone and allow the installation.
 - **What it has:** the overview, repositories, pull requests, issues, workflow runs, README and
   code; creating issues, branches and pull requests, and merging; Notes.
 - **Notes:** a drawing opens full screen. One finger draws with the chosen tool, **Move the
-  view** drags the drawing, and plus and minus zoom. Drawings are kept on the phone.
+  view** drags the drawing, and plus and minus zoom. Drawings are kept on the phone and, with a
+  notes repository chosen in Settings, [sync](#boards-on-every-device) with your other devices.
+  **Export** opens the phone's "save to" picker; **Import…** its file picker.
 - **Back:** the back button closes what's open, then goes up a page, then leaves the app.
 - **Not on the phone:** the terminal, Claude, local clones and plugins need a computer.
 - **Needs:** Android 12 or later with a current Android System WebView (121 or later).
@@ -314,6 +317,7 @@ With a token that has write access, the everyday changes happen in RepoHub:
 | Pull requests and Issues pages | **Filters**: search by title or number, pick a repository or a label, **Opened by me**, **Drafts** and **Failing checks** (pull requests) or **Assigned to me** (issues). They narrow what's already loaded, as you type. |
 | Pull request rows | **Files** shows what it changes as a diff, unified or side by side, with syntax colours and word changes. From there **Merge** with a merge commit, **Squash** or **Rebase**. **Merge** on the row asks first. |
 | Changes tab (desktop, with a local clone) | What changed since the last commit, as a diff, new files included. **Commit** or **Commit and push** everything with a message. **Push**, **Pull** (fast-forward only), and **New pull request** from the branch. |
+| Notes tab | With a notes repository chosen (Settings → Account → Boards), each change to a board is one commit to `boards/…/<name>.excalidraw` there, and a board deleted here is deleted there. See [Boards on every device](#boards-on-every-device). |
 | Changes tab: merging | **Merge a branch** into the one checked out: pick it to preview its commits and the diff it brings, then merge. If there are conflicts, it lists the files and offers **Abort merge**. Fix them in your editor or the Terminal, then **Commit** finishes the merge. Commit refuses files that still have conflict markers. |
 
 What GitHub creates shows at once; the lists catch up on the next refresh. GitHub's error, if
@@ -390,16 +394,61 @@ Each repository has a **Notes** tab with a small whiteboard in the spirit of
 - **Editing:** select and drag to move, Delete to remove, Ctrl/⌘+Z to undo and Ctrl/⌘+Shift+Z to
   redo.
 - **Saving:** every change is saved at once, in Excalidraw's `.excalidraw` format, so a drawing
-  also opens on excalidraw.com (*Open* → pick the file).
+  also opens on excalidraw.com (*Open* → pick the file). Elements RepoHub doesn't draw (images,
+  frames) stay in the file when you draw on it.
+- **Export… and Import…:** **Export…** (on a drawing's row or in the editor) saves
+  `<name>.excalidraw` where you choose: the system's save dialog on the desktop (the Downloads
+  folder where there's none), a download in the browser, the "save to" picker on Android.
+  **Import…** (next to Refresh) adds an `.excalidraw` file as a new drawing; a name that exists
+  gets a number, and the toast says how many elements RepoHub couldn't draw and skipped. Neither
+  needs an account.
 
-Drawings never go to GitHub. They are stored at
-`notes/<owner>/<repo>/<branch>/<name>.excalidraw` inside:
+Drawings are stored at `notes/<owner>/<repo>/<branch>/<name>.excalidraw` inside:
 - the desktop app: `REPOHUB_DATA_DIR`, or the platform's data folder (`~/.local/share/repohub`,
   `~/Library/Application Support/RepoHub`, `%APPDATA%\RepoHub`);
 - Docker: the `notes` volume (`/data` in the container), which survives rebuilds and updates;
 - the Android app: the app's private storage on the phone.
 
 The static GitHub Pages build has nowhere to store them, so the tab explains that instead.
+A deleted drawing goes to `trash/<date>/…` next to `notes/` and stays there 30 days, so a wrong
+delete can be undone by moving the file back.
+
+### Boards on every device
+
+Boards sync through **one private repository on your GitHub account**, the *notes repository*:
+draw on the phone, open the computer, and the board is there.
+
+1. Create a private repository on GitHub, for example `repohub-notes` (**Create it on GitHub** in
+   Settings opens the page; RepoHub doesn't create repositories).
+2. In **Settings → Account → Boards**, type it as `owner/name` and press **Use it**. RepoHub checks
+   that it exists and that you can write to it, and asks first if it's public ("Everyone could
+   see your boards"). The choice is saved per account; empty means sync is off.
+3. Do the same on your other devices.
+
+The token needs **Contents: read and write** on that repository (a fine-grained token can be
+limited to it). Boards go to `boards/<owner>/<repo>/<branch>/<name>.excalidraw` on its default
+branch, encoded as the local folder is, one commit per change (`Update Plan (octo/app@main)`,
+`Delete …`).
+
+- **When:** when the Notes tab opens, a few seconds after a board is saved (never in the middle
+  of a stroke), on **Sync now**, and with the app's refresh. Drawing never waits for it.
+- **Changes on both devices** are merged: the strokes of both stay, and for a shape moved on both,
+  the later edit wins. If two copies can't be merged at all, both are kept: the other device's
+  is saved as `<name> (conflict <date>)` and a toast says so.
+- **Deleting** a board deletes it on the other devices too, unless one of them changed it since:
+  then it comes back. What sync deletes here goes to the trash too.
+- **A board open in the editor** shows what arrives at once if you haven't drawn since the last
+  save; otherwise the next save merges it.
+- **Offline or rate-limited:** boards keep working here; the Notes header says how many wait to
+  be sent, with **Retry**.
+- The Notes header says **Synced 2 minutes ago**, **Syncing…**, **3 boards to send** or the error;
+  each board has a mark: Synced, Waiting to sync, or Conflict copy.
+- **Stop syncing** forgets the repository; the boards here and there stay as they are.
+- Boards larger than 10 MB stay on the device. With sample data or no token, Settings explains
+  that sync needs an account.
+
+Each device remembers what it last synced in `notes-sync/<owner>%2F<name>.json` next to
+`notes/` (for Docker, on the server's volume, shared by the browsers that use it).
 
 ## Status bar (desktop app)
 
@@ -539,8 +588,9 @@ GitHub Enterprise.
 | Issues | open issues in your repositories; filters; click to read and answer | `/search/issues?q=is:issue is:open user:{u}`, `/repos/{r}/issues/{n}`, `/comments` |
 | Notifications | your unread notifications; mark as read | `/notifications`, `PATCH /notifications/threads/{id}` |
 | Actions | latest runs of the most recently pushed repositories | `/repos/{r}/actions/runs` |
-| Repository → Notes | drawings per branch: create, open, draw, delete | `/repos/{r}/branches` (the drawings stay on your computer) |
-| Settings | connection status, the configuration in use (the token is never shown) and where notes are kept | — |
+| Repository → Notes | drawings per branch: create, open, draw, delete, export, import; sync state | `/repos/{r}/branches` |
+| Notes sync | boards on every device through your notes repository `{n}` | `/repos/{n}`, `/repos/{n}/git/trees/{branch}?recursive=1`, `GET`/`PUT`/`DELETE /repos/{n}/contents/boards/…/<name>.excalidraw` |
+| Settings | connection status, the configuration in use (the token is never shown), where notes are kept and the notes repository | — |
 
 How it behaves:
 - **Refresh** (toolbar icon, or ⌘R / Ctrl+R) reloads everything.
@@ -548,7 +598,7 @@ How it behaves:
 - Errors (rejected token, rate limit, unknown user) show a banner with the reason and **Retry**.
 - RepoHub never creates or deletes repositories, and never changes their settings: "New
   repository" and "Settings on GitHub" open GitHub in the browser. What it does write (issues,
-  pull requests, comments, reviews, branches, stars) is listed under
+  pull requests, comments, reviews, branches, stars, and boards in your notes repository) is listed under
   [Working on GitHub from the app](#working-on-github-from-the-app).
 
 ## Development
