@@ -9,6 +9,19 @@ The sections are **Added**, **Changed** and **Fixed**.
 
 ## Unreleased
 
+### Added
+- **Commits** on a repository's page: the history of the branch you picked, grouped by day,
+  30 at a time with **Load more**, a filter by message, author or commit id, and Copy id and
+  Open on GitHub on each commit. Click one to read its whole message, who wrote and committed
+  it, its parents and what it changed as a diff. **Compare** shows how two branches differ (the
+  commits and the combined diff) and opens the New pull request form with both filled in.
+  The palette has "Commits of …", and on the desktop the list says when your clone has commits
+  to push or to pull.
+
+### Changed
+- The repository page's section bar scrolls sideways when its sections don't fit, instead of
+  squeezing their names.
+
 ## 0.1.0 — 2026-11-18
 
 The first numbered release.
