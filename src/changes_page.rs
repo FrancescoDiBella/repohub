@@ -98,7 +98,7 @@ pub fn changes_tab(s: &App, k: &Kit, i: usize) -> El {
         .child(Button::new("Pull").variant(ButtonVariant::Ghost).control_size(ControlSize::Small).disabled(busy || c.is_none_or(|c| c.upstream.is_none()))
             .help("git pull --ff-only: brings in the upstream's commits, never makes a merge")
             .on_press(move |s: &mut App| s.git_run(i, "Pulling…", "Pulled", |root| crate::local::pull(root).map(|_| String::new()))).build(k).key("changes-pull"))
-        .child(Button::new("Push").icon(&icons::PULL).control_size(ControlSize::Small).disabled(busy || c.is_none_or(|c| c.ahead == 0 && c.upstream.is_some()))
+        .child(Button::new("Push").icon(&icons::PUSH).control_size(ControlSize::Small).disabled(busy || c.is_none_or(|c| c.ahead == 0 && c.upstream.is_some()))
             .on_press(move |s: &mut App| s.git_run(i, "Pushing…", "Pushed", |root| crate::local::push(root).map(|_| String::new()))).build(k).key("changes-push"))
         .child(Button::new("New pull request").icon(&icons::PULL).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
             .on_press(move |s: &mut App| s.open_form(i, crate::state::Compose::Pull)).build(k).key("changes-new-pull"));
@@ -282,7 +282,7 @@ pub fn pull_panel_for(s: &App, k: &Kit, repo_filter: Option<&str>) -> Option<El>
         }
     }
     tools = tools
-        .child(Button::new("GitHub").icon(&icons::EXTERNAL).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
+        .child(Button::new("Open on GitHub").icon(&icons::EXTERNAL).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
             .on_press_tx(move |_: &mut App, tx| { let _ = tx.open_url(&url); }).build(k).key("pull-github"))
         .child(rune_kit::IconButton::new(&icons::CROSS).variant(rune_kit::IconButtonVariant::GhostMuted).label("Close the diff")
             .on_press(|s: &mut App| s.close_pull_diff()).build(k).key("pull-close"));
