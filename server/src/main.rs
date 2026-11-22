@@ -1138,9 +1138,12 @@ mod tests {
             assert!(allowed(&Method::Get, p), "{p}");
         }
         for p in ["/repos/owner/repo/labels/bug", "/repos/owner/repo/assignees/alice", "/repos/owner/repo/milestones/3",
-            "/repos/owner/repo/milestones/3/labels", "/repos/owner/repo/collaborators", "/repos/owner/repo/issues/7/labels", "/labels", "/repos/owner/labels"] {
+            "/repos/owner/repo/milestones/3/labels", "/repos/owner/repo/collaborators", "/repos/owner/repo/issues/7/labels", "/labels"] {
             assert!(!allowed(&Method::Get, p), "{p}");
         }
+        // `/repos/owner/labels` is the repository named "labels" (read for board sync), not a list.
+        assert!(allowed(&Method::Get, "/repos/owner/labels"));
+        assert!(!allowed(&Method::Get, "/repos/owner/labels/labels/bug"));
         for m in [Method::Post, Method::Put, Method::Patch, Method::Delete] {
             assert!(!allowed(&m, "/repos/owner/repo/labels"), "{m:?} labels: creating labels is out of scope");
             assert!(!allowed(&m, "/repos/owner/repo/milestones"), "{m:?} milestones");

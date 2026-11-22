@@ -147,9 +147,12 @@ public class BackendTest {
             assertTrue(p, GitHubPaths.allowed("GET", p));
         }
         for (String p : new String[] {"/repos/o/r/labels/bug", "/repos/o/r/assignees/alice", "/repos/o/r/milestones/3", "/repos/o/r/collaborators",
-            "/repos/o/r/issues/7/labels", "/labels", "/repos/o/labels"}) {
+            "/repos/o/r/issues/7/labels", "/labels"}) {
             assertFalse(p, GitHubPaths.allowed("GET", p));
         }
+        // "/repos/o/labels" is the repository named "labels" (read for board sync), not a list.
+        assertTrue(GitHubPaths.allowed("GET", "/repos/o/labels"));
+        assertFalse(GitHubPaths.allowed("GET", "/repos/o/labels/labels/bug"));
         for (String m : new String[] {"POST", "PUT", "PATCH", "DELETE"}) {
             assertFalse(m, GitHubPaths.allowed(m, "/repos/o/r/labels"));
             assertFalse(m, GitHubPaths.allowed(m, "/repos/o/r/milestones"));
