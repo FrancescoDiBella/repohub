@@ -81,7 +81,7 @@ impl Channel {
 }
 
 /// `1.2.3` or `1.2.3-dev` as numbers and whether it's a pre-release.
-fn semver(v: &str) -> Option<([u64; 3], bool)> {
+pub(crate) fn semver(v: &str) -> Option<([u64; 3], bool)> {
     let v = v.trim().trim_start_matches('v');
     let (core, pre) = match v.split_once('-') {
         Some((c, _)) => (c, true),

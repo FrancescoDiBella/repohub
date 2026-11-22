@@ -18,7 +18,7 @@
 //! | [`Toast`] | (none) → shown(kind) → (none) | the message at the bottom |
 //! | [`Submit`] | Editing → Sending → (closed) / Failed | a form that writes to GitHub |
 //! | [`Compose`] | Issue / Branch / Pull | which form is open |
-//! | [`BranchSlot`] | View / From / Head / Base / CompareHead / CompareBase | what the branch picker fills in |
+//! | [`BranchSlot`] | View / From / Head / Base / CompareHead / CompareBase / ReleaseTarget | what the branch picker fills in |
 
 /// Where the data on screen comes from.
 ///
@@ -253,6 +253,8 @@ pub enum RepoTab {
     Issues,
     Pulls,
     Actions,
+    /// The releases and the tags that have none; drafting and publishing a release.
+    Releases,
     Notes,
     Claude,
     Terminal,
@@ -260,8 +262,8 @@ pub enum RepoTab {
 }
 
 impl RepoTab {
-    pub const ALL: [RepoTab; 10] = [RepoTab::Code, RepoTab::Commits, RepoTab::Changes, RepoTab::Issues, RepoTab::Pulls, RepoTab::Actions, RepoTab::Notes, RepoTab::Claude, RepoTab::Terminal, RepoTab::Settings];
-    pub const LABELS: [&'static str; 10] = ["Code", "Commits", "Changes", "Issues", "Pull requests", "Actions", "Notes", "Claude", "Terminal", "Settings"];
+    pub const ALL: [RepoTab; 11] = [RepoTab::Code, RepoTab::Commits, RepoTab::Changes, RepoTab::Issues, RepoTab::Pulls, RepoTab::Actions, RepoTab::Releases, RepoTab::Notes, RepoTab::Claude, RepoTab::Terminal, RepoTab::Settings];
+    pub const LABELS: [&'static str; 11] = ["Code", "Commits", "Changes", "Issues", "Pull requests", "Actions", "Releases", "Notes", "Claude", "Terminal", "Settings"];
 
     pub fn index(self) -> usize {
         RepoTab::ALL.iter().position(|t| *t == self).unwrap_or(0)
@@ -464,6 +466,8 @@ pub enum BranchSlot {
     /// The Commits section's comparison: the branch compared, and the one it's compared with.
     CompareHead,
     CompareBase,
+    /// The branch a new release's tag is made from.
+    ReleaseTarget,
 }
 
 /// Which organizations' repositories to load (`REPOHUB_ORGS`).
@@ -677,9 +681,11 @@ mod tests {
         }
         assert_eq!(RepoTab::parse("notes"), Some(RepoTab::Notes));
         assert_eq!(RepoTab::parse("Pull requests"), Some(RepoTab::Pulls));
-        assert_eq!(RepoTab::parse("8"), Some(RepoTab::Terminal));
+        assert_eq!(RepoTab::parse("9"), Some(RepoTab::Terminal));
         assert_eq!(RepoTab::parse("commits"), Some(RepoTab::Commits));
         assert_eq!(RepoTab::Commits.index(), 1, "Commits comes after Code");
+        assert_eq!(RepoTab::parse("releases"), Some(RepoTab::Releases));
+        assert_eq!(RepoTab::ALL[RepoTab::Releases.index() - 1], RepoTab::Actions, "Releases comes after Actions");
         assert_eq!(RepoTab::parse("changes"), Some(RepoTab::Changes));
         assert_eq!(RepoTab::parse("claude"), Some(RepoTab::Claude));
         assert_eq!(RepoTab::from_index(99), RepoTab::Code);

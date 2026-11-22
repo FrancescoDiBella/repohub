@@ -207,6 +207,30 @@ impl Gh {
         }
     }
 
+    /// Explains a refused write to the releases (`POST`/`PATCH .../releases…`): the Contents
+    /// permission on 403 and 404, and GitHub's reason in plain words for a tag it won't take.
+    pub fn explain_release_write(&self, r: &Resp) -> String {
+        let v = serde_json::from_str::<Value>(&r.body).ok();
+        let msg = v.as_ref().map(|v| s(v, "message")).unwrap_or_default();
+        let lower = msg.to_ascii_lowercase();
+        if r.status == 429 || r.remaining.as_deref() == Some("0") || r.retry_after.is_some() || lower.contains("rate limit") || lower.contains("abuse") {
+            return self.explain(r);
+        }
+        let first = v.as_ref().and_then(|v| v.get("errors")).and_then(Value::as_array).and_then(|e| e.first());
+        let (field, code) = first.map(|e| (s(e, "field"), s(e, "code"))).unwrap_or_default();
+        let detail = if msg.is_empty() { String::new() } else { format!(": {msg}") };
+        const NEEDS: &str = "Releases need \"Contents: Read and write\" on a fine-grained token, or the \"repo\" scope on a classic one.";
+        match (r.status, field.as_str(), code.as_str()) {
+            (401, ..) => "GitHub rejected the token (401): check the token in Settings, or GITHUB_TOKEN in your .env file.".into(),
+            (403, ..) => format!("GitHub refused (403){detail}. {NEEDS}"),
+            (404, ..) => format!("Not found (404){detail}. {NEEDS} The token must also reach this repository."),
+            (422, "tag_name", "already_exists") => "This tag already has a release (GitHub error 422): pick another tag.".into(),
+            (422, "tag_name", _) => "GitHub doesn't take this tag name (error 422): pick another one.".into(),
+            (422, "target_commitish", _) => "GitHub can't make the tag from this branch (error 422): check that the branch exists.".into(),
+            _ => self.explain(r),
+        }
+    }
+
     async fn get_resp(&self, path: &str) -> Result<(Value, Resp), String> {
         let r = self.t.send("GET", path, JSON).await?;
         match r.status {
@@ -949,6 +973,85 @@ impl Gh {
         Ok(c)
     }
 
+    /// Page `page` of the releases ([`crate::releases::PAGE`] a page), newest first, and whether
+    /// GitHub has more. GitHub lists drafts only to people who can push to the repository.
+    pub async fn releases(&self, full: &str, page: usize) -> Result<(Vec<crate::releases::Release>, bool), String> {
+        let per = crate::releases::PAGE;
+        let (v, resp) = self.get_resp(&format!("/repos/{full}/releases?per_page={per}&page={page}")).await?;
+        let more = match resp.link.as_deref() {
+            Some(link) => next_page_path(Some(link), &self.api_base).is_some(),
+            None => v.as_array().is_some_and(|a| a.len() >= per),
+        };
+        Ok((crate::releases::parse_releases(&v), more))
+    }
+
+    /// The newest [`crate::releases::TAGS`] tags, and whether GitHub has more.
+    pub async fn tags(&self, full: &str) -> Result<(Vec<crate::releases::Tag>, bool), String> {
+        let per = crate::releases::TAGS;
+        let (v, resp) = self.get_resp(&format!("/repos/{full}/tags?per_page={per}")).await?;
+        let more = match resp.link.as_deref() {
+            Some(link) => next_page_path(Some(link), &self.api_base).is_some(),
+            None => v.as_array().is_some_and(|a| a.len() >= per),
+        };
+        Ok((crate::releases::parse_tags(&v), more))
+    }
+
+    /// The release GitHub shows as the latest; `None` when there's none (GitHub answers 404).
+    pub async fn latest_release(&self, full: &str) -> Result<Option<crate::releases::Release>, String> {
+        let r = self.t.send("GET", &format!("/repos/{full}/releases/latest"), JSON).await?;
+        match r.status {
+            200..=299 => serde_json::from_str::<Value>(&r.body).map(|v| crate::releases::parse_release(&v)).map_err(|e| format!("Invalid response from GitHub: {e}")),
+            404 => Ok(None),
+            _ => Err(self.explain(&r)),
+        }
+    }
+
+    /// The first read of the Releases section: the first page of releases (and whether there
+    /// are more), the tags, and the latest release.
+    pub async fn release_listing(&self, full: &str) -> Result<(crate::releases::Listing, bool, Option<crate::releases::Latest>), String> {
+        let (releases, more) = self.releases(full, 1).await?;
+        let (tags, tags_more) = self.tags(full).await?;
+        let latest = self.latest_release(full).await?.map(|l| crate::releases::Latest { id: l.id, tag: l.tag });
+        Ok((crate::releases::Listing { releases, tags, tags_more }, more, latest))
+    }
+
+    /// The notes GitHub writes for tag `tag` (made from `target` when it's new): the changes
+    /// since `previous`, or without it since the release GitHub picks. Nothing is saved.
+    pub async fn generate_notes(&self, full: &str, tag: &str, target: &str, previous: Option<&str>) -> Result<String, String> {
+        let mut body = json!({ "tag_name": tag, "target_commitish": target });
+        if let Some(p) = previous {
+            body["previous_tag_name"] = p.into();
+        }
+        let v = self.release_write("POST", &format!("/repos/{full}/releases/generate-notes"), body).await?;
+        Ok(s(&v, "body"))
+    }
+
+    /// A write to the releases, with GitHub's refusals explained in the releases' terms.
+    async fn release_write(&self, method: &str, path: &str, body: Value) -> Result<Value, String> {
+        let r = self.t.send_body(method, path, JSON, &body.to_string()).await?;
+        match r.status {
+            200..=299 => Ok(serde_json::from_str(&r.body).unwrap_or(Value::Null)),
+            _ => Err(self.explain_release_write(&r)),
+        }
+    }
+
+    /// Creates a release (a draft, or published), or saves draft `id` again (and publishes it
+    /// when `n.draft` is false).
+    pub async fn save_release(&self, full: &str, id: Option<u64>, n: &NewRelease) -> Result<crate::releases::Release, String> {
+        let body = json!({ "tag_name": n.tag, "target_commitish": n.target, "name": n.name, "body": n.body, "draft": n.draft, "prerelease": n.prerelease });
+        let v = match id {
+            Some(id) => self.release_write("PATCH", &format!("/repos/{full}/releases/{id}"), body).await?,
+            None => self.release_write("POST", &format!("/repos/{full}/releases"), body).await?,
+        };
+        Ok(crate::releases::parse_release(&v).unwrap_or_else(|| crate::releases::Release::unread(&n.tag, n.draft, n.prerelease)))
+    }
+
+    /// Publishes draft `id` as it is.
+    pub async fn publish_release(&self, full: &str, id: u64) -> Result<crate::releases::Release, String> {
+        let v = self.release_write("PATCH", &format!("/repos/{full}/releases/{id}"), json!({ "draft": false })).await?;
+        Ok(crate::releases::parse_release(&v).unwrap_or_else(|| crate::releases::Release::unread("", false, false)))
+    }
+
     pub async fn merge_pull(&self, full: &str, number: u32, method: &str) -> Result<(), String> {
         self.write("PUT", &format!("/repos/{full}/pulls/{number}/merge"), json!({ "merge_method": method })).await.map(|_| ())
     }
@@ -1287,6 +1390,22 @@ pub async fn load_compare(cfg: &Config, full: &str, base: &str, head: &str) -> R
     Gh::new(cfg).compare(full, base, head).await
 }
 
+pub async fn load_release_listing(cfg: &Config, full: &str) -> Result<(crate::releases::Listing, bool, Option<crate::releases::Latest>), String> {
+    Gh::new(cfg).release_listing(full).await
+}
+
+pub async fn load_releases(cfg: &Config, full: &str, page: usize) -> Result<(Vec<crate::releases::Release>, bool), String> {
+    Gh::new(cfg).releases(full, page).await
+}
+
+pub async fn load_latest_release(cfg: &Config, full: &str) -> Result<Option<crate::releases::Release>, String> {
+    Gh::new(cfg).latest_release(full).await
+}
+
+pub async fn generate_release_notes(cfg: &Config, full: &str, tag: &str, target: &str, previous: Option<&str>) -> Result<String, String> {
+    Gh::new(cfg).generate_notes(full, tag, target, previous).await
+}
+
 pub async fn load_detail(cfg: &Config, full: &str, at: &str) -> Detail {
     Gh::new(cfg).detail(full, at).await
 }
@@ -1314,6 +1433,18 @@ pub struct NewPull {
     pub head: String,
     pub base: String,
     pub draft: bool,
+}
+
+/// A release to create or save: its tag, the branch a new tag is made from, title and notes.
+#[derive(Clone, Debug)]
+pub struct NewRelease {
+    pub tag: String,
+    pub target: String,
+    pub name: String,
+    pub body: String,
+    /// Saved as a draft; false publishes it.
+    pub draft: bool,
+    pub prerelease: bool,
 }
 
 /// A comment to write on lines of a pull request's diff.
@@ -1349,6 +1480,12 @@ pub enum Write {
     LineComment { number: u32, comment: NewLineComment },
     /// Re-running all jobs (`failed_only: false`) or only failed jobs (`failed_only: true`) of a workflow run.
     RerunRun { run_id: u64, failed_only: bool },
+    /// A new release: a draft, or published (which creates its tag).
+    Release(NewRelease),
+    /// Draft `id` saved again, or published with these changes.
+    EditRelease { id: u64, release: NewRelease },
+    /// Draft `id` published as it is.
+    PublishRelease { id: u64 },
 }
 
 impl Write {
@@ -1356,7 +1493,7 @@ impl Write {
     pub fn number(&self) -> Option<u32> {
         match self {
             Write::CloseIssue(n) | Write::ReopenIssue(n) | Write::SetPullOpen { number: n, .. } | Write::Merge { number: n, .. } | Write::Comment { number: n, .. } | Write::Review { number: n, .. } | Write::LineComment { number: n, .. } => Some(*n),
-            Write::Issue { .. } | Write::Branch { .. } | Write::Pull(_) | Write::RerunRun { .. } => None,
+            Write::Issue { .. } | Write::Branch { .. } | Write::Pull(_) | Write::RerunRun { .. } | Write::Release(_) | Write::EditRelease { .. } | Write::PublishRelease { .. } => None,
         }
     }
 }
@@ -1376,6 +1513,8 @@ pub enum Done {
     Reviewed(u32, Verdict),
     LineCommented(u32),
     Reran { run_id: u64, failed_only: bool },
+    /// A release saved as a draft or published, as GitHub has it now.
+    Release(Box<crate::releases::Release>),
 }
 
 pub async fn run(cfg: &Config, full: &str, w: Write) -> Result<Done, String> {
@@ -1392,6 +1531,9 @@ pub async fn run(cfg: &Config, full: &str, w: Write) -> Result<Done, String> {
         Write::SetPullOpen { number, open } => gh.set_pull_open(full, number, open).await.map(|_| Done::PullOpen(number, open)),
         Write::Merge { number, method } => gh.merge_pull(full, number, method).await.map(|_| Done::Merged(number)),
         Write::RerunRun { run_id, failed_only } => gh.rerun_run(full, run_id, failed_only).await.map(|_| Done::Reran { run_id, failed_only }),
+        Write::Release(n) => gh.save_release(full, None, &n).await.map(|r| Done::Release(Box::new(r))),
+        Write::EditRelease { id, release } => gh.save_release(full, Some(id), &release).await.map(|r| Done::Release(Box::new(r))),
+        Write::PublishRelease { id } => gh.publish_release(full, id).await.map(|r| Done::Release(Box::new(r))),
     }
 }
 
