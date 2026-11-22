@@ -22,8 +22,10 @@ allow GET /repos/octo/app/branches
 allow GET /repos/octo/app/commits
 allow GET /repos/octo/app/commits/0123abcd
 allow GET /repos/octo/app/commits/0123abcd0123abcd0123abcd0123abcd0123abcd/check-runs
+allow GET /repos/octo/app/compare/main...50%25-off
 allow GET /repos/octo/app/compare/main...feature/x
 allow GET /repos/octo/app/contents
+allow GET /repos/octo/app/git/ref/heads/50%25-off
 allow GET /repos/octo/app/git/ref/heads/main
 allow GET /repos/octo/app/issues/14
 allow GET /repos/octo/app/issues/14/comments
@@ -100,6 +102,7 @@ deny POST /repos/octo/app/actions/workflows/1/dispatches
 deny GET /repos/octo/app/git/blobs/abc
 deny GET /user/emails
 deny GET /user/keys
+deny GET /user/orgs
 deny PATCH /user
 deny GET /search/code
 deny PUT /notifications
@@ -140,3 +143,23 @@ deny PUT /repos/octo/notes/contents/boards/o/r/%2E%2E/x.excalidraw
 deny PUT /repos/octo/notes/contents/boards/o/r/main/..%2F..%2Fx.excalidraw
 deny PUT /repos/../user/contents/boards/o/r/main/x.excalidraw
 deny GET /repos/octo/app/issues/14%00
+
+# --- branch names with `%`: sent as `%25` (GitHub decodes the path once); decoded once, a `%`
+# --- may not start an escape, so a second decoding can't make another character of it ---
+allow GET /repos/octo/app/git/ref/heads/fix/100%25
+allow GET /repos/octo/app/compare/release%25x/1.0...feature/x
+deny GET /repos/octo/app/git/ref/heads/%2e%2e/user
+deny GET /repos/octo/app/git/ref/heads/%252e%252e/user
+deny GET /repos/octo/app/git/ref/heads/a%2fb
+deny GET /repos/octo/app/git/ref/heads/a%252fb
+deny GET /repos/octo/app/git/ref/heads/a%00
+deny GET /repos/octo/app/git/ref/heads/a%2500
+deny GET /repos/octo/app/git/ref/heads/a%2541
+deny GET /repos/octo/app/git/ref/heads/a%252541
+deny GET /repos/octo/app/git/ref/heads/a%2
+deny GET /repos/octo/app/git/ref/heads/a%25..b
+deny GET /repos/octo/app/compare/main...a%252e%252e
+deny GET /repos/octo/app/compare/main..a%25
+deny GET /repos/octo%25/app/git/ref/heads/main
+deny GET /repos/octo/app/issues/14%25
+deny GET /repos/octo/app/contents/x%25y

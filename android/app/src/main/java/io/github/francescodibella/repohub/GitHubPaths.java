@@ -120,6 +120,43 @@ final class GitHubPaths {
         return raw.replace("%25", "%");
     }
 
+    /**
+     * A path naming branches, checked on the raw address before decoding, as repohub-server's
+     * {@code branch_path}: {@code /repos/{o}/{r}/git/ref/heads/<branch>} and
+     * {@code /repos/{o}/{r}/compare/<base>...<head>}. A branch name may hold %, sent as %25;
+     * decoded once, a % may not start an escape (% and two hex digits), so a second decoding
+     * can't make another character of it. No encoded dot, slash, backslash or NUL anywhere, no %
+     * in the owner or repository, and the names must be branch names. Returns the path decoded
+     * once, or null.
+     */
+    static String branchPath(String raw) {
+        String lower = raw.toLowerCase(Locale.ROOT);
+        if (lower.contains("%2e") || lower.contains("%2f") || lower.contains("%5c") || lower.contains("%00") || raw.indexOf('\\') >= 0 || hasControl(raw) || !raw.startsWith("/")) {
+            return null;
+        }
+        String[] seg = raw.substring(1).split("/", -1);
+        if (seg.length < 5 || !seg[0].equals("repos") || !name(seg[1]) || !name(seg[2])) {
+            return null;
+        }
+        String at;
+        int from;
+        if (seg.length >= 7 && seg[3].equals("git") && seg[4].equals("ref") && seg[5].equals("heads")) {
+            at = "git/ref/heads";
+            from = 6;
+        } else if (seg[3].equals("compare")) {
+            at = "compare";
+            from = 4;
+        } else {
+            return null;
+        }
+        String decoded = percentDecode(String.join("/", java.util.Arrays.copyOfRange(seg, from, seg.length)));
+        if (decoded == null || decoded.indexOf('\\') >= 0 || hasControl(decoded) || decoded.matches("(?s).*%[0-9A-Fa-f]{2}.*")) {
+            return null;
+        }
+        boolean ok = at.equals("compare") ? compareSpec(decoded) : branchName(decoded);
+        return ok ? "/repos/" + seg[1] + "/" + seg[2] + "/" + at + "/" + decoded : null;
+    }
+
     private static boolean number(String s) {
         return !s.isEmpty() && s.matches("[0-9]+");
     }
@@ -137,7 +174,7 @@ final class GitHubPaths {
         String[] rest = repo ? java.util.Arrays.copyOfRange(seg, 3, seg.length) : new String[0];
         switch (method) {
             case "GET":
-                if (p.equals("/user") || p.equals("/user/repos") || p.equals("/user/starred") || p.equals("/user/orgs") || p.equals("/search/issues") || p.equals("/notifications")) {
+                if (p.equals("/user") || p.equals("/user/repos") || p.equals("/user/starred") || p.equals("/search/issues") || p.equals("/notifications")) {
                     return true;
                 }
                 if (seg.length == 2 && seg[0].equals("users") && !seg[1].isEmpty()) {
@@ -171,13 +208,14 @@ final class GitHubPaths {
                     if (rest.length == 1 && (rest[0].equals("labels") || rest[0].equals("assignees") || rest[0].equals("milestones"))) {
                         return true;
                     }
+                    // The last commit of one branch (creating a branch from it).
                     if (rest.length >= 4 && rest[0].equals("git") && rest[1].equals("ref") && rest[2].equals("heads")) {
                         for (int i = 3; i < rest.length; i++) {
                             if (rest[i].isEmpty()) {
                                 return false;
                             }
                         }
-                        return true;
+                        return branchName(String.join("/", java.util.Arrays.copyOfRange(rest, 3, rest.length)));
                     }
                     if (rest.length == 3 && rest[0].equals("pulls") && number(rest[1]) && (rest[2].equals("files") || rest[2].equals("reviews") || rest[2].equals("comments"))) {
                         return true;

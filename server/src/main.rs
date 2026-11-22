@@ -561,6 +561,40 @@ fn compare_spec(spec: &str) -> bool {
     spec.split_once("...").is_some_and(|(base, head)| branch_name(base) && branch_name(head))
 }
 
+/// A path naming branches, checked on the raw address before anything is decoded:
+/// `/repos/{o}/{r}/git/ref/heads/<branch>` and `/repos/{o}/{r}/compare/<base>...<head>`.
+///
+/// A branch name may hold `%`, which the app sends as `%25` (GitHub decodes the path once).
+/// Decoded once, a `%` may not start an escape (`%` and two hex digits), so nothing that reads
+/// the path again can make another character of it: `%252e%252e` (`..` encoded twice) and
+/// `%2541` stay refused, `50%25-off` passes. An encoded dot, slash, backslash or NUL (`%2e`,
+/// `%2f`, `%5c`, `%00`) is refused anywhere, the owner and repository can't hold `%`, and the
+/// names must be branch names. Returns the path decoded once, for [`allowed`].
+fn branch_path(raw: &str) -> Option<String> {
+    let lower = raw.to_ascii_lowercase();
+    if ["%2e", "%2f", "%5c", "%00"].iter().any(|x| lower.contains(x)) || raw.contains('\\') || raw.chars().any(|c| c.is_control()) {
+        return None;
+    }
+    let seg: Vec<&str> = raw.strip_prefix('/')?.split('/').collect();
+    let name = |s: &str| !s.is_empty() && !s.starts_with('.') && s.len() <= 100 && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'));
+    if seg.len() < 5 || seg[0] != "repos" || !name(seg[1]) || !name(seg[2]) {
+        return None;
+    }
+    let (at, names) = match &seg[3..] {
+        ["git", "ref", "heads", rest @ ..] if !rest.is_empty() => ("git/ref/heads", rest.join("/")),
+        ["compare", rest @ ..] if !rest.is_empty() => ("compare", rest.join("/")),
+        _ => return None,
+    };
+    let decoded = percent_decode_path(&names)?;
+    let b = decoded.as_bytes();
+    let escape_left = (0..b.len()).any(|i| b[i] == b'%' && i + 2 < b.len() && b[i + 1].is_ascii_hexdigit() && b[i + 2].is_ascii_hexdigit());
+    if escape_left || decoded.contains('\\') || decoded.chars().any(|c| c.is_control()) {
+        return None;
+    }
+    let ok = if at == "compare" { compare_spec(&decoded) } else { branch_name(&decoded) };
+    ok.then(|| format!("/repos/{}/{}/{at}/{decoded}", seg[1], seg[2]))
+}
+
 /// Which proxied API calls are allowed: the exact read endpoints RepoHub uses, starring, and the few
 /// writes the app makes (create an issue, a branch, a pull request or a release, close an issue,
 /// merge a pull request, publish a draft release, triage an issue, and board sync's writes to
@@ -576,7 +610,7 @@ fn allowed(method: &Method, path: &str) -> bool {
 
     match method {
         Method::Get => {
-            if p == "/user" || p == "/user/repos" || p == "/user/starred" || p == "/user/orgs" || p == "/search/issues" || p == "/notifications" {
+            if p == "/user" || p == "/user/repos" || p == "/user/starred" || p == "/search/issues" || p == "/notifications" {
                 return true;
             }
             if seg.len() == 2 && seg[0] == "users" && !seg[1].is_empty() {
@@ -618,7 +652,8 @@ fn allowed(method: &Method, path: &str) -> bool {
                     | ["milestones"] => return true,
                     _ => {}
                 }
-                if rest.len() >= 4 && rest[0] == "git" && rest[1] == "ref" && rest[2] == "heads" && rest[3..].iter().all(|s| !s.is_empty()) {
+                // The last commit of one branch (creating a branch from it).
+                if rest.len() >= 4 && rest[0] == "git" && rest[1] == "ref" && rest[2] == "heads" && rest[3..].iter().all(|s| !s.is_empty()) && branch_name(&rest[3..].join("/")) {
                     return true;
                 }
                 if rest.len() == 3 && rest[0] == "pulls" && number(rest[1]) && matches!(rest[2], "files" | "reviews" | "comments") {
@@ -763,7 +798,8 @@ fn proxy(cfg: &Cfg, mut req: Request) {
     }
     let raw_path = full_path.split('?').next().unwrap_or("");
     let board = board_contents_path(raw_path);
-    let Some(decoded_path) = board.clone().or_else(|| validate_and_decode_path(raw_path)) else {
+    // A branch name keeps its `%` signs too (see `branch_path`).
+    let Some(decoded_path) = board.clone().or_else(|| branch_path(raw_path)).or_else(|| validate_and_decode_path(raw_path)) else {
         let _ = req.respond(text(403, "Path traversal or invalid characters in path"));
         return;
     };
@@ -1022,7 +1058,8 @@ mod tests {
         assert!(allowed(&Method::Get, "/user"));
         assert!(allowed(&Method::Get, "/user/repos"));
         assert!(allowed(&Method::Get, "/user/starred"));
-        assert!(allowed(&Method::Get, "/user/orgs"));
+        // Never asked by the app: its organizations come from `/users/{login}/orgs`.
+        assert!(!allowed(&Method::Get, "/user/orgs"));
         assert!(allowed(&Method::Get, "/search/issues"));
         assert!(allowed(&Method::Get, "/users/octocat"));
         assert!(allowed(&Method::Get, "/users/octocat/repos"));
@@ -1299,6 +1336,57 @@ mod tests {
         }
         // Everything else still goes through the general check, which refuses `%` after decoding.
         assert_eq!(validate_and_decode_path("/repos/me/notes/contents/boards/o/r/feature%252Fx/x.excalidraw"), None);
+    }
+
+    /// A branch name with `%` (sent as `%25`) passes where branches are named, and nothing that
+    /// a second decoding could turn into something else does.
+    #[test]
+    fn branch_names_with_a_percent_sign() {
+        let passes = |raw: &str| board_contents_path(raw).or_else(|| branch_path(raw)).or_else(|| validate_and_decode_path(raw)).is_some_and(|d| allowed(&Method::Get, &d));
+        assert_eq!(branch_path("/repos/o/r/git/ref/heads/50%25-off").as_deref(), Some("/repos/o/r/git/ref/heads/50%-off"));
+        assert_eq!(branch_path("/repos/o/r/compare/main...feature/100%25").as_deref(), Some("/repos/o/r/compare/main...feature/100%"));
+        for ok in [
+            "/repos/o/r/git/ref/heads/50%25-off",
+            "/repos/o/r/git/ref/heads/fix/50%25",
+            "/repos/o/r/git/ref/heads/%25",
+            "/repos/o/r/compare/main...50%25-off",
+            "/repos/o/r/compare/release%25x/1...feature/x",
+            // Other characters the app encodes stay as they were.
+            "/repos/o/r/git/ref/heads/feature%2Bx",
+            "/repos/o/r/git/ref/heads/feature/x",
+            "/repos/o/r/compare/main...feature/x",
+        ] {
+            assert!(passes(ok), "{ok}");
+        }
+        for bad in [
+            // An encoded dot, slash, NUL or backslash, once or twice.
+            "/repos/o/r/git/ref/heads/%2e%2e/%2e%2e/user/emails",
+            "/repos/o/r/git/ref/heads/%252e%252e/%252e%252e/user/emails",
+            "/repos/o/r/git/ref/heads/a%2fb",
+            "/repos/o/r/git/ref/heads/a%252fb",
+            "/repos/o/r/git/ref/heads/a%00",
+            "/repos/o/r/git/ref/heads/a%2500",
+            "/repos/o/r/git/ref/heads/a%5Cb",
+            "/repos/o/r/git/ref/heads/a%255Cb",
+            // A `%` left after one decoding that starts an escape (encoded twice or more).
+            "/repos/o/r/git/ref/heads/a%2541",
+            "/repos/o/r/git/ref/heads/a%252541",
+            "/repos/o/r/compare/main...a%252e%252e",
+            "/repos/o/r/compare/a%2541...main",
+            // A broken escape, a name that isn't a branch's, `%` outside branch names.
+            "/repos/o/r/git/ref/heads/a%2",
+            "/repos/o/r/git/ref/heads/a%zz",
+            "/repos/o/r/git/ref/heads/a%25..b",
+            "/repos/o/r/git/ref/heads/-x%25",
+            "/repos/o/r/git/ref/heads/a..b",
+            "/repos/o/r/compare/main..a%25",
+            "/repos/o%25/r/git/ref/heads/main",
+            "/repos/o/r/issues/14%25",
+            "/repos/o/r/contents/x%25y",
+            "/repos/o/r/git/refs/heads/a%25",
+        ] {
+            assert!(!passes(bad), "{bad}");
+        }
     }
 
     #[test]

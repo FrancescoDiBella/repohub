@@ -155,9 +155,11 @@ final class Backend {
         }
         int q = pathAndQuery.indexOf('?');
         String rawPath = q < 0 ? pathAndQuery : pathAndQuery.substring(0, q);
-        // A board in the notes repository keeps its `%` signs: checked strictly before decoding.
+        // A board in the notes repository, and a branch name, keep their `%` signs: checked
+        // strictly before decoding.
         String board = GitHubPaths.boardContentsPath(rawPath);
-        String decoded = board != null ? board : GitHubPaths.decode(rawPath);
+        String branch = board != null ? null : GitHubPaths.branchPath(rawPath);
+        String decoded = board != null ? board : branch != null ? branch : GitHubPaths.decode(rawPath);
         if (decoded == null) {
             return Reply.text(403, "Path traversal or invalid characters in path");
         }

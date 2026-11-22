@@ -1,5 +1,5 @@
 //! `server/allowlist.txt`, the requests the app makes and ones it must never make, through the
-//! proxy's checks as a request meets them (`board_contents_path` or
+//! proxy's checks as a request meets them (`board_contents_path`, `branch_path` or
 //! `validate_and_decode_path`, then `allowed`). The Android app's `GitHubPaths` is tested
 //! against the same file (`BackendTest.sharedAllowlist`), and the app's own requests too
 //! (`src/allowlist_tests.rs`), so the three stay equal.
@@ -7,7 +7,7 @@ use std::str::FromStr;
 
 use tiny_http::Method;
 
-use super::{allowed, board_contents_path, validate_and_decode_path};
+use super::{allowed, board_contents_path, branch_path, validate_and_decode_path};
 
 const CASES: &str = include_str!("../allowlist.txt");
 
@@ -17,7 +17,7 @@ fn passes(method: &Method, path_and_query: &str) -> bool {
     if raw.chars().any(|c| c.is_control()) {
         return false;
     }
-    match board_contents_path(raw).or_else(|| validate_and_decode_path(raw)) {
+    match board_contents_path(raw).or_else(|| branch_path(raw)).or_else(|| validate_and_decode_path(raw)) {
         Some(decoded) => allowed(method, &decoded),
         None => false,
     }
