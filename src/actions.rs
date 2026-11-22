@@ -84,7 +84,7 @@ pub fn branch_panel(s: &App, k: &Kit, i: usize, slot: BranchSlot, current: &str)
     }
     let Some(r) = s.data.repos.get(i) else { return el() };
     let q = s.branch_filter.text.trim().to_lowercase();
-    let filter = TextInput::new(&s.branch_filter).placeholder("Filter branches").leading_icon(k.glyph.search)
+    let filter = TextInput::new(&s.branch_filter).label("Filter branches").placeholder("Filter branches").leading_icon(k.glyph.search)
         .on_edit(|s: &mut App| &mut s.branch_filter).build(k).key("branch-filter").w_full();
     let mut list = col().w_full().gap(0.0);
     match s.branches.get(&r.full_name) {
@@ -183,7 +183,7 @@ pub fn form_panel(s: &App, k: &Kit, i: usize) -> El {
             if f.kind == Compose::Pull {
                 let draft = f.draft;
                 body = body.child(row().gap(10.0).center_y()
-                    .child(rune_kit::Switch::new(draft).on_toggle(|s: &mut App| if let Some(f) = s.form.as_mut() { f.draft = !f.draft; }).build(k).key("form-draft"))
+                    .child(rune_kit::Switch::new(draft).label("Draft: not ready for review yet").on_toggle(|s: &mut App| if let Some(f) = s.form.as_mut() { f.draft = !f.draft; }).build(k).key("form-draft"))
                     .child(text("Draft: not ready for review yet").font(k.ty.small).color(k.c.text_base)));
             }
         }

@@ -19,11 +19,31 @@ The sections are **Added**, **Changed** and **Fixed**.
   public repository and never creates one; **Stop syncing** leaves everything in place.
 - **Export…** and **Import…** of a board as an `.excalidraw` file (a save dialog on the desktop,
   a download in the browser, the phone's pickers on Android). They need no account.
+- Actions: filter workflow runs by status (**All**, **Failed**, **Running**), repository and
+  workflow; click a run to inspect its jobs, steps and the last 200 lines of any job's log (with
+  **Copy log**), and re-run failed jobs or the whole workflow (**Actions: Read and write** /
+  `workflow` scope). The status-bar icon also flags your open pull requests with failing checks.
+- Contrast checks in the theme editor: colours that are hard to read show their WCAG contrast
+  ratio and a **Fix contrast** button that adjusts their lightness, main buttons pick readable
+  ink in every theme, and issue label chips reach at least 4.5:1 contrast on light and dark
+  panels.
 
 ### Changed
 - A deleted drawing goes to a trash folder next to the drawings and stays there 30 days.
 - Drawing on a board saved from excalidraw.com keeps the elements RepoHub doesn't draw (images,
   frames) in the file.
+- Faster **Repositories** page, **⌘K** command palette and **Terminal** on large accounts:
+  searching and filtering reuse pre-computed repository keys and cached lists, the repository
+  list shows 60 cards at a time with **Show more** and memoizes unchanged cards, local clone
+  paths are cached instead of probing the disk on every frame, and terminal lines merge
+  same-background runs and skip rebuilding between shell outputs.
+
+### Fixed
+- Screen readers and keyboard navigation: clickable workflow runs, compact repository rows and
+  repository card titles now announce their role and label; search, branch filter, new drawing and
+  local folder fields and the draft pull request switch are labelled; CI, pull request, issue and
+  git status marks carry accessible labels and distinct shapes instead of relying on colour or
+  hover tooltips alone.
 
 ## 0.1.0 — 2026-11-18
 

@@ -34,7 +34,7 @@ fn checks(k: &Kit, list: &[Check]) -> El {
         };
         // The word says it; the colour and the mark only repeat it.
         let mut line = row().w_full().px(16.0).py(8.0).gap(10.0).center_y().key(format!("thread-check-{n}"))
-            .child(ui::ico(icon, 14.0, ink))
+            .child(ui::ico(icon, 14.0, ink).label(format!("Check {}", c.state.label().to_lowercase())))
             .child(text(c.name.clone()).font(k.ty.small).color(k.c.text_base).grow(1.0).wrap())
             .child(ui::pill(k, c.state.label(), ink));
         if !c.url.is_empty() {

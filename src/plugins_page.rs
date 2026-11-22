@@ -87,7 +87,9 @@ fn install_row(s: &App, k: &Kit) -> El {
         let input = rune_kit::TextInput::new(&s.plugin_src).label("Plugin folder or Git address")
             .placeholder("A folder with plugin.json, or https://github.com/you/plugin")
             .on_edit(|s: &mut App| &mut s.plugin_src).on_submit(|s: &mut App, _| s.install_plugin(false)).build(k).key("plugin-src").grow(1.0).min_w(260.0);
-        let folder = format!("file://{}", crate::plugins::folder().display().to_string().replace('%', "%25").replace(' ', "%20").replace('\\', "/"));
+        let dir = s.plugins_folder.clone();
+        let display_dir = dir.display().to_string();
+        let folder = format!("file://{}", display_dir.replace('%', "%25").replace(' ', "%20").replace('\\', "/"));
         out = out
             .child(row().w_full().gap(8.0).pt(8.0).center_y().flex_wrap()
                 .child(input)
@@ -100,10 +102,10 @@ fn install_row(s: &App, k: &Kit) -> El {
                     .on_press(|s: &mut App| s.install_plugin(true)).build(k).key("plugin-create"))
                 .child(Button::new("Open plugins folder").icon(&icons::FOLDER).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
                     .on_press_tx(move |_: &mut App, tx| {
-                        let _ = std::fs::create_dir_all(crate::plugins::folder());
+                        let _ = std::fs::create_dir_all(&dir);
                         let _ = tx.open_url(&folder);
                     }).build(k).key("plugins-folder"))
-                .child(text(crate::plugins::folder().display().to_string()).font(k.ty.text_small).color(k.c.text_faint).shrink().max_lines(1)));
+                .child(text(display_dir).font(k.ty.text_small).color(k.c.text_faint).shrink().max_lines(1)));
         if let Some(e) = &s.plugin_error {
             out = out.child(text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap());
         }
