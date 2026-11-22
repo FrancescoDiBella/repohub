@@ -7,6 +7,10 @@
 set -euo pipefail
 dir=${1:?usage: scripts/install-wasm-opt.sh <folder>}
 version=132
+if [ "$(uname -s)" != Linux ]; then
+    echo "install-wasm-opt.sh: this installs the Linux build; on a Mac use: brew install binaryen" >&2
+    exit 1
+fi
 case "$(uname -m)" in
     x86_64 | amd64) arch=x86_64; sum=195ddc94f9bc89f45abdabb0b9eea86023d727ba90eac8b35b80f2544fc30572 ;;
     aarch64 | arm64) arch=aarch64; sum=c58562417836c5d0493d89bdefc434933bdc097db641b483df86bcfa557a107f ;;

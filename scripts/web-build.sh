@@ -47,7 +47,9 @@ fi
 
 # The page names the two files with a hash of the build (`app.js?v=…`), so a browser may keep them
 # for a long time and still fetch the new ones after an update (repohub-server's Cache-Control).
-version=$(cat "$out/app.js" "$out/app_bg.wasm" | sha256sum | cut -c1-16)
+# (`shasum` where there is no `sha256sum`: a Mac.)
+hash() { if command -v sha256sum > /dev/null; then sha256sum; else shasum -a 256; fi; }
+version=$(cat "$out/app.js" "$out/app_bg.wasm" | hash | cut -c1-16)
 sed -e "s|'./app.js'|'./app.js?v=$version'|" -e "s|'./app_bg.wasm'|'./app_bg.wasm?v=$version'|" web/index.html > "$out/index.html"
 if [ "$(grep -c "?v=$version" "$out/index.html")" != 2 ]; then
     echo "web-build.sh: web/index.html no longer names './app.js' and './app_bg.wasm' once each" >&2
