@@ -47,3 +47,5 @@ mod fix67_tests;
 mod perf61_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod cache_freshness;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod every_page;
