@@ -125,6 +125,11 @@ the same; the clients bypass HTTP proxies for `localhost` and `NO_PROXY` hosts.
   `state::Undo` that knows how to put it back: closing an issue, deleting a theme).
 - The Android app forwards the same writes: add a new one to `android/.../GitHubPaths.java` too,
   with its test.
+- The repository lists, the pinned set and the palette's entries are cached between frames and
+  rebuilt when `App::data_gen` moves. Code that changes `data` in place (a count, a star, a
+  state) calls `App::data_changed()`; `apply_done` does it for every finished write.
+- Timing tests only guard against a return to the old cost on shared runners. To check the
+  one-frame target on a quiet machine: `REPOHUB_PERF_ASSERT=1 cargo test --release measure_500`.
 - Plugins see the app only through `@repohub` (`plugins::context` and the actions in
   `Plugins::make`). Give them more only on purpose: no files, processes or network.
 - Every pressable element gets a `.role(...)` (`"button"`, `"link"`, `"option"`, …) and a

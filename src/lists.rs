@@ -718,10 +718,12 @@ mod a11y_tests {
         assert!(has_named(&tree, "CI failing"));
         assert!(has_named(&tree, "CI running"));
         let r0 = rt.state.data.runs[0].clone();
-        let run_node = find_key(&tree, &format!("run-{}-{}-{}", r0.repo, r0.workflow, r0.updated_at)).expect("run row");
-        assert_eq!(run_node["role"].as_str(), Some("link"));
+        // A run GitHub knows by id opens in the app (a button); one without opens GitHub (a link).
+        assert!(r0.id > 0, "the sample runs have ids");
+        let run_node = find_key(&tree, &format!("run-{}-{}", r0.repo, r0.id)).expect("run row");
+        assert_eq!(run_node["role"].as_str(), Some("button"));
         let run_name = run_node["name"].as_str().unwrap_or("");
-        assert!(run_name.contains(&r0.workflow) && run_name.contains(&r0.branch) && run_name.contains("opens on GitHub"), "{run_name}");
+        assert!(run_name.contains(&r0.workflow) && run_name.contains(&r0.branch) && run_name.contains(&r0.repo), "{run_name}");
 
         // 6. Repository detail: Branch filter, New PR form + Draft switch, Local git change mark, Notes input, Terminal folder input
         rt.update(|s, _| {
