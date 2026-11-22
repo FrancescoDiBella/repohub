@@ -1,0 +1,4 @@
+[
+  {"id": 901, "node_id": "PRR_901", "user": {"login": "alice", "id": 520, "type": "User"}, "body": "One question: should the status line hide when nothing came from the cache?", "state": "COMMENTED", "submitted_at": "2026-11-18T11:00:00Z", "commit_id": "e1d2c3b4a5968778695a4b3c2d1e0f9a8b7c6d5e"},
+  {"id": 902, "node_id": "PRR_902", "user": {"login": "bob", "id": 309, "type": "User"}, "body": "", "state": "APPROVED", "submitted_at": "2026-11-18T15:00:00Z", "commit_id": "e1d2c3b4a5968778695a4b3c2d1e0f9a8b7c6d5e"}
+]
