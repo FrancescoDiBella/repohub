@@ -32,6 +32,11 @@ jobs:
         run: cargo test --release
       - name: Server tests
         run: cargo test --release --manifest-path server/Cargo.toml
+      # clippy comes with the toolchain (rust-toolchain.toml lists it); a warning fails the job.
+      - name: Clippy (app)
+        run: cargo clippy --release --all-targets -- -D warnings
+      - name: Clippy (server)
+        run: cargo clippy --release --all-targets --manifest-path server/Cargo.toml -- -D warnings
       # The web build is built, optimized and measured by the size job.
 
   # What we ship, measured: the desktop program as releases build it and the web build as the
