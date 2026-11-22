@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Measures how RepoHub loads against a local mock of GitHub (scripts/mock_github.py): a cold start
+# Measures how RepoHub loads against a local mock of GitHub (tests/mock/mock_github.py): a cold start
 # (nothing saved), a warm start (the copy saved by the cold start) and a refresh with nothing
 # changed, each with the time to first content, the time to complete, and the requests and bytes
 # GitHub would have served. Nothing leaves this computer: the app talks to 127.0.0.1 only.
@@ -21,7 +21,7 @@ PORT="${BENCH_PORT:-8791}"
 WORK="$(mktemp -d)"
 trap 'kill "$MOCK" 2>/dev/null || true; rm -rf "$WORK"' EXIT
 
-MOCK_DELAY_MS="$DELAY" python3 scripts/mock_github.py "$PORT" >"$WORK/mock.log" 2>&1 &
+MOCK_DELAY_MS="$DELAY" python3 tests/mock/mock_github.py "$PORT" >"$WORK/mock.log" 2>&1 &
 MOCK=$!
 for _ in $(seq 50); do curl -sf "http://127.0.0.1:$PORT/_stats" >/dev/null && break; sleep 0.1; done
 

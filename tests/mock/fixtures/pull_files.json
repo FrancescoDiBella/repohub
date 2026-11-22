@@ -1,0 +1,38 @@
+[
+  {
+    "sha": "4f1c2a9d0b7e6f5a4c3b2a1908f7e6d5c4b3a291",
+    "filename": "src/cache.rs",
+    "status": "modified",
+    "additions": 9,
+    "deletions": 3,
+    "changes": 12,
+    "blob_url": "https://github.com/{full}/blob/e1d2c3b4a5968778695a4b3c2d1e0f9a8b7c6d5e/src/cache.rs",
+    "raw_url": "https://github.com/{full}/raw/e1d2c3b4a5968778695a4b3c2d1e0f9a8b7c6d5e/src/cache.rs",
+    "contents_url": "https://api.github.com/repos/{full}/contents/src/cache.rs?ref=e1d2c3b4a5968778695a4b3c2d1e0f9a8b7c6d5e",
+    "patch": "@@ -12,14 +12,20 @@ use std::time::Duration;\n /// How long an answer stays fresh.\n-const FRESH: Duration = Duration::from_secs(60);\n+const FRESH: Duration = Duration::from_secs(300);\n \n pub struct Cache {\n     entries: HashMap<String, Entry>,\n+    /// Answers read since the cache was opened, for the status line.\n+    hits: usize,\n }\n \n impl Cache {\n     pub fn get(&mut self, key: &str) -> Option<&Entry> {\n-        self.entries.get(key).filter(|e| e.fresh())\n+        let found = self.entries.get(key).filter(|e| e.fresh());\n+        if found.is_some() {\n+            self.hits += 1;\n+        }\n+        found\n     }\n \n-    pub fn len(&self) -> usize { self.entries.len() }\n+    pub fn hits(&self) -> usize { self.hits }\n }"
+  },
+  {
+    "sha": "7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b",
+    "filename": "src/status.rs",
+    "status": "added",
+    "additions": 6,
+    "deletions": 0,
+    "changes": 6,
+    "blob_url": "https://github.com/{full}/blob/e1d2c3b4a5968778695a4b3c2d1e0f9a8b7c6d5e/src/status.rs",
+    "raw_url": "https://github.com/{full}/raw/e1d2c3b4a5968778695a4b3c2d1e0f9a8b7c6d5e/src/status.rs",
+    "contents_url": "https://api.github.com/repos/{full}/contents/src/status.rs?ref=e1d2c3b4a5968778695a4b3c2d1e0f9a8b7c6d5e",
+    "patch": "@@ -0,0 +1,6 @@\n+use crate::cache::Cache;\n+\n+/// \"12 answers from the cache\", for the status line.\n+pub fn line(cache: &Cache) -> String {\n+    format!(\"{} answers from the cache\", cache.hits())\n+}"
+  },
+  {
+    "sha": "b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4",
+    "filename": "README.md",
+    "status": "modified",
+    "additions": 2,
+    "deletions": 1,
+    "changes": 3,
+    "blob_url": "https://github.com/{full}/blob/e1d2c3b4a5968778695a4b3c2d1e0f9a8b7c6d5e/README.md",
+    "raw_url": "https://github.com/{full}/raw/e1d2c3b4a5968778695a4b3c2d1e0f9a8b7c6d5e/README.md",
+    "contents_url": "https://api.github.com/repos/{full}/contents/README.md?ref=e1d2c3b4a5968778695a4b3c2d1e0f9a8b7c6d5e",
+    "patch": "@@ -8,3 +8,4 @@ Install it with `cargo install`.\n ## Cache\n \n-Answers are kept for a minute.\n+Answers are kept for five minutes. The status line says how many came\n+from the cache."
+  }
+]

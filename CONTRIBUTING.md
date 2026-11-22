@@ -55,6 +55,8 @@
 | `assets/fonts/` | Inter and IBM Plex Mono (SIL OFL), bundled so mono text is monospaced everywhere |
 | `server/allowlist.txt` | Every GitHub request the app makes, and ones it must never make: the proxy (`server/src/allowlist_cases.rs`), the Android app (`BackendTest.sharedAllowlist`) and the app's own requests (`src/allowlist_tests.rs`) are all tested against it, so the three allowlists stay equal |
 | `src/test_env.rs` | The tests' environment: taking `ENV_LOCK` clears the machine's account (`GITHUB_TOKEN`, a project `.env`, the saved one), so no test reaches GitHub or depends on who runs it |
+| `tests/flows/` | The flows (see [Flows](#flows)): `run.py` runs each `cases/*.py` (the program itself, headless, against the mock or on the sample data) and checks the element tree and the requests; `flowkit.py` is what a flow is made of |
+| `tests/mock/` | A mock GitHub on localhost (`mock_github.py`) and its GitHub-shaped fixtures (`fixtures/`), for the flows and `scripts/bench-load.sh` |
 | `server/` | `repohub-server`: static files (`files.rs`: the precompressed `.br`/`.gz` copy the browser accepts, `Cache-Control` and `ETag`), `config.json`, the `/gh/*` GitHub proxy that holds the token, and `/api/notes` (drawings in `DATA_DIR`; `all`, conditional writes with `if=`, the trash, sync's `index`) |
 | `web/manifest.webmanifest`, `web/icon.svg` | Add to Home Screen on phones |
 | `web/index.html` | Page that loads the WebAssembly build (`app.js` and `app_bg.wasm` are build outputs) |
@@ -80,6 +82,7 @@ cargo test --release                                      # app tests (.env pars
 cargo test --release --manifest-path server/Cargo.toml    # proxy allowlist and helpers
 cargo clippy --release --all-targets -- -D warnings       # lints, as CI runs them (the server: add --manifest-path)
 cargo run --release                                       # desktop app
+python3 tests/flows/run.py                                # the flows, once the app is built (see Flows)
 ```
 
 The tests don't use the account of the machine running them: a test that touches the
@@ -207,10 +210,60 @@ pull request's growth is worth it, put its run's `size` artifact (`size.json`) i
 Set `GITHUB_API_URL` to a local server that answers like the GitHub API. Everything else stays
 the same; the clients bypass HTTP proxies for `localhost` and `NO_PROXY` hosts.
 
-`scripts/mock_github.py PORT` is one: 200 repositories with pull requests, issues, runs and
-activity, ETags and 304s, a delay on every answer (`MOCK_DELAY_MS`, default 150), slower
-searches (`MOCK_SEARCH_DELAY_MS`, to watch the lists arrive one by one), `MOCK_DOWN=1` to see a
-failed refresh, and `/_stats` and `/_log` with what was asked.
+`python3 tests/mock/mock_github.py PORT` is one: 200 repositories (`MOCK_REPOS`) with pull
+requests, issues, runs and activity; a conversation's labels, people, milestone, comments, reviews
+and checks, a pull request's files, the history and a commit, releases and tags, from the fixtures
+in `tests/mock/fixtures/`; ETags and 304s; a delay on every answer (`MOCK_DELAY_MS`, default 150),
+slower searches (`MOCK_SEARCH_DELAY_MS`, to watch the lists arrive one by one), `MOCK_DOWN=1` to see
+a failed refresh. It takes a new issue, a comment, a change to an issue (state, title, description,
+labels, assignees, milestone) and a release (and its generated notes), checks what they carry and
+answers as GitHub does; what they change reads back. Anything it doesn't know gets a 404 that names
+the request (also printed on its stderr). `/_stats` and `/_log` say what was asked (the log with
+each write's JSON body), `POST /_reset` forgets it, `POST /_fail?path=…&status=500` makes one read
+fail.
+
+### Flows
+
+The flows run the program itself headless, as people use it: start-up and its arguments, the real
+loader, clicks and typing, then a check of what's on screen. CI runs them after the tests and keeps
+their stills as the run's `flows` artifact, also when a flow failed.
+
+```sh
+cargo build --release                                   # the program the flows drive
+python3 tests/flows/run.py                              # every flow: about 40 s; stills and logs in target/flows
+python3 tests/flows/run.py --only create-issue,notes    # some of them (--list names them)
+python3 tests/flows/run.py --keep                       # and keep each run's folder (its tree.json, data, home)
+```
+
+Each file in `tests/flows/cases/` is one flow (`FLOW = Flow(...)`, from `tests/flows/flowkit.py`).
+It runs `target/release/repohub` once with its start-up arguments (`-- page repo tab issues`), a
+Rune script of taps and typing on the virtual clock (`--script`), and takes the element tree
+(`--tree`) and a still (`--snap`) at `at` seconds. It fails when the program panics or exits with
+an error (a script that taps a key that isn't there does), when an element it names (a key, a
+label, text) is missing or one it says is gone is still there, when the mock didn't get a request
+it names (with the values its JSON body must carry), when the mock answered anything with a 404,
+or when its `check` finds something wrong (the commit in the temporary clone, the saved drawing,
+`prefs.json`). The failure says which; the flow's log and tree are in the output folder.
+
+A flow runs on the sample data (`account="sample"`) or against the mock (`account="mock"`: a
+made-up token, and `REPOHUB_BLOCKING=1` so the lists are there in the first frame). The program
+gets an empty home and data folder, only the mock's address and a proxy that refuses every
+connection: nothing reaches GitHub or any other host, whatever the machine has set.
+
+To add one, copy the flow closest to what you need and change its name, arguments, script
+(`tap(key, at)`, `write(text, at)`, `key("Enter", at, cmd=True)`, `drag(key, at, dx, dy)`) and
+what must be on screen (`has(key=…, label=…, text=…, role=…)`). Find the keys in the tree
+(`--keep`, or `NAME.tree.json` next to a failed flow's still). Keep in mind:
+- Background work (GitHub's answers, git, files) runs on the wall clock, the script on Rune's
+  virtual one, 20 frames a second. Leave a virtual second or more between the event that starts
+  it and the next event that needs it, or the still: that's 20 frames, a fifth of a second or
+  more of real time, and the mock answers in milliseconds.
+- A tap needs its element on screen: make the window taller (`size`) rather than scroll. A
+  repository section past the visible part of the section bar (a plugin's) opens from the
+  palette.
+- A new GitHub read or write the flow needs goes into `tests/mock/mock_github.py`, with a fixture
+  in GitHub's own shape.
+- Prefer a small, general start-up argument in `init` over leaving a flow out.
 
 ### Measuring how it loads
 

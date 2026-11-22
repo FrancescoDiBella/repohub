@@ -1,0 +1,4 @@
+[
+  {"id": 21, "node_id": "MI_21", "number": 1, "title": "v1.3", "description": "Faster starts", "state": "open", "open_issues": 4, "closed_issues": 9, "due_on": "2026-12-15T08:00:00Z", "html_url": "https://github.com/{full}/milestone/1"},
+  {"id": 22, "node_id": "MI_22", "number": 2, "title": "v2.0", "description": "The new configuration file", "state": "open", "open_issues": 11, "closed_issues": 0, "due_on": null, "html_url": "https://github.com/{full}/milestone/2"}
+]

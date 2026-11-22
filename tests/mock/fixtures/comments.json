@@ -1,0 +1,4 @@
+[
+  {"id": 801, "node_id": "IC_801", "user": {"login": "alice", "id": 520, "type": "User"}, "body": "I can reproduce this on Linux too: the second start reads every list again.", "created_at": "2026-11-17T10:00:00Z", "updated_at": "2026-11-17T10:00:00Z", "author_association": "MEMBER", "html_url": "https://github.com/{full}/issues/{number}#issuecomment-801"},
+  {"id": 802, "node_id": "IC_802", "user": {"login": "bob", "id": 309, "type": "User"}, "body": "Keeping answers for five minutes would cover it. I'll open a pull request.", "created_at": "2026-11-17T12:30:00Z", "updated_at": "2026-11-17T12:30:00Z", "author_association": "MEMBER", "html_url": "https://github.com/{full}/issues/{number}#issuecomment-802"}
+]

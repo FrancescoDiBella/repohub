@@ -1,0 +1,5 @@
+[
+  {"login": "octo", "id": 418, "node_id": "U_418", "avatar_url": "https://avatars.example/octo", "html_url": "https://github.com/octo", "type": "User", "site_admin": false},
+  {"login": "alice", "id": 520, "node_id": "U_520", "avatar_url": "https://avatars.example/alice", "html_url": "https://github.com/alice", "type": "User", "site_admin": false},
+  {"login": "bob", "id": 309, "node_id": "U_309", "avatar_url": "https://avatars.example/bob", "html_url": "https://github.com/bob", "type": "User", "site_admin": false}
+]
