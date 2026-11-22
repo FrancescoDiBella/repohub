@@ -1,0 +1,6 @@
+[
+  {"id": 11, "node_id": "LA_11", "url": "https://api.github.com/repos/{full}/labels/bug", "name": "bug", "color": "d73a4a", "default": true, "description": "Something isn't working"},
+  {"id": 12, "node_id": "LA_12", "url": "https://api.github.com/repos/{full}/labels/documentation", "name": "documentation", "color": "0075ca", "default": true, "description": "Improvements or additions to documentation"},
+  {"id": 13, "node_id": "LA_13", "url": "https://api.github.com/repos/{full}/labels/good%20first%20issue", "name": "good first issue", "color": "7057ff", "default": true, "description": "Good for newcomers"},
+  {"id": 14, "node_id": "LA_14", "url": "https://api.github.com/repos/{full}/labels/performance", "name": "performance", "color": "fbca04", "default": false, "description": "Faster or smaller"}
+]

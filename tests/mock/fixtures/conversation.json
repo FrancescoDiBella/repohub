@@ -1,0 +1,12 @@
+{
+  "labels": [
+    {"id": 11, "node_id": "LA_11", "name": "bug", "color": "d73a4a", "default": true, "description": "Something isn't working"},
+    {"id": 14, "node_id": "LA_14", "name": "performance", "color": "fbca04", "default": false, "description": "Faster or smaller"}
+  ],
+  "assignees": [
+    {"login": "octo", "id": 418, "type": "User"},
+    {"login": "alice", "id": 520, "type": "User"}
+  ],
+  "milestone": {"id": 21, "node_id": "MI_21", "number": 1, "title": "v1.3", "description": "Faster starts", "state": "open", "open_issues": 4, "closed_issues": 9, "due_on": "2026-12-15T08:00:00Z", "html_url": "https://github.com/{full}/milestone/1"},
+  "body": "Every start reads all the lists again, even when nothing changed since the last start a minute ago.\n\nSteps:\n\n1. Start the app.\n2. Quit it and start it again.\n\nExpected: the second start uses what it read the first time."
+}

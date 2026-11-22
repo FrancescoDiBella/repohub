@@ -1,0 +1,8 @@
+{
+  "total_count": 3,
+  "check_runs": [
+    {"id": 6001, "name": "test (ubuntu-latest)", "status": "completed", "conclusion": "success", "started_at": "2026-11-18T16:43:00Z", "completed_at": "2026-11-18T16:51:00Z", "html_url": "https://github.com/{full}/runs/6001"},
+    {"id": 6002, "name": "clippy", "status": "completed", "conclusion": "success", "started_at": "2026-11-18T16:43:00Z", "completed_at": "2026-11-18T16:47:00Z", "html_url": "https://github.com/{full}/runs/6002"},
+    {"id": 6003, "name": "size", "status": "completed", "conclusion": "failure", "started_at": "2026-11-18T16:43:00Z", "completed_at": "2026-11-18T16:49:00Z", "html_url": "https://github.com/{full}/runs/6003"}
+  ]
+}
