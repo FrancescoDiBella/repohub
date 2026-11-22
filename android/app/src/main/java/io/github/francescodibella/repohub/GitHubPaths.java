@@ -191,6 +191,14 @@ final class GitHubPaths {
                     if (rest.length == 3 && rest[0].equals("commits") && rest[1].matches("[0-9a-fA-F]{7,64}") && rest[2].equals("check-runs")) {
                         return true;
                     }
+                    // One commit with its files, by its id only.
+                    if (rest.length == 2 && rest[0].equals("commits") && rest[1].matches("[0-9a-fA-F]{7,64}")) {
+                        return true;
+                    }
+                    // Two branches compared: `base...head`, each a branch name (which may hold `/`).
+                    if (rest.length >= 2 && rest[0].equals("compare") && compareSpec(String.join("/", java.util.Arrays.copyOfRange(rest, 1, rest.length)))) {
+                        return true;
+                    }
                 }
                 return false;
             case "PUT":
@@ -214,6 +222,28 @@ final class GitHubPaths {
             default:
                 return false;
         }
+    }
+
+    /** A branch name GitHub takes (the app's `github::valid_branch`). */
+    static boolean branchName(String name) {
+        if (name.isEmpty() || name.length() > 200 || name.startsWith("-") || name.startsWith("/") || name.startsWith(".")
+            || name.endsWith("/") || name.endsWith(".") || name.endsWith(".lock")
+            || name.contains("..") || name.contains("//") || name.contains("@{")) {
+            return false;
+        }
+        for (int i = 0; i < name.length(); i++) {
+            char c = name.charAt(i);
+            if (Character.isWhitespace(c) || Character.isISOControl(c) || "~^:?*[\\".indexOf(c) >= 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** `base...head` of a comparison: two branch names around the three dots. */
+    static boolean compareSpec(String spec) {
+        int at = spec.indexOf("...");
+        return at >= 0 && branchName(spec.substring(0, at)) && branchName(spec.substring(at + 3));
     }
 
     private static boolean starred(String[] seg) {

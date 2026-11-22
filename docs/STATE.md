@@ -132,6 +132,25 @@ stateDiagram-v2
 drawing (after writing it) and drops pending confirmations and error messages; entering Notes
 loads its lists, entering Terminal opens the shell when the clone is known.
 
+## The Commits section: `commits::Commits`
+
+```mermaid
+stateDiagram-v2
+    [*] --> History: set_tab(Commits), a branch picked
+    History --> Commit: a row
+    History --> Compare: Compare
+    Compare --> Commit: a row of the result
+    Commit --> Commit: a parent (Back returns to the child)
+    Commit --> History: Back / Esc / ⌘[ (opened from the history)
+    Commit --> Compare: Back / Esc / ⌘[ (opened from the comparison)
+    Compare --> History: × / Esc / ⌘[
+```
+
+The history (`History`), the open commit (`Open`) and the comparison (`Compare`) each hold a
+`Load` and the epoch of the request they wait for; an answer with another epoch (another branch,
+commit or comparison, or a reload since) is dropped, as is one for another account (`load_gen`).
+Leaving the section closes the commit and the comparison; the history stays for next time.
+
 ## The Terminal tab: `terminal_page::Panel`
 
 ```mermaid

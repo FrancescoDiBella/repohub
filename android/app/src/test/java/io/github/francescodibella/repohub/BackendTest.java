@@ -79,6 +79,23 @@ public class BackendTest {
         assertTrue(GitHubPaths.allowed("GET", "/repos/o/r/commits/0123abcdef0123abcdef0123abcdef0123abcdef/check-runs"));
         assertFalse(GitHubPaths.allowed("GET", "/repos/o/r/commits/main/check-runs"));
         assertFalse(GitHubPaths.allowed("POST", "/repos/o/r/commits/0123abc/check-runs"));
+        // One commit by its id, and two branches compared, as the server allows them.
+        assertTrue(GitHubPaths.allowed("GET", "/repos/o/r/commits/0123abc"));
+        assertTrue(GitHubPaths.allowed("GET", "/repos/o/r/commits/0123abcdef0123abcdef0123abcdef0123abcdef"));
+        assertTrue(GitHubPaths.allowed("GET", "/repos/o/r/compare/main...feature"));
+        assertTrue(GitHubPaths.allowed("GET", "/repos/o/r/compare/main...feature/login?per_page=100"));
+        assertTrue(GitHubPaths.allowed("GET", "/repos/o/r/compare/release/1.2...fix/x-y_z"));
+        for (String p : new String[] {"/repos/o/r/commits/0123ab", "/repos/o/r/commits/main", "/repos/o/r/commits/0123abc/comments",
+            "/repos/o/r/commits/0123abc/pulls", "/repos/o/r/compare", "/repos/o/r/compare/main", "/repos/o/r/compare/main..feature",
+            "/repos/o/r/compare/main....feature", "/repos/o/r/compare/...feature", "/repos/o/r/compare/main...",
+            "/repos/o/r/compare/-main...feature", "/repos/o/r/compare/main...a..b", "/repos/o/r/compare/main...fea ture",
+            "/repos/o/r/compare/main...HEAD~1", "/repos/o/r/compare/main...x:y"}) {
+            assertFalse(p, GitHubPaths.allowed("GET", p));
+        }
+        assertFalse(GitHubPaths.allowed("POST", "/repos/o/r/compare/main...feature"));
+        assertFalse(GitHubPaths.allowed("POST", "/repos/o/r/commits/0123abc"));
+        assertNull(GitHubPaths.decode("/repos/o/r/compare/main%2e%2e%2efeature"));
+        assertNull(GitHubPaths.decode("/repos/o/r/compare/main...feature%2fx"));
         assertTrue(GitHubPaths.allowed("PATCH", "/notifications/threads/12"));
         assertFalse(GitHubPaths.allowed("PATCH", "/notifications/threads/abc"));
         assertFalse(GitHubPaths.allowed("PUT", "/notifications"));
