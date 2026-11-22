@@ -10,6 +10,13 @@ The sections are **Added**, **Changed** and **Fixed**.
 ## Unreleased
 
 ### Added
+- **Releases** on a repository's page: its releases with their notes, files and download counts,
+  20 at a time with **Load more**, marked **Latest**, **Pre-release** or **Draft**, and the tags
+  that have no release. **New release** offers the next versions as the tag, picks the branch a
+  new tag is made from, and fills the notes with **Generate notes**; save it as a draft, or
+  publish it after a question. Drafts have **Edit** and **Publish**. The repository's header
+  shows the latest release's tag, and the palette has "Releases of …" and "New release in …".
+  RepoHub doesn't delete releases or tags or upload files.
 - **Commits** on a repository's page: the history of the branch you picked, grouped by day,
   30 at a time with **Load more**, a filter by message, author or commit id, and Copy id and
   Open on GitHub on each commit. Click one to read its whole message, who wrote and committed
