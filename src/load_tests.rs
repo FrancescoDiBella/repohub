@@ -552,6 +552,15 @@ fn the_first_part_of_a_load_shows_with_the_other_lists_loading() {
     rt.update(|s, _| s.go(crate::Page::Overview));
     rt.frame(0.1);
     assert!(rt.find("skeleton-pulls").is_some() && rt.find("skeleton-recent").is_none(), "repositories shown, pull requests loading");
+    // A repository's Issues, Pull requests and Actions sections too.
+    for tab in [crate::state::RepoTab::Issues, crate::state::RepoTab::Pulls, crate::state::RepoTab::Actions] {
+        rt.update(|s, _| {
+            s.open(0);
+            s.set_tab(0, tab);
+        });
+        rt.frame(0.15);
+        assert!(rt.find("repo-list-loading").is_some(), "{tab:?}: loading, not \"Nothing to show here\"");
+    }
     rt.update(|s, _| s.apply(epoch, Ok(full)));
     rt.frame(0.2);
     assert!(!rt.state.lists_loading() && rt.find("skeleton-pulls").is_none());

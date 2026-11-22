@@ -410,20 +410,22 @@ pub fn repo_detail(s: &App, k: &Kit, i: usize, plugin: Option<El>) -> El {
         RepoTab::Code => code_tab(s, k, i, r),
         RepoTab::Commits => crate::commits_page::commits_tab(s, k, i),
         RepoTab::Changes => crate::changes_page::changes_tab(s, k, i),
-        RepoTab::Issues => list_of(k, "Open issues", Some(actions::open_form_button(k, i, Compose::Issue)),
+        RepoTab::Issues => list_of(s, k, "Open issues", Some(actions::open_form_button(k, i, Compose::Issue)),
             s.data.issues.iter().filter(|x| in_repo(&x.repo)).map(|x| actions::issue_line(s, k, x)).collect()),
         RepoTab::Pulls => col().w_full().gap(16.0)
             .children(crate::changes_page::pull_panel_for(s, k, Some(&r.full_name)))
-            .child(list_of(k, "Pull requests", Some(actions::open_form_button(k, i, Compose::Pull)),
+            .child(list_of(s, k, "Pull requests", Some(actions::open_form_button(k, i, Compose::Pull)),
                 s.data.pulls.iter().filter(|x| in_repo(&x.repo)).map(|x| actions::pull_line(s, k, x, s.compact)).collect())),
-        RepoTab::Actions => list_of(k, "Workflow runs", None, s.data.runs.iter().filter(|x| in_repo(&x.repo)).map(|x| crate::runs_page::run_line(s, k, x, s.compact)).collect()),
+        RepoTab::Actions => list_of(s, k, "Workflow runs", None, s.data.runs.iter().filter(|x| in_repo(&x.repo)).map(|x| crate::runs_page::run_line(s, k, x, s.compact)).collect()),
         RepoTab::Releases => crate::releases_page::releases_tab(s, k, i),
         RepoTab::Notes => crate::notes_page::notes_tab(s, k, i),
         RepoTab::Claude => crate::claude_page::claude_tab(s, k, i),
         RepoTab::Terminal => crate::terminal_page::terminal_tab(s, k, i, k.c.page.r + k.c.page.g + k.c.page.b < 1.5),
         RepoTab::Settings => crate::lists::repo_settings(s, k, r),
     } };
-    col().w_full().gap(16.0).child(back).child(header).child(tabs).child(actions::form_panel(s, k, i)).child(body)
+    // The form, only when one is open for this repository (an empty element would add a gap).
+    let form = s.form.as_ref().is_some_and(|f| f.repo == r.full_name).then(|| actions::form_panel(s, k, i));
+    col().w_full().gap(16.0).child(back).child(header).child(tabs).children(form).child(body)
 }
 
 /// Scrolls the section bar sideways so the section on screen shows: after a section opens from
@@ -451,13 +453,17 @@ fn local_or_github(s: &App, k: &Kit, i: usize, r: &Repo, has_local: bool, github
     }
 }
 
-fn list_of(k: &Kit, title: &str, action: Option<El>, rows: Vec<El>) -> El {
+fn list_of(s: &App, k: &Kit, title: &str, action: Option<El>, rows: Vec<El>) -> El {
     let empty = rows.is_empty();
     let mut p = panel(k).child(panel_head(k, title, action));
     for r in rows {
         p = p.child(rule(k)).child(r);
     }
-    if empty {
+    // Only the repositories are in yet: the list is on its way, not empty.
+    if empty && s.lists_loading() {
+        p = p.child(rule(k)).child(col().w_full().padding(28.0).items_center().role("status").key("repo-list-loading")
+            .child(text("Loading…").font(k.ty.ui).color(k.c.text_muted)));
+    } else if empty {
         p = p.child(rule(k)).child(col().w_full().padding(28.0).items_center()
             .child(text("Nothing to show here").font(k.ty.ui).color(k.c.text_muted)));
     }
@@ -631,7 +637,7 @@ fn code_tab(s: &App, k: &Kit, i: usize, r: &Repo) -> El {
                     .child(actions::open_form_button(k, i, Compose::Branch))
                     .child(actions::open_form_button(k, i, Compose::Pull)))
                 .child(clone))
-            .child(actions::branch_panel(s, k, i, BranchSlot::View, &at))
+            .children((s.picker == Some(BranchSlot::View)).then(|| actions::branch_panel(s, k, i, BranchSlot::View, &at)))
             .children(local_or_github(s, k, i, r, has_local, files, readme_panel)))
         .child(col().grow(1.0).min_w(240.0).child(about))
 }
