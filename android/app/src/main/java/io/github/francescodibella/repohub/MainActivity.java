@@ -271,19 +271,19 @@ public class MainActivity extends Activity {
     /** What the page can call. It never hands out the token. */
     private final class Bridge {
         @JavascriptInterface
-        public void request(final int id, final String method, final String url, final String accept, final String body) {
+        public void request(final int id, final String method, final String url, final String accept, final String body, final String ifNoneMatch) {
             if (!ownPage) {
                 return;
             }
             pool.execute(() -> {
                 Backend.Reply r;
                 try {
-                    r = backend.handle(method, url, accept, body);
+                    r = backend.handle(method, url, accept, body, ifNoneMatch == null || ifNoneMatch.isEmpty() ? null : ifNoneMatch);
                 } catch (Throwable t) {
                     r = Backend.Reply.text(500, String.valueOf(t.getMessage()));
                 }
                 JSONArray a = new JSONArray();
-                a.put(r.status).put(r.body).put(r.remaining).put(r.reset).put(r.retryAfter).put(r.link);
+                a.put(r.status).put(r.body).put(r.remaining).put(r.reset).put(r.retryAfter).put(r.link).put(r.etag);
                 final String js = "globalThis.__repohubNative(" + id + "," + a + ")";
                 runOnUiThread(() -> {
                     if (ownPage) {

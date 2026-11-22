@@ -12,7 +12,7 @@ final class GitHubHttp implements Backend.Http {
     private static final int MAX_BYTES = 32 << 20;
 
     @Override
-    public Backend.Reply send(String method, String url, String accept, String token, String body) throws Exception {
+    public Backend.Reply send(String method, String url, String accept, String token, String body, String ifNoneMatch) throws Exception {
         String currentUrl = url;
         String currentToken = token;
         for (int hop = 0; ; hop++) {
@@ -25,7 +25,14 @@ final class GitHubHttp implements Backend.Http {
                 c.setRequestProperty("Accept", hop == 0 ? accept : "*/*");
                 if (hop == 0) {
                     c.setRequestProperty("X-GitHub-Api-Version", "2022-11-28");
+                    // A conditional read: GitHub answers 304 (not counted against the rate
+                    // limit) when the app's copy is still current.
+                    if (ifNoneMatch != null) {
+                        c.setRequestProperty("If-None-Match", ifNoneMatch);
+                    }
                 }
+                // Not the phone's own HTTP cache: a 304 must reach the app, which keeps the answer.
+                c.setUseCaches(false);
                 c.setRequestProperty("User-Agent", "RepoHub-Android");
                 if (currentToken != null) {
                     c.setRequestProperty("Authorization", "Bearer " + currentToken);
@@ -67,6 +74,7 @@ final class GitHubHttp implements Backend.Http {
                 r.reset = header(c, "x-ratelimit-reset");
                 r.retryAfter = header(c, "retry-after");
                 r.link = header(c, "link");
+                r.etag = header(c, "etag");
                 return r;
             } finally {
                 c.disconnect();

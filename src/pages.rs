@@ -38,6 +38,8 @@ pub fn open_button(k: &Kit, label: &str, url: &str, key: &str) -> El {
 pub fn overview(s: &App, k: &Kit) -> El {
     let d = &s.data;
     let empty_loading = d.is_empty() && s.status.is_busy();
+    // The profile and the repositories are in; the other lists are on their way.
+    let lists_loading = empty_loading || s.lists_loading();
     let empty_failed = if d.is_empty() {
         if let Status::Failed(e) = &s.status { Some(e.as_str()) } else { None }
     } else {
@@ -72,6 +74,12 @@ pub fn overview(s: &App, k: &Kit) -> El {
             .child(metric(&icons::STAR, "—".into(), "Stars received", k.c.warning.icon, Page::Repos))
             .child(metric(&icons::PULL, "—".into(), "Open pull requests", k.c.success.icon, Page::Pulls))
             .child(metric(&icons::ISSUE, "—".into(), "Open issues", k.c.danger.icon, Page::Issues))
+    } else if lists_loading {
+        row().w_full().gap(12.0).flex_wrap()
+            .child(metric(&icons::REPO, crate::model::capped_if(d.repos.len(), d.repos_capped), "Repositories", k.c.info.icon, Page::Repos))
+            .child(metric(&icons::STAR, s.starred_count().to_string(), "Stars received", k.c.warning.icon, Page::Repos))
+            .child(metric_loading(&icons::PULL, "Open pull requests", k.c.success.icon, Page::Pulls))
+            .child(metric_loading(&icons::ISSUE, "Open issues", k.c.danger.icon, Page::Issues))
     } else {
         row().w_full().gap(12.0).flex_wrap()
             .child(metric(&icons::REPO, crate::model::capped_if(d.repos.len(), d.repos_capped), "Repositories", k.c.info.icon, Page::Repos))
@@ -82,6 +90,7 @@ pub fn overview(s: &App, k: &Kit) -> El {
     let first = d.profile.name.split_whitespace().next().unwrap_or("").to_owned();
     let hello = if first.is_empty() { "Welcome back".to_owned() } else { format!("Welcome back, {first}") };
     let head = heading(k, &hello, &match s.freshness() {
+        Some(f) if f.ends_with('…') => format!("Here's what's happening in your repositories. {f}"),
         Some(f) => format!("Here's what's happening in your repositories. {f}."),
         None => "Here's what's happening in your repositories today.".into(),
     }, Some(new_repo_button(k)));
@@ -92,7 +101,7 @@ pub fn overview(s: &App, k: &Kit) -> El {
             .child(ui::error_panel(k, err, "retry-overview", |s: &mut App| s.refresh()));
     }
     let commits: u32 = d.activity.iter().sum();
-    let activity = if empty_loading {
+    let activity = if lists_loading {
         panel(k).key("skeleton-activity").role("status").label("Loading activity…")
             .child(panel_head(k, "Activity · last 26 weeks", Some(ui::skeleton_faint(k, 72.0, 12.0))))
             .child(col().w_full().px(16.0).pb(16.0).child(ui::sparkline_skeleton(k, 72.0)))
@@ -115,7 +124,7 @@ pub fn overview(s: &App, k: &Kit) -> El {
     };
     let review_head = panel(k).child(panel_head(k, "Open pull requests", Some(see_all(k, "All pull requests", Page::Pulls))));
     let open_list: Vec<_> = d.pulls.iter().filter(|p| matches!(p.state, PullState::Open | PullState::Draft)).take(4).collect();
-    let review = if empty_loading {
+    let review = if lists_loading {
         ui::skeleton_rows_in_panel(k, review_head.key("skeleton-pulls").role("status").label("Loading open pull requests…"), 4, true)
     } else if open_list.is_empty() {
         review_head.child(rule(k)).child(col().w_full().padding(24.0).items_center()
@@ -127,7 +136,7 @@ pub fn overview(s: &App, k: &Kit) -> El {
         )
     };
     // What waits for your review, above the open pull requests, when anything does.
-    let waiting = (!empty_loading).then(|| crate::triage_page::waiting_panel(s, k)).flatten();
+    let waiting = (!lists_loading).then(|| crate::triage_page::waiting_panel(s, k)).flatten();
     col().w_full().gap(16.0)
         .child(head)
         .child(metrics)

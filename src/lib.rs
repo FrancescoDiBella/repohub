@@ -16,6 +16,8 @@ use rune_kit::{ControlSize, IconButton, IconButtonVariant, Kit, PaletteSeed};
 
 mod actions;
 mod board;
+mod cache;
+mod cache_page;
 mod claude;
 mod claude_page;
 #[cfg(not(target_arch = "wasm32"))]
@@ -30,6 +32,7 @@ mod icons;
 mod inbox;
 mod lists;
 mod diffs;
+mod etag;
 mod filters;
 mod local;
 mod local_page;
@@ -243,6 +246,9 @@ pub struct App {
     pub(crate) open_run: Option<runs_page::OpenRun>,
     /// Counts workflow run detail loads (see [`runs_page::OpenRun::epoch`]).
     run_epoch: u64,
+    /// Where the lists on screen come from (the saved copy, part of a load) and what's kept to
+    /// show at once when opened again (see `cache`).
+    fresh: cache::Fresh,
     /// Rows with a write running (`owner/repo#12`), so their buttons wait.
     busy: std::collections::HashSet<String>,
     /// The title (and draft flag) of the item a form is creating, for showing it once created.
@@ -573,7 +579,19 @@ impl App {
         self.confirm_merge = None;
         self.open_run = None;
         self.thread_epoch = self.thread_epoch.wrapping_add(1);
-        self.thread = Some(thread::Open { repo: repo.to_owned(), number, pull, load: Load::Loading, reply: TextEdit::new(""), sending: false, epoch: self.thread_epoch, edit: Default::default() });
+        // The one being left is kept as it is now (with what was written in it).
+        if let Some(t) = self.thread.take()
+            && let Load::Ready(read) = t.load
+            && !self.data.sample
+        {
+            self.remember_thread(&t.repo, t.number, read);
+        }
+        // One read before in this session shows at once, and is read again behind it.
+        let load = match self.remembered_thread(repo, number) {
+            Some(t) if !self.data.sample => Load::Ready(t),
+            _ => Load::Loading,
+        };
+        self.thread = Some(thread::Open { repo: repo.to_owned(), number, pull, load, reply: TextEdit::new(""), sending: false, epoch: self.thread_epoch, edit: Default::default() });
         self.load_thread();
     }
 
@@ -601,7 +619,10 @@ impl App {
             return;
         }
         let Some(h) = self.handle.clone() else {
-            t.load = Load::Failed("The app isn't ready to load this yet: try again in a moment.".into());
+            // One read before stays on screen.
+            if !matches!(t.load, Load::Ready(_)) {
+                t.load = Load::Failed("The app isn't ready to load this yet: try again in a moment.".into());
+            }
             return;
         };
         if !matches!(t.load, Load::Ready(_)) {
@@ -614,6 +635,9 @@ impl App {
             // Another account, another conversation, or this one closed meanwhile: not ours.
             if s.load_gen != account {
                 return;
+            }
+            if let Ok(read) = &r {
+                s.remember_thread(&repo, number, read.clone());
             }
             let Some(t) = s.thread.as_mut().filter(|t| t.epoch == epoch) else { return };
             t.load = match r {
@@ -856,10 +880,10 @@ impl App {
         w.max(m).map(|d| d.max(0))
     }
 
-    /// "Updated 3 minutes ago", once GitHub's data has loaded.
+    /// "Updated 3 minutes ago", once GitHub's data has loaded ("Updating…" while it loads
+    /// again, "Data from 2 hours ago" for the saved copy).
     fn freshness(&self) -> Option<String> {
-        let age = self.since(self.loaded_at, self.loaded_clock)?;
-        Some(format!("Updated {}", model::ago(self.now - age, self.now)))
+        self.freshness_words(self.since(self.loaded_at, self.loaded_clock))
     }
 
     /// Seconds until the next automatic refresh (negative: overdue), if they're on. The
@@ -1143,6 +1167,8 @@ impl App {
     fn reset_account_state(&mut self) {
         self.load_gen = self.load_gen.wrapping_add(1);
         self.board_load_gen = self.board_load_gen.wrapping_add(1);
+        // The saved copy and the tagged answers were the other account's.
+        self.forget_copy();
         // Drawings are files on this computer (or the server's notes folder), not account data:
         // writes in flight and queued ones still finish, so no edit is lost on an account switch.
         self.leave_tab();
@@ -1508,10 +1534,23 @@ impl App {
         self.last_load = Some(net::now());
         self.load_clock = Some(self.clock);
         self.set_status(Status::Loading);
-        if let Some(h) = self.handle.clone() {
-            let cfg = self.cfg.clone();
-            let epoch = self.load_gen;
-            net::spawn(h, move || async move { github::load_all(&cfg).await }, move |s: &mut App, r| s.apply(epoch, r));
+        // Before the window exists, the first load reports to a mailbox (see `init`).
+        let to = match (self.handle.clone(), &self.fresh.early) {
+            (Some(h), _) => net::To::Now(h),
+            (None, Some(m)) => net::To::Later(m.clone()),
+            (None, None) => return,
+        };
+        let cfg = self.cfg.clone();
+        let epoch = self.load_gen;
+        // The profile and the repositories show as soon as they're in (on a first start).
+        let early = to.clone();
+        let work = move || async move { github::load_all_with(&cfg, move |d| early.post(move |s: &mut App| s.apply_early(epoch, d))).await };
+        let done = move |s: &mut App, r| s.apply(epoch, r);
+        #[cfg(not(target_arch = "wasm32"))]
+        net::spawn_to(to, work, done);
+        #[cfg(target_arch = "wasm32")]
+        if let net::To::Now(h) = to {
+            net::spawn(h, work, done);
         }
     }
 
@@ -1522,17 +1561,12 @@ impl App {
         match result {
             Ok(d) => {
                 self.retry_after = d.retry_after;
-                // Details of repositories nobody pushed to since stay: no new requests for them.
-                let same = |full: &str| {
-                    let pushed = |data: &Data| data.repos.iter().find(|r| r.full_name == full).map(|r| r.pushed);
-                    pushed(&self.data).is_some_and(|p| Some(p) == pushed(&d))
-                };
-                let kept: HashMap<_, _> = std::mem::take(&mut self.details).into_iter()
-                    .filter(|((full, _), v)| match v {
-                        Load::Ready(detail) => detail.error.is_none() && detail.readme_error.is_none() && same(full),
-                        _ => false,
-                    }).collect();
-                self.branches.clear();
+                // Details of repositories nobody pushed to since stay as they are; those of
+                // repositories pushed to stay on screen and are read again when opened. Branch
+                // lists stay too: opening a repository reads its list again behind it.
+                let kept = cache::keep_details(&self.data, &d, std::mem::take(&mut self.details), &mut self.fresh.stale);
+                self.fresh.from_copy = false;
+                self.fresh.partial = false;
                 self.data = d;
                 self.data_gen = self.data_gen.wrapping_add(1);
                 self.refresh_clone_cache();
@@ -1557,6 +1591,7 @@ impl App {
                             self.sync_tray();
                         }
                         self.load_detail(i);
+                        self.load_branches(i, true);
                         if self.tab == RepoTab::Commits {
                             self.load_history(i, true);
                         }
@@ -1579,6 +1614,9 @@ impl App {
                 // With the lists, what's waiting for you.
                 self.load_inbox();
                 self.sync_after_load();
+                cache::trace_time("loaded");
+                // For the next start.
+                self.save_copy();
             }
             Err(e) => {
                 if let Some(ra) = e.retry_after {
@@ -1595,7 +1633,9 @@ impl App {
     }
 
     fn apply_detail(&mut self, epoch: u64, key: (String, String), d: Detail) {
-        if epoch == self.load_gen {
+        // Read again behind a page on screen: a failure keeps the page.
+        let shown = matches!(self.details.get(&key), Some(Load::Ready(_)));
+        if epoch == self.load_gen && !(shown && (d.error.is_some() || d.readme_error.is_some())) {
             let load = if let Some(e) = &d.error
                 && d.files.is_empty()
                 && d.readme.is_none()
@@ -1623,14 +1663,24 @@ impl App {
         }
         self.load_branches(i, false);
         self.load_local(i, false);
+        let mut behind = false;
         if let Some(load) = self.details.get(&key) {
             match load {
                 Load::Loading => return,
-                Load::Ready(d) if d.error.is_none() && d.readme_error.is_none() => return,
+                // Read before a refresh, or from the saved copy: it stays on screen while it's read
+                // again (cheaply: GitHub answers "not modified" when nothing changed).
+                Load::Ready(d) if d.error.is_none() && d.readme_error.is_none() => {
+                    if !self.fresh.stale.remove(&key) {
+                        return;
+                    }
+                    behind = true;
+                }
                 _ => {}
             }
         }
-        self.details.insert(key.clone(), Load::Loading);
+        if !behind {
+            self.details.insert(key.clone(), Load::Loading);
+        }
         if let Some(h) = self.handle.clone() {
             let cfg = self.cfg.clone();
             let at = key.1.clone();
@@ -3112,6 +3162,7 @@ impl App {
 }
 
 fn init() -> App {
+    cache::trace_time("");
     let args = rune::extra_args();
     let arg = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     let cfg = Arc::new(Config::load());
@@ -3199,6 +3250,7 @@ fn init() -> App {
         saved_filters: None,
         open_run: None,
         run_epoch: 0,
+        fresh: cache::Fresh::default(),
         busy: std::collections::HashSet::new(),
         form_title: None,
         pull_meta: None,
@@ -3259,7 +3311,17 @@ fn init() -> App {
     };
     // `REPOHUB_BLOCKING=1` loads synchronously before the first frame (headless snapshots).
     #[cfg(not(target_arch = "wasm32"))]
-    if live && std::env::var("REPOHUB_BLOCKING").is_ok_and(|v| v == "1") {
+    let blocking = live && std::env::var("REPOHUB_BLOCKING").is_ok_and(|v| v == "1");
+    // Otherwise the lists of last time show at once, and the first load starts now, before
+    // the window opens (what it finds waits for the window in a mailbox).
+    #[cfg(not(target_arch = "wasm32"))]
+    if live && !blocking {
+        s.show_saved_copy();
+        s.fresh.early = Some(net::Mailbox::default());
+        s.refresh();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if blocking {
         s.set_status(Status::Loading);
         let r = pollster::block_on(github::load_all(&s.cfg));
         let epoch = s.load_gen;
@@ -3378,7 +3440,9 @@ fn init() -> App {
     // The sample data has no places of its own to go back to.
     if arg("page").is_none() && !s.data.sample {
         s.pending_place = prefs::get("place").as_ref().and_then(state::Place::from_json);
-        if !s.data.repos.is_empty() {
+        // Over the saved copy it's restored once the window is there (`start`): what the page
+        // reads needs the app's handle.
+        if !s.data.repos.is_empty() && !s.fresh.from_copy {
             s.restore_place();
         }
     }
@@ -3866,8 +3930,11 @@ fn list_shows_failed(s: &App) -> bool {
 /// A banner above the page for loading, errors and sample data.
 fn banner(s: &App, k: &Kit) -> Option<El> {
     let (msg, tint, action) = match &s.status {
+        // Over lists already on screen a load says "Updating…" where "Updated … ago" was.
+        Status::Starting | Status::Loading if !s.data.is_empty() => return None,
         Status::Starting | Status::Loading => ("Loading data from GitHub…".to_owned(), k.c.info.icon, false),
         Status::Failed(_) if list_shows_failed(s) => return None,
+        Status::Failed(e) if s.fresh.from_copy => (format!("{e}{} {}", if e.ends_with(['.', '!', '?']) { "" } else { "." }, cache_page::shown_copy(s)), k.c.danger.icon, true),
         Status::Failed(e) => (e.clone(), k.c.danger.icon, true),
         Status::Ready if !s.data.warnings.is_empty() => (s.data.warnings.join(" · "), k.c.warning.icon, true),
         Status::Sample if !s.cfg.demo && !s.cfg.account_locked => ("This is sample data. Connect your GitHub account to see your repositories.".to_owned(), k.c.warning.icon, false),
@@ -4071,6 +4138,10 @@ fn starts_compact() -> bool {
 /// asks Rune to wake for the next one, also while the window is closed. No timer thread.
 fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
     const EVERY: f64 = 30.0;
+    static FIRST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+    if FIRST.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        cache::trace_time("first frame");
+    }
     #[cfg(not(target_arch = "wasm32"))]
     let plugins_ran = {
         if s.plugins.list.iter().any(|p| p.running()) {
@@ -4248,6 +4319,14 @@ pub fn start() {
     let h2 = handle.clone();
     handle.update(move |s: &mut App, _| {
         s.handle = Some(h2.clone());
+        // What the first load found before the window opened.
+        if let Some(m) = s.fresh.early.take() {
+            m.attach(h2.clone());
+        }
+        // The place of last time, over the saved copy (before the first frame).
+        if !s.data.repos.is_empty() {
+            s.restore_place();
+        }
         s.start_tray();
         #[cfg(not(target_arch = "wasm32"))]
         s.plugins.start(&h2);
@@ -4273,6 +4352,7 @@ pub fn start() {
                 s.cfg = Arc::new(cfg);
             }
             if live {
+                s.show_saved_copy();
                 s.refresh();
             } else {
                 s.data = Data::sample();
@@ -4285,6 +4365,9 @@ pub fn start() {
     });
     app.run();
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod load_tests;
 
 #[cfg(test)]
 mod pin_tests {
@@ -4332,8 +4415,10 @@ mod cache_tests {
         next.repos[1].pushed += 60;
         let epoch = s.load_gen;
         s.apply(epoch, Ok(next));
-        assert!(s.details.contains_key(&(a, "main".into())), "not pushed since: kept");
-        assert!(!s.details.contains_key(&(b, "main".into())), "pushed since: loaded again");
+        assert!(s.details.contains_key(&(a.clone(), "main".into())), "not pushed since: kept");
+        assert!(!s.fresh.stale.contains(&(a, "main".into())), "and not read again");
+        // Pushed since: it stays on screen and is read again when it's opened (#126).
+        assert!(s.details.contains_key(&(b.clone(), "main".into())) && s.fresh.stale.contains(&(b, "main".into())), "pushed since: read again when opened");
         assert!(!s.details.contains_key(&("gone/repo".into(), "main".into())));
     }
 }
@@ -6862,6 +6947,7 @@ mod fix58_tests {
             reset: None,
             retry_after: None,
             link: None,
+            etag: None,
         };
         let msg_403 = gh.explain(&resp_403);
         assert!(msg_403.contains("rate limit"), "must explain rate limit: {msg_403}");
@@ -6875,6 +6961,7 @@ mod fix58_tests {
             reset: None,
             retry_after: Some(40),
             link: None,
+            etag: None,
         };
         let msg_429 = gh.explain(&resp_429);
         assert!(msg_429.contains("40 s") || msg_429.contains("40"), "must mention retry duration: {msg_429}");
@@ -6889,6 +6976,7 @@ mod fix58_tests {
             reset: None,
             retry_after: None,
             link: None,
+            etag: None,
         };
         let msg_generic_403 = gh.explain(&resp_generic_403);
         assert!(msg_generic_403.contains("The token needs write access"), "generic 403 must explain write access: {msg_generic_403}");
@@ -6901,6 +6989,7 @@ mod fix58_tests {
             reset: Some(crate::net::now() + 600),
             retry_after: None,
             link: None,
+            etag: None,
         };
         let msg_primary_403 = gh.explain(&resp_primary_403);
         assert!(msg_primary_403.contains("API rate limit reached."), "must start with API rate limit reached.: {msg_primary_403}");
@@ -7039,12 +7128,13 @@ mod fix58_tests {
         s.data.sample = false;
         let repo_full = s.data.repos[0].full_name.clone();
 
-        // 1. Branches are cleared on refresh
+        // 1. A refresh keeps the branch lists on screen (#126): opening a repository reads its
+        // list again behind it (step 3), as does a refresh while it's open.
         s.branches.insert(repo_full.clone(), Load::Ready(vec!["main".into(), "feature".into()]));
         assert!(!s.branches.is_empty());
         let epoch = s.load_gen;
         s.apply(epoch, Ok(s.data.clone()));
-        assert!(s.branches.is_empty(), "branches must be cleared on apply(refresh)");
+        assert!(matches!(s.branches.get(&repo_full), Some(Load::Ready(_))), "kept through a refresh, no skeleton");
 
         // 2. Retrying Load::Failed in load_branches
         s.branches.insert(repo_full.clone(), Load::Failed("network timeout".into()));

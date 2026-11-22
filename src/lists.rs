@@ -118,6 +118,10 @@ pub fn run_row(k: &Kit, r: &Run, now: i64, compact: bool) -> El {
 
 fn listing(s: &App, k: &Kit, rows: Vec<El>, empty: &str, retry_key: &str) -> El {
     if rows.is_empty() {
+        // Only the repositories are in yet: this list is still on its way.
+        if s.lists_loading() {
+            return ui::skeleton_list(k, 5, "skeleton-list");
+        }
         if s.data.is_empty() {
             if s.status.is_busy() {
                 return ui::skeleton_list(k, 5, "skeleton-list");
@@ -394,7 +398,7 @@ pub fn settings(s: &App, k: &Kit) -> El {
         Section::Appearance => ("Light, dark or the system's, and the themes.", vec![appearance]),
         Section::Assistants => ("Claude and the other coding assistants the Terminal starts.", vec![assistants]),
         Section::Plugins => ("Sections and pages others wrote for RepoHub.", vec![plugins]),
-        Section::About => ("This version of RepoHub, its updates and the keyboard shortcuts.", vec![version, keys]),
+        Section::About => ("This version of RepoHub, its updates, the data it saves and the keyboard shortcuts.", vec![version, crate::cache_page::panel_of(s, k), keys]),
     };
     col().w_full().gap(16.0).max_w(760.0)
         .child(heading(k, "Settings", subtitle, None))

@@ -24,12 +24,12 @@ final class Backend {
         void save(String user, String token) throws Exception;
     }
 
-    /** Sends one request to GitHub. */
+    /** Sends one request to GitHub; `ifNoneMatch` (null: none) makes it conditional. */
     interface Http {
-        Reply send(String method, String url, String accept, String token, String body) throws Exception;
+        Reply send(String method, String url, String accept, String token, String body, String ifNoneMatch) throws Exception;
     }
 
-    /** What the page gets back: the six values `gh_fetch` returns (src/net.rs). */
+    /** What the page gets back: the seven values `gh_fetch` returns (src/net.rs). */
     static final class Reply {
         final int status;
         final String body;
@@ -37,6 +37,8 @@ final class Backend {
         String reset = "";
         String retryAfter = "";
         String link = "";
+        /** GitHub's ETag, which the app sends back as If-None-Match to get a 304. */
+        String etag = "";
 
         Reply(int status, String body) {
             this.status = status;
@@ -68,6 +70,35 @@ final class Backend {
 
     private static String blankToNull(String s) {
         return s == null || s.trim().isEmpty() ? null : s.trim();
+    }
+
+    /**
+     * The If-None-Match sent on to GitHub, as repohub-server does: on a GET, entity tags only
+     * ("..." or W/"...", comma-separated, printable ASCII, at most 512 characters); else none.
+     */
+    static String conditionalTag(String method, String value) {
+        if (!"GET".equals(method) || value == null) {
+            return null;
+        }
+        String v = value.trim();
+        if (v.isEmpty() || v.length() > 512) {
+            return null;
+        }
+        for (int i = 0; i < v.length(); i++) {
+            char c = v.charAt(i);
+            if (c < 0x20 || c > 0x7e) {
+                return null;
+            }
+        }
+        for (String part : v.split(",", -1)) {
+            String t = part.trim();
+            String inner = t.startsWith("W/") ? t.substring(2) : t;
+            if (inner.length() < 2 || inner.charAt(0) != '"' || inner.charAt(inner.length() - 1) != '"'
+                || inner.substring(1, inner.length() - 1).indexOf('"') >= 0) {
+                return null;
+            }
+        }
+        return v;
     }
 
     /** `config.json`: what the page may know. Whether a token is saved, never the token. */
@@ -116,7 +147,7 @@ final class Backend {
         }
     }
 
-    private Reply github(String method, String pathAndQuery, String accept, String body) {
+    private Reply github(String method, String pathAndQuery, String accept, String body, String ifNoneMatch) {
         for (int i = 0; i < pathAndQuery.length(); i++) {
             if (Character.isISOControl(pathAndQuery.charAt(i))) {
                 return Reply.text(403, "Invalid characters in URL");
@@ -139,7 +170,7 @@ final class Backend {
         }
         try {
             String type = accept == null || accept.isEmpty() ? "application/vnd.github+json" : accept;
-            return http.send(method, API + pathAndQuery, type, blankToNull(account.token()), body);
+            return http.send(method, API + pathAndQuery, type, blankToNull(account.token()), body, conditionalTag(method, ifNoneMatch));
         } catch (Exception e) {
             return Reply.text(502, "Can't reach GitHub: " + e.getMessage());
         }
@@ -147,6 +178,11 @@ final class Backend {
 
     /** Answers one request of the page; `url` is relative to the page ("gh/user", "config.json"). */
     Reply handle(String method, String url, String accept, String body) {
+        return handle(method, url, accept, body, null);
+    }
+
+    /** {@link #handle(String, String, String, String)}, a GitHub read made conditional by `ifNoneMatch`. */
+    Reply handle(String method, String url, String accept, String body, String ifNoneMatch) {
         String u = url.startsWith("/") ? url.substring(1) : url;
         if (body == null) {
             body = "";
@@ -154,7 +190,7 @@ final class Backend {
         int q = u.indexOf('?');
         String path = q < 0 ? u : u.substring(0, q);
         if (u.startsWith("gh/")) {
-            return github(method, u.substring(2), accept, body);
+            return github(method, u.substring(2), accept, body, ifNoneMatch);
         }
         if (path.equals("api/notes") || path.equals("api/notes/file") || path.equals("api/notes/all") || path.equals("api/notes/index")) {
             return notes.handle(method, u, body);

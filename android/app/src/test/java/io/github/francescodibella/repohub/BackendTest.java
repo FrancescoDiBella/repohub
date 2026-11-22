@@ -36,10 +36,12 @@ public class BackendTest {
         final List<String> sent = new ArrayList<>();
 
         @Override
-        public Backend.Reply send(String method, String url, String accept, String token, String body) {
-            sent.add(method + " " + url + " token=" + token + " body=" + body);
-            Backend.Reply r = new Backend.Reply(200, "{\"ok\":true}");
+        public Backend.Reply send(String method, String url, String accept, String token, String body, String ifNoneMatch) {
+            sent.add(method + " " + url + " token=" + token + " body=" + body + (ifNoneMatch == null ? "" : " if-none-match=" + ifNoneMatch));
+            // Like GitHub: the same tag back means nothing changed.
+            Backend.Reply r = "W/\"v1\"".equals(ifNoneMatch) ? new Backend.Reply(304, "") : new Backend.Reply(200, "{\"ok\":true}");
             r.remaining = "4999";
+            r.etag = "W/\"v1\"";
             return r;
         }
     }
@@ -313,6 +315,34 @@ public class BackendTest {
         account.token = null;
         backend.handle("POST", "gh/repos/o/r/issues", "", "{\"title\":\"x\"}");
         assertEquals("POST https://api.github.com/repos/o/r/issues token=null body={\"title\":\"x\"}", http.sent.get(1));
+    }
+
+    @Test
+    public void conditionalReadsReachGitHubAndTheirTagsComeBack() {
+        account.token = "ghp_secret";
+        Backend.Reply first = backend.handle("GET", "gh/user/repos?per_page=100", "application/vnd.github+json", "", null);
+        assertEquals(200, first.status);
+        assertEquals("W/\"v1\"", first.etag);
+        Backend.Reply again = backend.handle("GET", "gh/user/repos?per_page=100", "application/vnd.github+json", "", "W/\"v1\"");
+        assertEquals(304, again.status);
+        assertEquals("", again.body);
+        assertEquals("GET https://api.github.com/user/repos?per_page=100 token=ghp_secret body= if-none-match=W/\"v1\"", http.sent.get(1));
+        // Only entity tags on reads go on.
+        backend.handle("GET", "gh/user", "", "", "*");
+        backend.handle("GET", "gh/user", "", "", "\"a\"\r\nX-Evil: 1");
+        backend.handle("PATCH", "gh/notifications/threads/12", "", "", "\"a\"");
+        for (int i = 2; i < http.sent.size(); i++) {
+            assertFalse(http.sent.get(i), http.sent.get(i).contains("if-none-match"));
+        }
+        assertEquals("W/\"a\", \"b\"", Backend.conditionalTag("GET", " W/\"a\", \"b\" "));
+        assertNull(Backend.conditionalTag("GET", "abc"));
+        assertNull(Backend.conditionalTag("GET", "\"" + "a".repeat(600) + "\""));
+        assertNull(Backend.conditionalTag("GET", "\"\u00e9\""));
+        assertNull(Backend.conditionalTag("POST", "\"a\""));
+        // Refused paths still don't reach GitHub, conditional or not.
+        int before = http.sent.size();
+        assertEquals(403, backend.handle("GET", "gh/user/emails", "", "", "\"a\"").status);
+        assertEquals(before, http.sent.size());
     }
 
     @Test

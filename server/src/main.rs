@@ -747,6 +747,19 @@ fn serve_static(cfg: &Cfg, req: Request) {
     }
 }
 
+/// The `If-None-Match` of a GET forwarded to GitHub: entity tags only (`"…"` or `W/"…"`,
+/// comma-separated, printable ASCII, at most 512 bytes); anything else isn't sent.
+fn conditional_tag(method: &str, value: Option<&str>) -> Option<String> {
+    let v = value?.trim();
+    let tag = |t: &str| {
+        let t = t.trim();
+        let inner = t.strip_prefix("W/").unwrap_or(t);
+        inner.len() >= 2 && inner.starts_with('"') && inner.ends_with('"') && !inner[1..inner.len() - 1].contains('"')
+    };
+    let ok = method == "GET" && !v.is_empty() && v.len() <= 512 && v.bytes().all(|b| (0x20..0x7f).contains(&b)) && v.split(',').all(tag);
+    ok.then(|| v.to_owned())
+}
+
 fn proxy(cfg: &Cfg, mut req: Request) {
     let full_path = req.url()["/gh".len()..].to_owned();
     if full_path.chars().any(|c| c.is_control() || c == '\0') {
@@ -779,6 +792,11 @@ fn proxy(cfg: &Cfg, mut req: Request) {
     if let Some(t) = &cfg.token {
         r = r.set("Authorization", &format!("Bearer {t}"));
     }
+    // A conditional read: GitHub answers 304 (not counted against the rate limit) when the
+    // app's copy is still current.
+    if let Some(tag) = conditional_tag(&method, header(&req, "If-None-Match").as_deref()) {
+        r = r.set("If-None-Match", &tag);
+    }
     // Writes carry a JSON body; a body-less PUT (starring) still needs a length.
     let result = if !body.is_empty() {
         r.set("Content-Type", "application/json").send_bytes(&body)
@@ -796,7 +814,7 @@ fn proxy(cfg: &Cfg, mut req: Request) {
     };
     let status = resp.status();
     let mut headers = vec![h("Cache-Control", "no-store")];
-    for name in ["Content-Type", "x-ratelimit-remaining", "x-ratelimit-reset", "x-ratelimit-limit", "retry-after", "link"] {
+    for name in ["Content-Type", "x-ratelimit-remaining", "x-ratelimit-reset", "x-ratelimit-limit", "retry-after", "link", "etag"] {
         if let Some(v) = resp.header(name) {
             headers.push(h(name, v));
         }
@@ -1738,5 +1756,84 @@ mod tests {
         server.unblock();
         mock_upstream.unblock();
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn conditional_tags_are_entity_tags_on_reads_only() {
+        assert_eq!(conditional_tag("GET", Some("\"abc\"")), Some("\"abc\"".into()));
+        assert_eq!(conditional_tag("GET", Some(" W/\"6f1c\" ")), Some("W/\"6f1c\"".into()));
+        assert_eq!(conditional_tag("GET", Some("W/\"a\", \"b\"")), Some("W/\"a\", \"b\"".into()));
+        for bad in ["*", "abc", "\"", "\"a\"b\"", "W/abc", "\"a\"\u{7}", "\"\u{e9}\"", ""] {
+            assert_eq!(conditional_tag("GET", Some(bad)), None, "{bad:?}");
+        }
+        assert_eq!(conditional_tag("GET", Some(&format!("\"{}\"", "a".repeat(600)))), None, "too long");
+        assert_eq!(conditional_tag("PATCH", Some("\"abc\"")), None, "reads only");
+        assert_eq!(conditional_tag("GET", None), None);
+    }
+
+    /// The app's `If-None-Match` reaches GitHub and GitHub's `ETag` and 304 come back, so an
+    /// unchanged list costs no rate limit through the proxy either.
+    #[test]
+    fn the_proxy_forwards_conditional_requests() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let upstream = std::sync::Arc::new(Server::http("127.0.0.1:0").unwrap());
+        let upstream_addr = format!("http://{}", upstream.server_addr());
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Option<String>>::new()));
+        let (up, seen_up) = (upstream.clone(), seen.clone());
+        std::thread::spawn(move || {
+            for req in up.incoming_requests() {
+                let inm = req.headers().iter().find(|h| h.field.as_str().as_str().eq_ignore_ascii_case("If-None-Match")).map(|h| h.value.as_str().to_owned());
+                seen_up.lock().unwrap().push(inm.clone());
+                let resp = if inm.as_deref() == Some("W/\"v1\"") {
+                    Response::from_data(Vec::new()).with_status_code(304)
+                } else {
+                    Response::from_string("{\"login\":\"octo\"}").with_status_code(200).with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
+                };
+                let _ = req.respond(resp.with_header(Header::from_bytes("ETag", "W/\"v1\"").unwrap()).with_header(Header::from_bytes("x-ratelimit-remaining", "4999").unwrap()));
+            }
+        });
+        let server = std::sync::Arc::new(Server::http("127.0.0.1:0").unwrap());
+        let addr = format!("{}", server.server_addr());
+        let temp_dir = std::env::temp_dir().join(format!("repohub-etag-{}", std::process::id()));
+        let cfg = std::sync::Arc::new(Cfg {
+            token: Some("gh_token_etag".into()),
+            api: upstream_addr,
+            web_dir: temp_dir.join("web"),
+            data_dir: temp_dir.join("data"),
+            allowed_hosts: vec!["127.0.0.1".into()],
+            public_json: "{}".into(),
+            agent: ureq::AgentBuilder::new().try_proxy_from_env(false).build(),
+            secret: None,
+            allow_writes: true,
+            notes_max_bytes: 100,
+        });
+        let (srv, c) = (server.clone(), cfg.clone());
+        std::thread::spawn(move || {
+            for req in srv.incoming_requests() {
+                handle(&c, req);
+            }
+        });
+        let client = ureq::AgentBuilder::new().try_proxy_from_env(false).build();
+        let origin = format!("http://{addr}");
+        let get = |inm: Option<&str>| {
+            let mut r = client.get(&format!("http://{addr}/gh/user")).set("Origin", &origin);
+            if let Some(v) = inm {
+                r = r.set("If-None-Match", v);
+            }
+            match r.call() {
+                Ok(resp) | Err(ureq::Error::Status(_, resp)) => (resp.status(), resp.header("etag").map(str::to_owned), resp.into_string().unwrap_or_default()),
+                Err(e) => panic!("{e}"),
+            }
+        };
+        let (status, etag, body) = get(None);
+        assert_eq!((status, etag.as_deref()), (200, Some("W/\"v1\"")), "the tag comes back");
+        assert!(body.contains("octo"));
+        let (status, etag, body) = get(Some("W/\"v1\""));
+        assert_eq!((status, etag.as_deref(), body.as_str()), (304, Some("W/\"v1\""), ""), "unchanged: 304, no body");
+        let (status, _, _) = get(Some("*"));
+        assert_eq!(status, 200, "a value that isn't a tag isn't sent");
+        assert_eq!(*seen.lock().unwrap(), vec![None, Some("W/\"v1\"".to_owned()), None]);
+        server.unblock();
+        upstream.unblock();
     }
 }
