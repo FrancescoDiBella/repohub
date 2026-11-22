@@ -28,9 +28,12 @@ pub(crate) fn cases(kind: &str) -> BTreeSet<(String, String)> {
     }).collect()
 }
 
+/// `METHOD` and `/path?query` of each request heard.
+type Heard = Arc<Mutex<Vec<(String, String)>>>;
+
 /// A stand-in for GitHub on localhost that answers enough for each call to go on to its next
 /// request, and records `METHOD /path` of each.
-fn recorder() -> (String, Arc<Mutex<Vec<(String, String)>>>) {
+fn recorder() -> (String, Heard) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let seen = Arc::new(Mutex::new(Vec::new()));

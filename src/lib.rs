@@ -4376,7 +4376,7 @@ pub fn start() {
         // The web build asks repohub-server for its configuration; a static host (GitHub Pages)
         // has none, and then shows the sample data.
         #[cfg(target_arch = "wasm32")]
-        net::spawn(h2.clone(), || net::fetch_config(), |s: &mut App, cfg| {
+        net::spawn(h2.clone(), net::fetch_config, |s: &mut App, cfg| {
             let live = cfg.as_ref().is_some_and(|c| c.live());
             // The phone app has a configuration before it has an account.
             if let Some(cfg) = cfg.filter(|c| live || c.device) {
@@ -8126,7 +8126,7 @@ mod phone_sizes {
         assert_eq!(crate::terminal_page::term_h(&s), 520.0);
         s.compact = true;
         let h = crate::terminal_page::term_h(&s);
-        assert!(h < 844.0 - 250.0 && h >= 240.0, "{h}");
+        assert!((240.0..844.0 - 250.0).contains(&h), "{h}");
         s.backdrop_size = [390.0, 400.0];
         assert_eq!(crate::terminal_page::term_h(&s), 240.0, "never smaller than a few lines");
     }

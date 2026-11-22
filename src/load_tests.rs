@@ -101,7 +101,7 @@ fn repo(owner: &str, i: usize) -> Value {
     json!({
         "full_name": format!("{owner}/r{i}"), "name": format!("r{i}"), "owner": {"login": owner},
         "description": format!("Repository {i}"), "language": "Rust", "stargazers_count": i * 3, "forks_count": i,
-        "open_issues_count": i % 4, "pushed_at": format!("2026-11-{:02}T10:00:00Z", 20 - i), "private": i % 3 == 0,
+        "open_issues_count": i % 4, "pushed_at": format!("2026-11-{:02}T10:00:00Z", 20 - i), "private": i.is_multiple_of(3),
         "fork": false, "archived": i == 7, "default_branch": "main", "topics": ["x"], "html_url": format!("https://github.com/{owner}/r{i}"),
     })
 }
@@ -109,13 +109,13 @@ fn repo(owner: &str, i: usize) -> Value {
 fn item(n: u32, repo: &str, pull: bool, state: &str) -> Value {
     let mut v = json!({
         "number": n, "title": format!("Item {n}"), "repository_url": format!("https://api.github.com/repos/{repo}"),
-        "user": {"login": if n % 2 == 0 { "octo" } else { "alice" }}, "state": state, "draft": n % 5 == 0,
+        "user": {"login": if n.is_multiple_of(2) { "octo" } else { "alice" }}, "state": state, "draft": n.is_multiple_of(5),
         "labels": [{"name": "bug", "color": "d73a4a"}], "assignees": [{"login": "octo"}],
         "created_at": "2026-11-10T10:00:00Z", "updated_at": format!("2026-11-{:02}T10:00:00Z", 1 + n % 20), "comments": n % 3,
         "html_url": format!("https://github.com/{repo}/issues/{n}"),
     });
     if pull {
-        v["pull_request"] = json!({ "merged_at": if state == "closed" && n % 2 == 0 { json!("2026-11-11T10:00:00Z") } else { Value::Null } });
+        v["pull_request"] = json!({ "merged_at": if state == "closed" && n.is_multiple_of(2) { json!("2026-11-11T10:00:00Z") } else { Value::Null } });
     }
     v
 }
