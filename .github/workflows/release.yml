@@ -5,7 +5,9 @@
 # - Pushing a tag like v0.1.0 publishes them as a versioned GitHub release.
 # - A pull request that touches the app or the packaging builds them too, as a check (nothing is
 #   published): the terminal, Claude and status-bar code only compiles on macOS and Windows there.
-# - It can also be run by hand (Actions → Desktop → Run workflow), which only makes artifacts.
+# - It can also be run by hand (Actions → Desktop → Run workflow): with "release" empty it only
+#   makes artifacts; with a tag there (v0.2.0), run on main, it publishes that numbered release
+#   from main's newest commit and creates the tag, with no `git push` of a tag.
 name: Desktop
 
 on:
@@ -15,16 +17,27 @@ on:
     # Documentation alone doesn't change the app.
     paths-ignore: ["**.md", "docs/**"]
   workflow_dispatch:
+    inputs:
+      release:
+        description: "Publish a numbered release from main: its tag, such as v0.2.0. Empty: only build."
+        required: false
+        default: ""
   pull_request:
     paths: ["src/**", "assets/**", "Cargo.toml", "Cargo.lock", "packaging/**", "android/**", "web/**", "scripts/android-web.sh", "scripts/web-build.sh", "scripts/install-wasm-opt.sh", ".github/workflows/release.yml"]
 
 permissions:
   contents: write
 
-# A newer push to main replaces the build of an older one.
+# A newer push to main replaces the build of an older one, but never a numbered release that
+# was started by hand: that one runs in a group of its own.
 concurrency:
-  group: desktop-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}
+  group: desktop-${{ github.ref }}-${{ inputs.release }}
+  cancel-in-progress: ${{ github.ref == 'refs/heads/main' && inputs.release == '' }}
+
+env:
+  # The tag of a numbered release: the tag that was pushed, or the one typed in Run workflow.
+  # Empty for every other build.
+  RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || (github.event_name == 'workflow_dispatch' && inputs.release || '') }}
 
 jobs:
   build:
@@ -51,10 +64,10 @@ jobs:
         shell: bash
         run: |
           cargo_version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+          if [ -n "$RELEASE_TAG" ]; then
             # A numbered release must be the version Cargo.toml says (CONTRIBUTING, "Releasing").
-            if [ "${GITHUB_REF_NAME#v}" != "$cargo_version" ]; then
-              echo "::error::Tag $GITHUB_REF_NAME doesn't match version $cargo_version in Cargo.toml."
+            if [ "$RELEASE_TAG" != "v$cargo_version" ]; then
+              echo "::error::Tag $RELEASE_TAG doesn't match version $cargo_version in Cargo.toml."
               exit 1
             fi
             version=$cargo_version
@@ -128,10 +141,10 @@ jobs:
       - name: Version
         run: |
           cargo_version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+          if [ -n "$RELEASE_TAG" ]; then
             # A numbered release must be the version Cargo.toml says (CONTRIBUTING, "Releasing").
-            if [ "${GITHUB_REF_NAME#v}" != "$cargo_version" ]; then
-              echo "::error::Tag $GITHUB_REF_NAME doesn't match version $cargo_version in Cargo.toml."
+            if [ "$RELEASE_TAG" != "v$cargo_version" ]; then
+              echo "::error::Tag $RELEASE_TAG doesn't match version $cargo_version in Cargo.toml."
               exit 1
             fi
             version=$cargo_version
@@ -188,9 +201,9 @@ jobs:
           path: dist/*.apk
           if-no-files-found: error
 
-  # A versioned release, from a v* tag.
+  # A versioned release: from a v* tag, or from Run workflow on main with the tag to create.
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release != '')
     needs: [build, android]
     runs-on: ubuntu-latest
     steps:
@@ -199,6 +212,19 @@ jobs:
           sparse-checkout: |
             CHANGELOG.md
             scripts
+      # Run by hand, the release is made from main and its tag must be new: an existing release
+      # is never replaced from here.
+      - name: Check the tag
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          if [ "$GITHUB_REF" != refs/heads/main ]; then
+            echo "::error::A release is published from main, not from $GITHUB_REF_NAME."
+            exit 1
+          fi
+          if [ -n "$(git ls-remote --tags origin "refs/tags/$RELEASE_TAG")" ]; then
+            echo "::error::The tag $RELEASE_TAG already exists."
+            exit 1
+          fi
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -233,14 +259,17 @@ jobs:
       # requests follows them.
       - name: Release notes
         run: |
-          if scripts/release-notes.sh "$GITHUB_REF_NAME" > notes.md; then :
+          if scripts/release-notes.sh "$RELEASE_TAG" > notes.md; then :
           else
-            echo "::warning::CHANGELOG.md has no section for ${GITHUB_REF_NAME#v}; using the Unreleased one."
+            echo "::warning::CHANGELOG.md has no section for ${RELEASE_TAG#v}; using the Unreleased one."
             scripts/release-notes.sh > notes.md || echo "See the pull requests below." > notes.md
           fi
           cat notes.md
+      # With a tag that doesn't exist yet (Run workflow), this creates it on this commit.
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.sha }}
           files: dist/*
           body_path: notes.md
           generate_release_notes: true
