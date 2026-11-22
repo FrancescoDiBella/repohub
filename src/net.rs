@@ -344,7 +344,11 @@ impl Transport {
         let retry_after = resp.header("retry-after").and_then(|v| v.trim().parse().ok());
         let link = resp.header("link").map(str::to_owned);
         let etag = resp.header("etag").map(str::to_owned);
-        let body = resp.into_string().map_err(|e| e.to_string())?;
+        // The client reads at most 10 MB of an answer (a very long job log can be more).
+        let body = resp.into_string().map_err(|e| match e.kind() {
+            std::io::ErrorKind::Other if e.to_string().contains("too big") => "GitHub's answer is larger than RepoHub reads (10 MB): open it on GitHub instead.".to_owned(),
+            _ => format!("GitHub's answer couldn't be read: {e}"),
+        })?;
         Ok(Resp { status, body, remaining, reset, retry_after, link, etag })
     }
 }
@@ -498,4 +502,29 @@ pub async fn fetch_config() -> Option<Config> {
     }
     let body = a.get(1).as_string()?;
     Config::from_json(&body)
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    /// An answer larger than the client reads (a long job log) is said in words, not as the
+    /// HTTP client's own error.
+    #[test]
+    fn an_answer_too_large_to_read_is_said_plainly() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let api = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            if let Some(Ok(mut stream)) = listener.incoming().next() {
+                let _ = stream.read(&mut [0u8; 2048]);
+                let body = vec![b'x'; 11 << 20];
+                let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                let _ = stream.write_all(&body);
+            }
+        });
+        let mut cfg = crate::config::Config::from_json("{}").unwrap();
+        cfg.api = api;
+        cfg.token = Some("t".into());
+        let e = pollster::block_on(crate::github::load_job_log(&cfg, "octo/app", 7)).unwrap_err();
+        assert!(e.contains("larger than RepoHub reads") && !e.contains("into_string"), "{e}");
+    }
 }
