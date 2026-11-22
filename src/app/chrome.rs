@@ -1,4 +1,5 @@
-//! The window around the pages: the sidebar, the toolbar, the banners, the toast, and `view`, which draws a frame.
+//! The window around the pages: the sidebar, the toolbar, the banners, the toast, and `view`, which
+//! draws a frame.
 
 use super::*;
 
