@@ -17,6 +17,10 @@ The first numbered release.
 - **Update channel** in Settings → About: **Stable** (numbered releases, the default for a
   numbered build) or **Preview** (the Latest build, as before). The version shows there and in
   the status-bar menu; a release tag must match `Cargo.toml`, or the release workflow stops.
+- Actions: filter workflow runs by status (**All**, **Failed**, **Running**), repository and
+  workflow; click a run to inspect its jobs, steps and the last 200 lines of any job's log (with
+  **Copy log**), and re-run failed jobs or the whole workflow (**Actions: Read and write** /
+  `workflow` scope). The status-bar icon also flags your open pull requests with failing checks.
 - The Pull requests page filters **Drafts** and **Failing checks**, and the status-bar menu
   shows how many notifications are unread (it opens the Notifications page).
 - A pull request's conversation shows its **checks** (the CI jobs on its last commit, with a

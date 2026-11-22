@@ -99,8 +99,17 @@ pub fn run_row(k: &Kit, r: &Run, now: i64, compact: bool) -> El {
     if let Some(t) = trailing {
         e = e.child(t);
     }
-    let label = format!("{}, {} on {} in {}, {}, opens on GitHub", r.workflow, state.0.to_lowercase(), r.branch, r.repo, age);
-    link(e, &r.url, label)
+    let label = format!("{}, {} on {} in {}, {}", r.workflow, state.0.to_lowercase(), r.branch, r.repo, age);
+    if r.id > 0 {
+        // A run GitHub knows by id opens in the app: its jobs, steps and logs.
+        let run = r.clone();
+        e.key(format!("run-{}-{}", r.repo, r.id))
+            .role("button")
+            .label(label)
+            .on_press(move |s: &mut App| s.open_run(&run))
+    } else {
+        link(e.key(format!("run-{}-{}", r.repo, r.workflow)), &r.url, format!("{label}, opens on GitHub"))
+    }
 }
 
 fn listing(s: &App, k: &Kit, rows: Vec<El>, empty: &str, retry_key: &str) -> El {
@@ -231,6 +240,16 @@ pub fn issues(s: &App, k: &Kit) -> El {
 
 pub fn actions(s: &App, k: &Kit) -> El {
     let ok = s.data.runs.iter().filter(|r| r.checks == Checks::Passing).count();
+    let (filter_repos, filter_workflows) = crate::runs_page::choices(s.data.runs.iter());
+    let rows: Vec<El> = s.data.runs.iter()
+        .filter(|r| s.runs_filter.matches(r))
+        .map(|r| crate::runs_page::run_line(s, k, r, s.compact))
+        .collect();
+    let empty = if s.runs_filter.is_empty() || s.data.runs.is_empty() {
+        "No recent runs"
+    } else {
+        "No workflow runs match these filters"
+    };
     let action = if !s.data.sample && s.data.runs_total > s.data.runs.len() {
         let me = &s.data.profile.login;
         let url = format!("{}/{me}", s.cfg.web_root());
@@ -243,13 +262,14 @@ pub fn actions(s: &App, k: &Kit) -> El {
     } else if s.data.is_empty() && matches!(s.status, Status::Failed(_)) {
         "Recent workflow runs across your most recently pushed repositories.".to_owned()
     } else if s.data.runs_total > s.data.runs.len() {
-        format!("Showing {} of {} recent runs ({} succeeded) · {} most recently pushed repositories", s.data.runs.len(), s.data.runs_total, ok, s.cfg.activity_repos)
+        format!("Showing {} of {} recent runs ({} succeeded) · {} most recently pushed repositories. Click a run to inspect jobs and logs.", s.data.runs.len(), s.data.runs_total, ok, s.cfg.activity_repos)
     } else {
-        format!("{ok} of {} recent runs succeeded · {} most recently pushed repositories", s.data.runs.len(), s.cfg.activity_repos)
+        format!("{ok} of {} recent runs succeeded · {} most recently pushed repositories. Click a run to inspect jobs and logs.", s.data.runs.len(), s.cfg.activity_repos)
     };
     col().w_full().gap(16.0)
         .child(heading(k, "Actions", &sub, action))
-        .child(listing(s, k, s.data.runs.iter().map(|r| run_row(k, r, s.now, s.compact)).collect(), "No recent runs", "retry-actions"))
+        .child(crate::runs_page::filter_bar(s, k, filter_repos, filter_workflows))
+        .child(listing(s, k, rows, empty, "retry-actions"))
 }
 
 fn info(k: &Kit, label: &str, value: String) -> El {

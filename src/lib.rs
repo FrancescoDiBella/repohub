@@ -49,6 +49,7 @@ mod plugins_page;
 mod prefs;
 mod state;
 mod review;
+mod runs_page;
 mod terminal;
 mod thread;
 mod thread_page;
@@ -208,10 +209,16 @@ pub struct App {
     /// What the Pull requests and the Issues pages are narrowed to.
     pull_filter: filters::ListFilter,
     issue_filter: filters::ListFilter,
+    /// What the Actions page is narrowed to.
+    pub(crate) runs_filter: runs_page::RunsFilter,
     /// The issue or pull request whose conversation is on screen, in place of the page.
     thread: Option<thread::Open>,
     /// Counts conversation loads (see [`thread::Open::epoch`]).
     thread_epoch: u64,
+    /// The workflow run whose jobs and log are on screen, in place of the page.
+    pub(crate) open_run: Option<runs_page::OpenRun>,
+    /// Counts workflow run detail loads (see [`runs_page::OpenRun::epoch`]).
+    run_epoch: u64,
     /// Rows with a write running (`owner/repo#12`), so their buttons wait.
     busy: std::collections::HashSet<String>,
     /// The title (and draft flag) of the item a form is creating, for showing it once created.
@@ -352,6 +359,7 @@ impl App {
         }
         self.page = p;
         self.thread = None;
+        self.open_run = None;
         if self.page == Page::Notifications {
             self.load_inbox();
         }
@@ -431,6 +439,7 @@ impl App {
         self.picker = None;
         self.confirm_merge = None;
         self.thread = None;
+        self.open_run = None;
         self.close_pull_diff();
     }
 
@@ -507,6 +516,7 @@ impl App {
     pub(crate) fn open_thread(&mut self, repo: &str, number: u32, pull: bool) {
         self.close_pull_diff();
         self.confirm_merge = None;
+        self.open_run = None;
         self.thread_epoch = self.thread_epoch.wrapping_add(1);
         self.thread = Some(thread::Open { repo: repo.to_owned(), number, pull, load: Load::Loading, reply: TextEdit::new(""), sending: false, epoch: self.thread_epoch });
         self.load_thread();
@@ -583,6 +593,161 @@ impl App {
             }
             self.write(&repo, w);
         }
+    }
+
+    /// Opens workflow run `r` in the in-app detail view (jobs, steps, and job logs).
+    pub(crate) fn open_run(&mut self, r: &model::Run) {
+        self.close_pull_diff();
+        self.confirm_merge = None;
+        self.thread = None;
+        self.run_epoch = self.run_epoch.wrapping_add(1);
+        let repo = runs_page::full_repo_of(self, &r.repo);
+        self.open_run = Some(runs_page::OpenRun {
+            repo,
+            run_id: r.id,
+            workflow: r.workflow.clone(),
+            branch: r.branch.clone(),
+            checks: r.checks,
+            duration: r.duration.clone(),
+            updated_at: r.updated_at,
+            url: r.url.clone(),
+            epoch: self.run_epoch,
+            jobs: Load::Loading,
+            selected_job: None,
+            logs: HashMap::new(),
+            write_error: None,
+        });
+        self.load_run_jobs();
+    }
+
+    /// Reloads jobs and cached logs for the open workflow run.
+    pub(crate) fn reload_open_run(&mut self) {
+        if let Some(o) = self.open_run.as_mut() {
+            o.logs.clear();
+            o.write_error = None;
+        }
+        self.load_run_jobs();
+    }
+
+    /// Reads the jobs and steps of the open workflow run from GitHub (or sample data).
+    pub(crate) fn load_run_jobs(&mut self) {
+        let Some(o) = self.open_run.as_mut() else { return };
+        let (repo, run_id, epoch) = (o.repo.clone(), o.run_id, o.epoch);
+        if self.data.sample {
+            let run = o.as_run();
+            let jobs = model::sample_run_jobs(&run);
+            let selected = jobs.iter().find(|j| j.checks == model::Checks::Failing)
+                .or_else(|| jobs.first())
+                .map(|j| j.id);
+            o.selected_job = selected;
+            o.logs.clear();
+            if let Some(jid) = selected
+                && let Some(job) = jobs.iter().find(|j| j.id == jid)
+            {
+                o.logs.insert(jid, Load::Ready(model::sample_job_log(&run, job)));
+            }
+            o.jobs = Load::Ready(jobs);
+            return;
+        }
+        let Some(h) = self.handle.clone() else {
+            o.jobs = Load::Failed("The app isn't ready to load this yet: try again in a moment.".into());
+            return;
+        };
+        if !matches!(o.jobs, Load::Ready(_)) {
+            o.jobs = Load::Loading;
+        }
+        let cfg = self.cfg.clone();
+        let account = self.load_gen;
+        net::spawn(h, move || async move { github::load_run_jobs(&cfg, &repo, run_id).await }, move |s: &mut App, r| {
+            if s.load_gen != account {
+                return;
+            }
+            let Some(o) = s.open_run.as_mut().filter(|o| o.epoch == epoch) else { return };
+            match r {
+                Ok(jobs) => {
+                    let keep = o.selected_job.filter(|id| jobs.iter().any(|j| j.id == *id));
+                    let pick = keep
+                        .or_else(|| jobs.iter().find(|j| j.checks == model::Checks::Failing).map(|j| j.id))
+                        .or_else(|| jobs.first().map(|j| j.id));
+                    o.selected_job = pick;
+                    o.jobs = Load::Ready(jobs);
+                    if let Some(jid) = pick {
+                        s.load_job_log(jid);
+                    }
+                }
+                Err(e) if matches!(o.jobs, Load::Ready(_)) => {
+                    s.notify_problem(e);
+                }
+                Err(e) => {
+                    o.jobs = Load::Failed(e);
+                }
+            }
+        });
+    }
+
+    /// Selects job `job_id` in the open workflow run and loads its log if not yet fetched.
+    pub(crate) fn select_run_job(&mut self, job_id: u64) {
+        let need_load = match self.open_run.as_mut() {
+            Some(o) => {
+                o.selected_job = Some(job_id);
+                !matches!(o.logs.get(&job_id), Some(Load::Ready(_) | Load::Loading))
+            }
+            None => false,
+        };
+        if need_load {
+            self.load_job_log(job_id);
+        }
+    }
+
+    /// Fetches the plain-text log tail (last 200 lines) for `job_id` in the open workflow run.
+    pub(crate) fn load_job_log(&mut self, job_id: u64) {
+        let Some(o) = self.open_run.as_mut() else { return };
+        if self.data.sample {
+            let run = o.as_run();
+            if let Some(job) = o.jobs.ready().and_then(|jobs| jobs.iter().find(|j| j.id == job_id)) {
+                let log = model::sample_job_log(&run, job);
+                o.logs.insert(job_id, Load::Ready(log));
+            }
+            return;
+        }
+        let Some(h) = self.handle.clone() else {
+            o.logs.insert(job_id, Load::Failed("The app isn't ready to load this yet: try again in a moment.".into()));
+            return;
+        };
+        let (repo, epoch) = (o.repo.clone(), o.epoch);
+        if !matches!(o.logs.get(&job_id), Some(Load::Ready(_))) {
+            o.logs.insert(job_id, Load::Loading);
+        }
+        let cfg = self.cfg.clone();
+        let account = self.load_gen;
+        net::spawn(h, move || async move { github::load_job_log(&cfg, &repo, job_id).await }, move |s: &mut App, r| {
+            if s.load_gen != account {
+                return;
+            }
+            let Some(o) = s.open_run.as_mut().filter(|o| o.epoch == epoch) else { return };
+            match r {
+                Ok(log) => {
+                    o.logs.insert(job_id, Load::Ready(log));
+                }
+                Err(e) if matches!(o.logs.get(&job_id), Some(Load::Ready(_))) => {
+                    s.notify_problem(e);
+                }
+                Err(e) => {
+                    o.logs.insert(job_id, Load::Failed(e));
+                }
+            }
+        });
+    }
+
+    /// Triggers a workflow re-run (`failed_only` = failed jobs only, otherwise the whole workflow).
+    pub(crate) fn rerun_open_run(&mut self, failed_only: bool) {
+        let Some((repo, run_id)) = self.open_run.as_mut().map(|o| {
+            o.write_error = None;
+            (o.repo.clone(), o.run_id)
+        }) else {
+            return;
+        };
+        self.write(&repo, github::Write::RerunRun { run_id, failed_only });
     }
 
     /// Switches the repository page of repository `i` to `tab`.
@@ -845,6 +1010,21 @@ impl App {
         match action {
             tray::Action::Open => {}
             tray::Action::Go(p) => self.go(p),
+            tray::Action::MyFailingPulls => {
+                let me = self.data.profile.login.trim();
+                let is_failing = |p: &model::Pull| {
+                    p.checks == Some(model::Checks::Failing)
+                        || self.data.runs.iter().any(|r| r.checks == model::Checks::Failing && same_repo(&r.repo, &p.repo) && r.pull_numbers.contains(&p.number))
+                };
+                let draft_only = !me.is_empty()
+                    && !self.data.pulls.iter().any(|p| p.state == PullState::Open && p.author.eq_ignore_ascii_case(me) && is_failing(p))
+                    && self.data.pulls.iter().any(|p| p.state == PullState::Draft && p.author.eq_ignore_ascii_case(me) && is_failing(p));
+                self.go(Page::Pulls);
+                self.pr_filter = if draft_only { PullState::Draft } else { PullState::Open };
+                self.pull_filter.clear();
+                self.pull_filter.mine = true;
+                self.pull_filter.failing = true;
+            }
             tray::Action::OpenRepo(full) => if let Some(i) = repo(self, &full) { self.open(i) },
             tray::Action::NewIssue(full) => if let Some(i) = repo(self, &full) {
                 if !matches!(&self.page, Page::Repo(f) if f.eq_ignore_ascii_case(&full)) {
@@ -905,6 +1085,7 @@ impl App {
         // Another account has other repositories and labels.
         self.pull_filter.clear();
         self.issue_filter.clear();
+        self.runs_filter.clear();
         self.data = Data::default();
         self.tab = RepoTab::Code;
         self.plugin_tab = None;
@@ -1081,6 +1262,8 @@ impl App {
             }
         } else if self.thread.is_some() && self.pull_diff_of.is_none() {
             self.thread = None;
+        } else if self.open_run.is_some() {
+            self.open_run = None;
         } else if self.pull_diff_of.is_some() {
             self.close_pull_diff();
         } else {
@@ -1812,20 +1995,27 @@ impl App {
         });
     }
 
-    /// Runs a row's write (close an issue, merge a pull request) on repository `repo`.
-    fn write(&mut self, repo: &str, w: github::Write) {
+    /// Runs a row's write (close an issue, merge a pull request, re-run a workflow) on repository `repo`.
+    pub(crate) fn write(&mut self, repo: &str, w: github::Write) {
         if actions::blocked(self).is_some() {
             return;
         }
+        let full = self.data.repos.iter()
+            .find(|r| r.full_name.eq_ignore_ascii_case(repo) || (!repo.contains('/') && r.name.eq_ignore_ascii_case(repo)))
+            .map(|r| r.full_name.clone()).unwrap_or_else(|| repo.to_owned());
         let number = w.number().unwrap_or(0);
-        let key = actions::busy_key(repo, number);
+        let rerun_id = match &w {
+            github::Write::RerunRun { run_id, .. } => Some(*run_id),
+            _ => None,
+        };
+        let key = match rerun_id {
+            Some(run_id) => runs_page::run_busy_key(&full, run_id),
+            None => actions::busy_key(repo, number),
+        };
         if !self.busy.insert(key.clone()) {
             return;
         }
         self.confirm_merge = None;
-        let full = self.data.repos.iter()
-            .find(|r| r.full_name.eq_ignore_ascii_case(repo) || (!repo.contains('/') && r.name.eq_ignore_ascii_case(repo)))
-            .map(|r| r.full_name.clone()).unwrap_or_else(|| repo.to_owned());
         let full_cb = full.clone();
         let Some(h) = self.handle.clone() else { return };
         let cfg = self.cfg.clone();
@@ -1846,7 +2036,14 @@ impl App {
             }
             match r {
                 Ok(done) => s.apply_done(&full_cb, done),
-                Err(e) => s.notify_problem(e),
+                Err(e) => {
+                    if let Some(run_id) = rerun_id
+                        && let Some(o) = s.open_run.as_mut().filter(|o| o.run_id == run_id && same_repo(&o.repo, &full_cb))
+                    {
+                        o.write_error = Some(e.clone());
+                    }
+                    s.notify_problem(e);
+                }
             }
         });
     }
@@ -2002,6 +2199,24 @@ impl App {
                     }
                 }
                 self.notify(format!("{} pull request #{n}", if open { "Reopened" } else { "Closed" }));
+            }
+            github::Done::Reran { run_id, failed_only } => {
+                for r in self.data.runs.iter_mut().filter(|r| r.id == run_id && same_repo(&r.repo, &full_name)) {
+                    r.checks = model::Checks::Running;
+                    r.updated_at = self.now;
+                }
+                let reload = if let Some(o) = self.open_run.as_mut().filter(|o| o.run_id == run_id && same_repo(&o.repo, &full_name)) {
+                    o.checks = model::Checks::Running;
+                    o.updated_at = self.now;
+                    o.write_error = None;
+                    true
+                } else {
+                    false
+                };
+                if reload {
+                    self.reload_open_run();
+                }
+                self.notify(if failed_only { "Re-running failed jobs" } else { "Re-running workflow" });
             }
         }
     }
@@ -2830,8 +3045,11 @@ fn init() -> App {
         inbox_busy: std::collections::HashSet::new(),
         pull_filter: filters::ListFilter::default(),
         issue_filter: filters::ListFilter::default(),
+        runs_filter: runs_page::RunsFilter::default(),
         thread: None,
         thread_epoch: 0,
+        open_run: None,
+        run_epoch: 0,
         busy: std::collections::HashSet::new(),
         form_title: None,
         pull_meta: None,
@@ -3289,26 +3507,29 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
     let k = themes::kit(look);
     s.shown_dark.set(dark);
     s.plugins.set_colors(&k);
-    let content = match (&s.thread, &s.page) {
-        (Some(t), _) => thread_page::view(s, &k, t),
-        (None, page) => match page {
-        Page::Overview => pages::overview(s, &k),
-        Page::Repos => pages::repos(s, &k),
-        Page::Repo(full) => {
-            if let Some(i) = s.repo_index_of(full) {
-                let extra = s.plugin_tab.as_deref().and_then(|p| s.plugins.surface(p, cx, "repo"));
-                pages::repo_detail(s, &k, i, extra)
-            } else {
-                pages::repos(s, &k)
+    let content = if let Some(t) = &s.thread {
+        thread_page::view(s, &k, t)
+    } else if let Some(o) = &s.open_run {
+        runs_page::view(s, &k, o)
+    } else {
+        match &s.page {
+            Page::Overview => pages::overview(s, &k),
+            Page::Repos => pages::repos(s, &k),
+            Page::Repo(full) => {
+                if let Some(i) = s.repo_index_of(full) {
+                    let extra = s.plugin_tab.as_deref().and_then(|p| s.plugins.surface(p, cx, "repo"));
+                    pages::repo_detail(s, &k, i, extra)
+                } else {
+                    pages::repos(s, &k)
+                }
             }
+            Page::Plugin(id) => s.plugins.surface(id, cx, "page").unwrap_or_else(|| pages::overview(s, &k)),
+            Page::Pulls => lists::pulls(s, &k),
+            Page::Issues => lists::issues(s, &k),
+            Page::Actions => lists::actions(s, &k),
+            Page::Notifications => inbox::page(s, &k),
+            Page::Settings => lists::settings(s, &k),
         }
-        Page::Plugin(id) => s.plugins.surface(id, cx, "page").unwrap_or_else(|| pages::overview(s, &k)),
-        Page::Pulls => lists::pulls(s, &k),
-        Page::Issues => lists::issues(s, &k),
-        Page::Actions => lists::actions(s, &k),
-        Page::Notifications => inbox::page(s, &k),
-        Page::Settings => lists::settings(s, &k),
-        },
     };
     let mut inner = col().w_full().max_w(1080.0).gap(16.0);
     if let Some(b) = update_banner(s, &k) {
@@ -3529,11 +3750,13 @@ fn shortcuts(s: &mut App, ev: &KeyEvent) -> bool {
         s.palette = if s.palette.is_some() { None } else { Some(palette::Palette::new()) };
         return true;
     }
-    // ⌘/Ctrl+[ goes back: out of a conversation, or from a repository to the list.
+    // ⌘/Ctrl+[ goes back: out of a conversation or workflow run, or from a repository to the list.
     if ev.is_command('[') {
         if s.thread.is_some() {
             s.close_pull_diff();
             s.thread = None;
+        } else if s.open_run.is_some() {
+            s.open_run = None;
         } else if matches!(s.page, Page::Repo(_)) {
             s.go(Page::Repos);
         } else {
@@ -3551,6 +3774,8 @@ fn shortcuts(s: &mut App, ev: &KeyEvent) -> bool {
             s.close_pull_diff();
         } else if s.thread.is_some() {
             s.thread = None;
+        } else if s.open_run.is_some() {
+            s.open_run = None;
         } else if s.local_file.is_some() {
             s.local_file = None;
         } else if s.toast.is_some() {
@@ -6361,6 +6586,7 @@ mod fix58_tests {
 
         // When runs is not empty with passing run, but runs_failed is true, label must still be "Workflow runs couldn't load"
         app.data.runs = vec![crate::model::Run {
+            id: 1,
             workflow: "CI".into(),
             repo: "alice/repo1".into(),
             branch: "main".into(),
@@ -6368,6 +6594,7 @@ mod fix58_tests {
             duration: "1m".into(),
             updated_at: 1_700_000_000,
             url: String::new(),
+            pull_numbers: Vec::new(),
         }];
         app.data.runs_failed = true;
         let menu = crate::tray::menu(&app);
@@ -7296,3 +7523,274 @@ mod update_channel_ui {
         assert_eq!(crate::update::Channel::load(), crate::update::Channel::Stable);
     }
 }
+
+#[cfg(test)]
+mod fix67_tests {
+    use std::io::{Read, Write as _};
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use crate::model::Checks;
+    use crate::state::RunStatusFilter;
+    use crate::{App, Page, Status, github, state};
+
+    fn click(rt: &mut rune::Runtime<App>, key: &str, t: &mut f64) {
+        let (x, y) = rt.find(key).unwrap_or_else(|| panic!("missing element `{key}`"));
+        rt.pointer_move(x, y);
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        *t += 0.1;
+        rt.frame(*t);
+    }
+
+    #[test]
+    fn actions_filters_and_run_detail_view_jobs_steps_and_logs() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = crate::init();
+        s.pending_place = None;
+        s.toast = None;
+        s.page = Page::Actions;
+
+        let mut rt = rune::Runtime::new(s, crate::view, (1180.0, 1800.0), rune::Env::new(true, 1.0));
+        rt.reduced_motion = true;
+        let mut t = 0.0;
+        rt.frame(t);
+
+        // Filter bar and sample runs are rendered; the failing run has a quick Re-run failed button.
+        assert!(rt.find("runs-status").is_some(), "status segmented control shown");
+        assert!(rt.find("runs-repo-ngsi-ld-xr-contexts").is_some(), "repository chip shown");
+        assert!(rt.find("runs-workflow-validate-jsonld").is_some(), "workflow chip shown");
+        assert!(rt.find("run-ngsi-ld-xr-contexts-1003").is_some(), "failing run row shown");
+        assert!(rt.find("rerun-row-ngsi-ld-xr-contexts-1003").is_some(), "quick Re-run failed button shown on failing row");
+        assert!(rt.find("run-francescodibella.github.io-1001").is_some(), "passing run row shown");
+
+        // Filter by Failed status -> keeps only the failing run and exposes Clear.
+        rt.update(|app, _| app.runs_filter.status = RunStatusFilter::Failed);
+        t += 0.1;
+        rt.frame(t);
+        assert!(rt.find("run-ngsi-ld-xr-contexts-1003").is_some());
+        assert!(rt.find("run-francescodibella.github.io-1001").is_none());
+        assert!(rt.find("runs-clear").is_some());
+
+        // Clear restores all runs.
+        click(&mut rt, "runs-clear", &mut t);
+        assert!(rt.find("run-francescodibella.github.io-1001").is_some());
+
+        // Filter by repository chip and workflow chip.
+        click(&mut rt, "runs-repo-francescodibella.github.io", &mut t);
+        assert!(rt.find("run-francescodibella.github.io-1001").is_some());
+        assert!(rt.find("run-ngsi-ld-xr-contexts-1003").is_none());
+        click(&mut rt, "runs-clear", &mut t);
+
+        // Clicking a failing run opens the in-app run detail view with auto-selected failed job & log.
+        click(&mut rt, "run-ngsi-ld-xr-contexts-1003", &mut t);
+        assert!(rt.find("run-detail").is_some(), "run detail view opened");
+        assert!(rt.find("run-jobs").is_some(), "jobs panel shown");
+        assert!(rt.find("run-log").is_some(), "log panel shown");
+        assert!(rt.find("run-log-text").is_some(), "selected job log text rendered");
+        assert!(rt.find("run-copy-log").is_some(), "Copy log button rendered");
+        assert!(rt.find("run-rerun-failed").is_some(), "Re-run failed jobs button rendered");
+        assert!(rt.find("run-rerun-all").is_some(), "Re-run all button rendered");
+        assert!(
+            rt.elements().iter().any(|e| e.key.as_deref() == Some("run-log-text") && e.text.as_deref().is_some_and(|txt| txt.contains("Process completed with exit code 1."))),
+            "failing job log automatically loaded and displayed",
+        );
+
+        // Selecting the passing lint job switches the displayed log.
+        let lint_job_id = 1003 * 10 + 1;
+        click(&mut rt, &format!("run-job-{lint_job_id}"), &mut t);
+        assert_eq!(rt.state.open_run.as_ref().and_then(|o| o.selected_job), Some(lint_job_id));
+
+        // Back button closes the run detail view back to Actions.
+        click(&mut rt, "run-back", &mut t);
+        assert!(rt.find("run-detail").is_none());
+        assert!(rt.find("runs-status").is_some());
+
+        // Re-open and verify Escape also closes the run detail view.
+        click(&mut rt, "run-ngsi-ld-xr-contexts-1003", &mut t);
+        assert!(rt.find("run-detail").is_some());
+        rt.update(|app, _| {
+            let handled = crate::shortcuts(app, &rune::KeyEvent { key: rune::Key::Escape, mods: rune::Mods::default() });
+            assert!(handled);
+        });
+        t += 0.1;
+        rt.frame(t);
+        assert!(rt.find("run-detail").is_none());
+        assert!(rt.find("runs-status").is_some());
+    }
+
+    #[test]
+    fn live_job_log_follows_redirect_without_auth_and_rerun_handles_success_and_403() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Blob storage server: serves 250 ANSI-formatted log lines and checks Authorization is NOT forwarded.
+        let blob_listener = TcpListener::bind("127.0.0.1:0").expect("bind blob mock");
+        let blob_port = blob_listener.local_addr().unwrap().port();
+        let blob_saw_auth = Arc::new(AtomicBool::new(false));
+        let blob_saw_auth_bg = blob_saw_auth.clone();
+        let blob_thread = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = blob_listener.accept() {
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+                if req.contains("\nauthorization:") || req.contains("\r\nauthorization:") {
+                    blob_saw_auth_bg.store(true, Ordering::SeqCst);
+                }
+                let mut body = String::new();
+                for i in 1..=250 {
+                    body.push_str(&format!("\x1b[32mstep\x1b[0m line {i}\n"));
+                }
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+
+        // GitHub API mock server: serves jobs, 302 redirect for logs, 403 then 201 for rerun-failed-jobs, and 201 for rerun.
+        let api_listener = TcpListener::bind("127.0.0.1:0").expect("bind api mock");
+        let api_port = api_listener.local_addr().unwrap().port();
+        let api_saw_auth = Arc::new(AtomicBool::new(false));
+        let api_saw_auth_bg = api_saw_auth.clone();
+        let rerun_calls = Arc::new(AtomicUsize::new(0));
+        let rerun_calls_bg = rerun_calls.clone();
+        let api_thread = std::thread::spawn(move || {
+            for _ in 0..5 {
+                let Ok((mut stream, _)) = api_listener.accept() else { break };
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let first_line = req.lines().next().unwrap_or("");
+                if req.to_ascii_lowercase().contains("authorization: bearer secret-pat") {
+                    api_saw_auth_bg.store(true, Ordering::SeqCst);
+                }
+                let resp = if first_line.starts_with("GET /repos/alice/app/actions/runs/77/jobs") {
+                    let body = r#"{"jobs":[
+                        {"id":501,"name":"lint","status":"completed","conclusion":"success","started_at":"2026-11-18T10:00:00Z","completed_at":"2026-11-18T10:00:20Z","html_url":"https://github.com/alice/app/actions/runs/77/job/501","steps":[{"number":1,"name":"cargo clippy","status":"completed","conclusion":"success"}]},
+                        {"id":502,"name":"test","status":"completed","conclusion":"failure","started_at":"2026-11-18T10:00:00Z","completed_at":"2026-11-18T10:01:05Z","html_url":"https://github.com/alice/app/actions/runs/77/job/502","steps":[{"number":1,"name":"cargo test","status":"completed","conclusion":"failure"}]}
+                    ]}"#;
+                    format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body)
+                } else if first_line.starts_with("GET /repos/alice/app/actions/jobs/502/logs") {
+                    format!(
+                        "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{blob_port}/raw-log\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                } else if first_line.starts_with("POST /repos/alice/app/actions/runs/77/rerun-failed-jobs") {
+                    let call = rerun_calls_bg.fetch_add(1, Ordering::SeqCst);
+                    if call == 0 {
+                        let body = r#"{"message":"Resource not accessible by personal access token"}"#;
+                        format!("HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body)
+                    } else {
+                        "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".to_owned()
+                    }
+                } else if first_line.starts_with("POST /repos/alice/app/actions/runs/77/rerun") {
+                    "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".to_owned()
+                } else {
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned()
+                };
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+
+        let mut cfg = crate::config::Config::load();
+        cfg.api = format!("http://127.0.0.1:{api_port}");
+        cfg.user = Some("alice".into());
+        cfg.token = Some("secret-pat".into());
+        cfg.allow_writes = true;
+
+        // 1. Load jobs and verify parsing.
+        let jobs = pollster::block_on(github::load_run_jobs(&cfg, "alice/app", 77)).expect("jobs load");
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[1].id, 502);
+        assert_eq!(jobs[1].checks, Checks::Failing);
+
+        // 2. Load job log via 302 redirect -> ANSI stripped, tailed to 200 of 250 lines, Authorization NOT leaked!
+        let log = pollster::block_on(github::load_job_log(&cfg, "alice/app", 502)).expect("job log load");
+        assert!(api_saw_auth.load(Ordering::SeqCst), "GitHub API request carried Authorization");
+        assert!(!blob_saw_auth.load(Ordering::SeqCst), "redirected blob host MUST NOT receive Authorization header");
+        assert!(log.truncated);
+        assert_eq!(log.total_lines, 250);
+        assert!(log.text.starts_with("step line 51\n"), "tailed to last 200 lines");
+        assert!(log.text.ends_with("step line 250"));
+        assert!(!log.text.contains("\x1b["), "ANSI escape sequences stripped");
+
+        // 3. First re-run attempt returns 403 -> clear Actions write permission explanation, rendered in run-write-error.
+        let err = pollster::block_on(github::run(&cfg, "alice/app", github::Write::RerunRun { run_id: 77, failed_only: true }))
+            .expect_err("403 must surface error");
+        assert!(err.contains("Actions: Read and write"), "403 message names fine-grained permission: {err}");
+        assert!(err.contains("workflow"), "403 message names classic scope: {err}");
+
+        let mut s = crate::init();
+        s.pending_place = None;
+        s.toast = None;
+        s.cfg = Arc::new(cfg.clone());
+        s.data.sample = false;
+        s.status = Status::Ready;
+        s.data.profile.login = "alice".into();
+        s.data.runs = vec![crate::model::Run {
+            id: 77,
+            workflow: "CI".into(),
+            repo: "alice/app".into(),
+            branch: "feat/ci".into(),
+            checks: Checks::Failing,
+            duration: "1m 5s".into(),
+            updated_at: s.now,
+            url: "https://github.com/alice/app/actions/runs/77".into(),
+            pull_numbers: vec![12],
+        }];
+        s.data.pulls = vec![crate::model::Pull {
+            number: 12,
+            title: "Fix CI".into(),
+            repo: "alice/app".into(),
+            author: "alice".into(),
+            state: crate::model::PullState::Open,
+            checks: Some(Checks::Failing),
+            updated_at: s.now,
+            comments: 0,
+            labels: Vec::new(),
+            url: "https://github.com/alice/app/pull/12".into(),
+        }];
+        s.open_run = Some(crate::runs_page::OpenRun {
+            repo: "alice/app".into(),
+            run_id: 77,
+            workflow: "CI".into(),
+            branch: "feat/ci".into(),
+            checks: Checks::Failing,
+            duration: "1m 5s".into(),
+            updated_at: s.now,
+            url: "https://github.com/alice/app/actions/runs/77".into(),
+            epoch: 1,
+            jobs: state::Load::Ready(jobs),
+            selected_job: Some(502),
+            logs: std::collections::HashMap::from([(502, state::Load::Ready(log))]),
+            write_error: Some(err),
+        });
+        let mut rt = rune::Runtime::new(s, crate::view, (1180.0, 1800.0), rune::Env::new(true, 1.0));
+        rt.reduced_motion = true;
+        rt.frame(0.0);
+        assert!(rt.find("run-write-error").is_some(), "permission error banner rendered in run detail");
+
+        // 4. Second re-run attempt succeeds (201) -> transitions run to Running; full re-run also succeeds (201).
+        let done = pollster::block_on(github::run(&cfg, "alice/app", github::Write::RerunRun { run_id: 77, failed_only: true }))
+            .expect("201 rerun-failed-jobs succeeds");
+        rt.update(|app, _| app.apply_done_inner("alice/app", done));
+        assert_eq!(rt.state.data.runs[0].checks, Checks::Running);
+        assert_eq!(rt.state.toast.as_ref().map(|t| t.text.as_str()), Some("Re-running failed jobs"));
+
+        let done_all = pollster::block_on(github::run(&cfg, "alice/app", github::Write::RerunRun { run_id: 77, failed_only: false }))
+            .expect("201 rerun succeeds");
+        assert!(matches!(done_all, github::Done::Reran { run_id: 77, failed_only: false }));
+
+        // 5. Status-bar tray action opens Pull requests narrowed to Mine + Failing checks.
+        rt.update(|app, _| app.tray_action("go:pulls:mine-failing"));
+        assert_eq!(rt.state.page, Page::Pulls);
+        assert!(rt.state.pull_filter.mine);
+        assert!(rt.state.pull_filter.failing);
+
+        let _ = blob_thread.join();
+        let _ = api_thread.join();
+    }
+}
+

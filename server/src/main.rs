@@ -539,6 +539,12 @@ fn allowed(method: &Method, path: &str) -> bool {
                 if rest.len() == 3 && rest[0] == "issues" && number(rest[1]) && rest[2] == "comments" {
                     return true;
                 }
+                if rest.len() == 4 && rest[0] == "actions" && rest[1] == "runs" && number(rest[2]) && rest[3] == "jobs" {
+                    return true;
+                }
+                if rest.len() == 4 && rest[0] == "actions" && rest[1] == "jobs" && number(rest[2]) && rest[3] == "logs" {
+                    return true;
+                }
                 // The checks on a pull request's last commit (a hex commit id).
                 if rest.len() == 3 && rest[0] == "commits" && sha(rest[1]) && rest[2] == "check-runs" {
                     return true;
@@ -548,9 +554,10 @@ fn allowed(method: &Method, path: &str) -> bool {
         }
         Method::Put if repo && rest.len() == 3 && rest[0] == "pulls" && number(rest[1]) && rest[2] == "merge" => true,
         Method::Put | Method::Delete => seg.len() == 4 && seg[0] == "user" && seg[1] == "starred" && !seg[2].is_empty() && !seg[3].is_empty(),
-        // Creating an issue, a pull request or a branch; commenting; reviewing a pull request.
+        // Creating an issue, a pull request or a branch; commenting; reviewing a pull request; re-running a workflow.
         Method::Post => repo && (matches!(rest, ["issues"] | ["pulls"] | ["git", "refs"])
-            || (rest.len() == 3 && number(rest[1]) && matches!((rest[0], rest[2]), ("issues", "comments") | ("pulls", "reviews") | ("pulls", "comments")))),
+            || (rest.len() == 3 && number(rest[1]) && matches!((rest[0], rest[2]), ("issues", "comments") | ("pulls", "reviews") | ("pulls", "comments")))
+            || (rest.len() == 4 && rest[0] == "actions" && rest[1] == "runs" && number(rest[2]) && matches!(rest[3], "rerun" | "rerun-failed-jobs"))),
         // Closing or reopening an issue; marking one notification as read.
         Method::Patch => (repo && rest.len() == 2 && rest[0] == "issues" && number(rest[1]))
             || (seg.len() == 3 && seg[0] == "notifications" && seg[1] == "threads" && number(seg[2])),
@@ -937,6 +944,12 @@ mod tests {
         assert!(!allowed(&Method::Get, "/repos/owner/repo/commits/main/check-runs"));
         assert!(!allowed(&Method::Get, "/repos/owner/repo/commits/0123abc/statuses"));
         assert!(!allowed(&Method::Post, "/repos/owner/repo/commits/0123abc/check-runs"));
+        // Workflow run jobs and job logs, by numeric id only.
+        assert!(allowed(&Method::Get, "/repos/owner/repo/actions/runs/42/jobs"));
+        assert!(allowed(&Method::Get, "/repos/owner/repo/actions/jobs/99/logs"));
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/actions/runs/bad/jobs"));
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/actions/jobs/bad/logs"));
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/actions/runs/42/logs"));
     }
 
     #[test]
@@ -948,6 +961,8 @@ mod tests {
         assert!(allowed(&Method::Post, "/repos/owner/repo/git/refs"));
         assert!(allowed(&Method::Patch, "/repos/owner/repo/issues/12"));
         assert!(allowed(&Method::Put, "/repos/owner/repo/pulls/7/merge"));
+        assert!(allowed(&Method::Post, "/repos/owner/repo/actions/runs/42/rerun"));
+        assert!(allowed(&Method::Post, "/repos/owner/repo/actions/runs/42/rerun-failed-jobs"));
         // Marking one notification as read, not all of them, and no unsubscribing.
         assert!(allowed(&Method::Patch, "/notifications/threads/12"));
         assert!(!allowed(&Method::Patch, "/notifications/threads/abc"));
@@ -975,6 +990,9 @@ mod tests {
         assert!(!allowed(&Method::Patch, "/repos/owner/repo/issues/bad"));
         assert!(!allowed(&Method::Delete, "/repos/owner/repo/git/refs/heads/main"));
         assert!(!allowed(&Method::Put, "/user/starred/owner/repo/extra"));
+        assert!(!allowed(&Method::Post, "/repos/owner/repo/actions/runs/bad/rerun"));
+        assert!(!allowed(&Method::Post, "/repos/owner/repo/actions/runs/42/cancel"));
+        assert!(!allowed(&Method::Delete, "/repos/owner/repo/actions/runs/42/logs"));
     }
 
     #[test]

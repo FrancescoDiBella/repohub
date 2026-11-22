@@ -2,7 +2,7 @@
 use rune::{El, col, el, row, text};
 use rune_kit::{Badge, BadgeVariant, Button, ButtonVariant, ControlSize, Kit, SegmentedControl, TextInput};
 
-use crate::lists::{pull_row, run_row};
+use crate::lists::pull_row;
 use crate::model::{PullState, Repo, lang_hue};
 use crate::ui::{self, panel, panel_head, rule};
 use crate::state::{BranchSlot, Compose, Load, OwnerFilter, RepoFilter, RepoSort, RepoTab};
@@ -368,7 +368,7 @@ pub fn repo_detail(s: &App, k: &Kit, i: usize, plugin: Option<El>) -> El {
             .children(crate::changes_page::pull_panel_for(s, k, Some(&r.full_name)))
             .child(list_of(k, "Pull requests", Some(actions::open_form_button(k, i, Compose::Pull)),
                 s.data.pulls.iter().filter(|x| in_repo(&x.repo)).map(|x| actions::pull_line(s, k, x, s.compact)).collect())),
-        RepoTab::Actions => list_of(k, "Workflow runs", None, s.data.runs.iter().filter(|x| in_repo(&x.repo)).map(|x| run_row(k, x, s.now, s.compact)).collect()),
+        RepoTab::Actions => list_of(k, "Workflow runs", None, s.data.runs.iter().filter(|x| in_repo(&x.repo)).map(|x| crate::runs_page::run_line(s, k, x, s.compact)).collect()),
         RepoTab::Notes => crate::notes_page::notes_tab(s, k, i),
         RepoTab::Claude => crate::claude_page::claude_tab(s, k, i),
         RepoTab::Terminal => crate::terminal_page::terminal_tab(s, k, i, k.c.page.r + k.c.page.g + k.c.page.b < 1.5),

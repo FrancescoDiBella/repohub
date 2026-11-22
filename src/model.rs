@@ -89,6 +89,7 @@ impl Issue {
 
 #[derive(Clone, Debug)]
 pub struct Run {
+    pub id: u64,
     pub workflow: String,
     pub repo: String,
     pub branch: String,
@@ -96,6 +97,8 @@ pub struct Run {
     pub duration: String,
     pub updated_at: i64,
     pub url: String,
+    /// Pull request numbers associated with this workflow run, if any.
+    pub pull_numbers: Vec<u32>,
 }
 
 impl Run {
@@ -106,6 +109,33 @@ impl Run {
             fmt_ago(self.updated_at, now)
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunStep {
+    pub number: u32,
+    pub name: String,
+    pub checks: Checks,
+    pub status_label: String,
+    pub duration: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunJob {
+    pub id: u64,
+    pub name: String,
+    pub checks: Checks,
+    pub status_label: String,
+    pub duration: String,
+    pub url: String,
+    pub steps: Vec<RunStep>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JobLog {
+    pub text: String,
+    pub total_lines: usize,
+    pub truncated: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -396,16 +426,17 @@ impl Data {
             issue(44, "Measure headset frame pacing over Wi-Fi 6", "xr-digital-twin-thesis", "research", 300.0, 5 * DAY),
             issue(7, "Battery drain on the CO2 sensor node", "iot-sensor-gateway", "bug", 25.0, 7 * DAY),
         ];
-        let run = |workflow: &str, repo: &str, branch: &str, checks, duration: &str, age_secs: i64| Run {
-            workflow: workflow.into(), repo: repo.into(), branch: branch.into(), checks, duration: duration.into(), updated_at: now - age_secs,
-            url: format!("https://github.com/francescodibella/{repo}/actions"),
+        let run = |id, workflow: &str, repo: &str, branch: &str, checks, duration: &str, age_secs: i64, pull_numbers: Vec<u32>| Run {
+            id, workflow: workflow.into(), repo: repo.into(), branch: branch.into(), checks, duration: duration.into(), updated_at: now - age_secs,
+            url: format!("https://github.com/francescodibella/{repo}/actions/runs/{id}"),
+            pull_numbers,
         };
         let runs = vec![
-            run("pages-build-deployment", "francescodibella.github.io", "main", Checks::Passing, "41s", 2 * HOUR),
-            run("validate-jsonld", "ngsi-ld-xr-contexts", "mr-v0.2", Checks::Running, "1m 12s", 60),
-            run("validate-jsonld", "ngsi-ld-xr-contexts", "fix-vocab", Checks::Failing, "38s", 4 * DAY),
-            run("latex-build", "xr-digital-twin-thesis", "dev", Checks::Passing, "3m 05s", 3 * DAY),
-            run("pytest", "iot-sensor-gateway", "main", Checks::Passing, "57s", 30 * DAY),
+            run(1001, "pages-build-deployment", "francescodibella.github.io", "main", Checks::Passing, "41s", 2 * HOUR, Vec::new()),
+            run(1002, "validate-jsonld", "ngsi-ld-xr-contexts", "mr-v0.2", Checks::Running, "1m 12s", 60, vec![9]),
+            run(1003, "validate-jsonld", "ngsi-ld-xr-contexts", "fix-vocab", Checks::Failing, "38s", 4 * DAY, vec![8]),
+            run(1004, "latex-build", "xr-digital-twin-thesis", "dev", Checks::Passing, "3m 05s", 3 * DAY, Vec::new()),
+            run(1005, "pytest", "iot-sensor-gateway", "main", Checks::Passing, "57s", 30 * DAY, Vec::new()),
         ];
         Data {
             profile: Profile { login: "francescodibella".into(), name: "Francesco Di Bella".into(), bio: "XR & IoT developer".into() },
@@ -427,6 +458,93 @@ impl Data {
             repos_capped: false,
         }
     }
+}
+
+pub fn sample_run_jobs(run: &Run) -> Vec<RunJob> {
+    let base = run.id.saturating_mul(10);
+    let url = |id: u64| format!("{}/job/{id}", run.url.trim_end_matches('/'));
+    match run.checks {
+        Checks::Failing => vec![
+            RunJob {
+                id: base + 1,
+                name: "lint".into(),
+                checks: Checks::Passing,
+                status_label: "success".into(),
+                duration: "14s".into(),
+                url: url(base + 1),
+                steps: vec![
+                    RunStep { number: 1, name: "Checkout repository".into(), checks: Checks::Passing, status_label: "success".into(), duration: "2s".into() },
+                    RunStep { number: 2, name: "Check formatting".into(), checks: Checks::Passing, status_label: "success".into(), duration: "12s".into() },
+                ],
+            },
+            RunJob {
+                id: base + 2,
+                name: format!("{} ({})", run.workflow, run.branch),
+                checks: Checks::Failing,
+                status_label: "failure".into(),
+                duration: run.duration.clone(),
+                url: url(base + 2),
+                steps: vec![
+                    RunStep { number: 1, name: "Checkout repository".into(), checks: Checks::Passing, status_label: "success".into(), duration: "2s".into() },
+                    RunStep { number: 2, name: "Install dependencies".into(), checks: Checks::Passing, status_label: "success".into(), duration: "11s".into() },
+                    RunStep { number: 3, name: "Run validation suite".into(), checks: Checks::Failing, status_label: "failure".into(), duration: "25s".into() },
+                ],
+            },
+        ],
+        Checks::Running => vec![
+            RunJob {
+                id: base + 1,
+                name: format!("{} ({})", run.workflow, run.branch),
+                checks: Checks::Running,
+                status_label: "in progress".into(),
+                duration: run.duration.clone(),
+                url: url(base + 1),
+                steps: vec![
+                    RunStep { number: 1, name: "Checkout repository".into(), checks: Checks::Passing, status_label: "success".into(), duration: "2s".into() },
+                    RunStep { number: 2, name: "Validate contexts".into(), checks: Checks::Running, status_label: "in progress".into(), duration: "1m 10s".into() },
+                ],
+            },
+        ],
+        Checks::Passing => vec![
+            RunJob {
+                id: base + 1,
+                name: format!("{} ({})", run.workflow, run.branch),
+                checks: Checks::Passing,
+                status_label: "success".into(),
+                duration: run.duration.clone(),
+                url: url(base + 1),
+                steps: vec![
+                    RunStep { number: 1, name: "Checkout repository".into(), checks: Checks::Passing, status_label: "success".into(), duration: "2s".into() },
+                    RunStep { number: 2, name: "Build & verify".into(), checks: Checks::Passing, status_label: "success".into(), duration: run.duration.clone() },
+                ],
+            },
+        ],
+    }
+}
+
+pub fn sample_job_log(run: &Run, job: &RunJob) -> JobLog {
+    let text = match job.checks {
+        Checks::Failing => format!(
+            "2026-11-14T10:12:01Z ##[group]Run {}\n\
+             2026-11-14T10:12:02Z Checking context definitions on branch {}...\n\
+             2026-11-14T10:12:19Z ERROR: @vocab IRI must end with '#' or '/' in contexts/vr-entities.jsonld:14\n\
+             2026-11-14T10:12:19Z ##[error]Process completed with exit code 1.",
+            job.name, run.branch
+        ),
+        Checks::Running => format!(
+            "2026-11-18T14:00:01Z ##[group]Run {}\n\
+             2026-11-18T14:00:04Z Validating 18 JSON-LD schemas on branch {}...\n\
+             2026-11-18T14:01:12Z Still running...",
+            job.name, run.branch
+        ),
+        Checks::Passing => format!(
+            "2026-11-18T12:00:01Z ##[group]Run {}\n\
+             2026-11-18T12:00:39Z All checks passed on {} ({}).",
+            job.name, run.repo, run.branch
+        ),
+    };
+    let total_lines = text.lines().count();
+    JobLog { text, total_lines, truncated: false }
 }
 
 #[cfg(test)]
@@ -468,9 +586,9 @@ mod tests {
         assert_eq!(pull.age_ago(t + 3600), "1 hour ago");
 
         let run = Run {
-            workflow: "ci".into(), repo: "a/b".into(), branch: "main".into(),
+            id: 42, workflow: "ci".into(), repo: "a/b".into(), branch: "main".into(),
             checks: Checks::Passing, duration: "10s".into(),
-            updated_at: t, url: String::new(),
+            updated_at: t, url: String::new(), pull_numbers: Vec::new(),
         };
         assert_eq!(run.age_ago(t + 120), "2 minutes ago");
         let running = Run { checks: Checks::Running, ..run };
