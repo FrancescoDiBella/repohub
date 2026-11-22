@@ -27,7 +27,7 @@ fn change_color(k: &Kit, c: Change) -> rune::Color {
 }
 
 fn change_mark(k: &Kit, c: Change) -> El {
-    text(c.letter()).font(k.ty.mono).color(change_color(k, c)).w(14.0).help(c.label().to_owned())
+    text(c.letter()).font(k.ty.mono).color(change_color(k, c)).w(14.0).label(c.label().to_owned()).help(c.label().to_owned())
 }
 
 /// The files panel for the local clone of repository `i`.

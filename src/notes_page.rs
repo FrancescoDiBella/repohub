@@ -63,7 +63,7 @@ pub fn notes_tab(s: &App, k: &Kit, i: usize) -> El {
             s.open_board(i, name, !taken);
         })
         .build(k).key("new-note");
-    let field = TextInput::new(&s.note_name).placeholder("Name of the new drawing, e.g. Architecture")
+    let field = TextInput::new(&s.note_name).label("Name of the new drawing").placeholder("Name of the new drawing, e.g. Architecture")
         .on_edit(|s: &mut App| &mut s.note_name).build(k).key("note-name").grow(1.0).min_w(220.0);
     let hint = if s.note_name.text.trim().is_empty() || name_ok { "Letters, digits, spaces and _ - . ( ), up to 80 characters." } else { "That name isn't allowed: use letters, digits, spaces and _ - . ( )." };
     let new_panel = panel(k).padding(16.0).gap(10.0)

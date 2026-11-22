@@ -103,22 +103,22 @@ pub fn user(k: &Kit, name: &str, size: f32) -> El {
     avatar(k, name, hue as f32, size).radius(size / 2.0)
 }
 
-/// The CI state as a coloured icon.
+/// The CI state as a distinct, labelled icon.
 pub fn checks(k: &Kit, c: Checks) -> El {
     match c {
-        Checks::Passing => ico(&icons::CHECK, 14.0, k.c.success.icon),
-        Checks::Failing => ico(&icons::CROSS, 14.0, k.c.danger.icon),
-        Checks::Running => ico(&icons::DOT, 14.0, k.c.warning.icon),
+        Checks::Passing => ico(&icons::CHECK, 14.0, k.c.success.icon).label("CI passing"),
+        Checks::Failing => ico(&icons::CROSS, 14.0, k.c.danger.icon).label("CI failing"),
+        Checks::Running => ico(&icons::DOT, 14.0, k.c.warning.icon).label("CI running"),
     }
 }
 
-/// The pull request state icon.
+/// The pull request state icon, with a distinct shape and accessible label for each state.
 pub fn pull_icon(k: &Kit, s: PullState) -> El {
     match s {
-        PullState::Open => ico(&icons::PULL, 16.0, k.c.success.icon),
-        PullState::Draft => ico(&icons::PULL, 16.0, k.c.icon_faint),
-        PullState::Merged => ico(&icons::MERGE, 16.0, oklch(0.62, 0.17, 300.0)),
-        PullState::Closed => ico(&icons::PULL, 16.0, k.c.danger.icon),
+        PullState::Open => ico(&icons::PULL, 16.0, k.c.success.icon).label("Pull request open"),
+        PullState::Draft => ico(&icons::PULL_DRAFT, 16.0, k.c.icon_faint).label("Draft pull request"),
+        PullState::Merged => ico(&icons::MERGE, 16.0, oklch(0.62, 0.17, 300.0)).label("Pull request merged"),
+        PullState::Closed => ico(&icons::PULL_CLOSED, 16.0, k.c.danger.icon).label("Pull request closed"),
     }
 }
 

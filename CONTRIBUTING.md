@@ -127,6 +127,10 @@ the same; the clients bypass HTTP proxies for `localhost` and `NO_PROXY` hosts.
   with its test.
 - Plugins see the app only through `@repohub` (`plugins::context` and the actions in
   `Plugins::make`). Give them more only on purpose: no files, processes or network.
+- Every pressable element gets a `.role(...)` (`"button"`, `"link"`, `"option"`, …) and a
+  `.label(...)`, and every `TextInput`, `TextArea` or `Switch` gets a `.label(...)`. Never convey
+  status by colour, icon shape or hover tooltip alone: pair status marks with a distinct shape and
+  an accessible label or visible text.
 - A pull request that changes the app adds a line to [`CHANGELOG.md`](CHANGELOG.md) under
   **Unreleased** (Added, Changed or Fixed), written for the people who use RepoHub. CI warns
   when it's missing.
