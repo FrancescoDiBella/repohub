@@ -281,6 +281,9 @@ pub fn duration(secs: i64) -> String {
     }
 }
 
+/// The account the sample data belongs to.
+pub const SAMPLE_LOGIN: &str = "francescodibella";
+
 /// Sample files for the sample repository's Code tab.
 pub fn sample_detail(r: &Repo) -> Detail {
     let files = [(".github", true), ("bunny", true), ("css", true), ("js", true), ("repohub", true), ("README.md", false), ("index.html", false)];
@@ -290,7 +293,9 @@ pub fn sample_detail(r: &Repo) -> Detail {
         files: files.iter().map(|(n, d)| (n.to_string(), *d)).collect(),
         readme: Some(format!("# {}\n\n{}\n\n## Quick start\n\n```sh\ngit clone {}.git\ncd {}\n```\n\nSee the [contributing guide](CONTRIBUTING.md) for the details.", r.name, r.description, r.url, r.name)),
         languages: vec![(r.language.clone(), 70), ("HTML".into(), 20), ("CSS".into(), 10)],
-        commit: Some(Commit { author: r.owner.clone(), message: "Add RepoHub, a Rune-based GitHub repository manager UI".into(), sha: "a6f6543".into(), committed_at: r.pushed }),
+        // The newest commit of the sample history (the Commits section).
+        commit: crate::commits::sample_history(r, &r.branch, SAMPLE_LOGIN).into_iter().next()
+            .map(|c| Commit { sha: c.short().to_owned(), author: c.author, message: c.title, committed_at: c.at }),
     }
 }
 
@@ -408,7 +413,7 @@ impl Data {
             run("pytest", "iot-sensor-gateway", "main", Checks::Passing, "57s", 30 * DAY),
         ];
         Data {
-            profile: Profile { login: "francescodibella".into(), name: "Francesco Di Bella".into(), bio: "XR & IoT developer".into() },
+            profile: Profile { login: SAMPLE_LOGIN.into(), name: "Francesco Di Bella".into(), bio: "XR & IoT developer".into() },
             repos,
             pulls,
             issues,

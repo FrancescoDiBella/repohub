@@ -869,6 +869,53 @@ impl Gh {
         Ok(out)
     }
 
+    /// Page `page` of branch `branch`'s commits ([`crate::commits::PAGE`] a page), newest first,
+    /// and whether GitHub has more.
+    pub async fn commits(&self, full: &str, branch: &str, page: usize) -> Result<(Vec<crate::commits::Row>, bool), String> {
+        let per = crate::commits::PAGE;
+        let (v, resp) = self.get_resp(&format!("/repos/{full}/commits?sha={}&per_page={per}&page={page}", enc(branch))).await?;
+        let rows = crate::commits::parse_rows(&v);
+        // GitHub links the next page when there is one; without a Link header, a full page may have more.
+        let more = match resp.link.as_deref() {
+            Some(link) => next_page_path(Some(link), &self.api_base).is_some(),
+            None => v.as_array().is_some_and(|a| a.len() >= per),
+        };
+        Ok((rows, more))
+    }
+
+    /// Commit `sha` with its files (GitHub lists the first 300).
+    pub async fn commit(&self, full: &str, sha: &str) -> Result<crate::commits::Detail, String> {
+        if !crate::commits::valid_sha(sha) {
+            return Err(format!("“{sha}” isn't a commit id."));
+        }
+        let (v, resp) = self.get_resp(&format!("/repos/{full}/commits/{sha}")).await?;
+        Ok(crate::commits::parse_detail(&v, next_page_path(resp.link.as_deref(), &self.api_base).is_some()))
+    }
+
+    /// Branch `head` compared with branch `base`, and the open pull request from one into the
+    /// other, if there is one.
+    pub async fn compare(&self, full: &str, base: &str, head: &str) -> Result<crate::commits::Comparison, String> {
+        if !valid_branch(base) || !valid_branch(head) {
+            return Err("Those aren't branch names GitHub can compare.".into());
+        }
+        let v = match self.get(&format!("/repos/{full}/compare/{}...{}", enc_path(base), enc_path(head))).await {
+            Ok(v) => v,
+            // Two histories with nothing in common: nothing to compare, not an error.
+            Err(e) if e.contains("No common ancestor") => return Ok(crate::commits::Comparison::unrelated(base, head)),
+            Err(e) => return Err(e),
+        };
+        let mut c = crate::commits::parse_comparison(&v, base, head);
+        if c.ahead > 0 {
+            // Whether a pull request is already open for it decides if New pull request shows; if
+            // the search fails, the button shows and GitHub's answer to it says so.
+            let q = format!("is:pr is:open repo:{full} head:{head} base:{base}");
+            if let Ok(found) = self.get(&format!("/search/issues?q={}&per_page=1", enc(&q))).await {
+                c.open_pull = found.get("items").and_then(Value::as_array).and_then(|a| a.first()).map(|p| (n(p, "number"), s(p, "html_url")));
+            }
+        }
+        Ok(c)
+    }
+
     pub async fn merge_pull(&self, full: &str, number: u32, method: &str) -> Result<(), String> {
         self.write("PUT", &format!("/repos/{full}/pulls/{number}/merge"), json!({ "merge_method": method })).await.map(|_| ())
     }
@@ -1024,6 +1071,18 @@ pub async fn load_thread(cfg: &Config, full: &str, number: u32) -> Result<Thread
 
 pub async fn load_pull_files(cfg: &Config, full: &str, number: u32) -> Result<Vec<PullFile>, String> {
     Gh::new(cfg).pull_files(full, number).await
+}
+
+pub async fn load_commits(cfg: &Config, full: &str, branch: &str, page: usize) -> Result<(Vec<crate::commits::Row>, bool), String> {
+    Gh::new(cfg).commits(full, branch, page).await
+}
+
+pub async fn load_commit(cfg: &Config, full: &str, sha: &str) -> Result<crate::commits::Detail, String> {
+    Gh::new(cfg).commit(full, sha).await
+}
+
+pub async fn load_compare(cfg: &Config, full: &str, base: &str, head: &str) -> Result<crate::commits::Comparison, String> {
+    Gh::new(cfg).compare(full, base, head).await
 }
 
 pub async fn load_detail(cfg: &Config, full: &str, at: &str) -> Detail {

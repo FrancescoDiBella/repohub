@@ -352,11 +352,13 @@ pub fn repo_detail(s: &App, k: &Kit, i: usize, plugin: Option<El>) -> El {
                 None => s.open_plugin_tab(i, s.plugins.repo_tabs().get(t - shown.len()).map(|(id, _)| id.clone())),
             }
         }).build(k).key("tabs");
-    // Seven sections don't fit a phone's width: there the strip scrolls sideways.
-    let tabs = if s.compact { row().w_full().scroll_x().child(tabs) } else { tabs };
+    // Ten sections and the plugins' don't always fit (a phone, a narrow window): the strip
+    // scrolls sideways rather than squeezing the labels.
+    let tabs = row().w_full().scroll_x().child(tabs);
     let in_repo = |name: &str| name.eq_ignore_ascii_case(&r.full_name) || name.eq_ignore_ascii_case(&r.name);
     let body = if let Some(p) = plugin.filter(|_| s.plugin_tab.is_some()) { p } else { match s.tab {
         RepoTab::Code => code_tab(s, k, i, r),
+        RepoTab::Commits => crate::commits_page::commits_tab(s, k, i),
         RepoTab::Changes => crate::changes_page::changes_tab(s, k, i),
         RepoTab::Issues => list_of(k, "Open issues", Some(actions::open_form_button(k, i, Compose::Issue)),
             s.data.issues.iter().filter(|x| in_repo(&x.repo)).map(|x| actions::issue_line(s, k, x)).collect()),

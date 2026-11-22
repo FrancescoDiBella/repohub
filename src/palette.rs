@@ -95,13 +95,16 @@ pub fn entries(s: &App) -> Vec<Entry> {
             entry(format!("Pin {n} to the sidebar"), "Action", &icons::PIN_ON, Command::TogglePin(i))
         });
         out.push(entry(format!("Open a terminal in {n}"), "Action", &icons::TERMINAL, Command::Tab(i, RepoTab::Terminal)));
+        if s.tab != RepoTab::Commits {
+            out.push(entry(format!("Commits of {n}"), "Section", &icons::COMMIT, Command::Tab(i, RepoTab::Commits)));
+        }
         out.push(entry(format!("Open {n} on GitHub"), "Action", &icons::EXTERNAL, Command::OpenUrl(r.url.clone())));
         out.push(entry(format!("Copy the clone URL of {n}"), "Action", &icons::COPY, Command::CopyClone(format!("{}.git", r.url))));
         for (p, label) in s.plugins.repo_tabs() {
             out.push(Entry { detail: "plugin".into(), ..entry(format!("{label} · {n}"), "Plugin", &icons::SPARK, Command::PluginTab(i, p)) });
         }
         for t in s.tabs() {
-            if t != s.tab {
+            if t != s.tab && t != RepoTab::Commits {
                 out.push(entry(format!("{} · {n}", RepoTab::LABELS[t.index()]), "Section", &icons::REPO, Command::Tab(i, t)));
             }
         }
@@ -373,5 +376,7 @@ mod tests {
         let found = search(entries(&s), &name);
         assert!(matches!(found[0].cmd, Command::OpenRepo(1) | Command::Compose(1, _) | Command::Tab(1, _) | Command::OpenUrl(_) | Command::CopyClone(_)));
         assert_eq!(search(entries(&s), "settings")[0].cmd, Command::Go(Page::Settings));
+        let found = search(entries(&s), "commits");
+        assert_eq!((found[0].title.clone(), &found[0].cmd), (format!("Commits of {name}"), &Command::Tab(1, RepoTab::Commits)));
     }
 }
