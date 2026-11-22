@@ -137,6 +137,28 @@ public class BackendTest {
         assertFalse(GitHubPaths.allowed("POST", "/user/repos"));
         assertTrue(GitHubPaths.allowed("PATCH", "/repos/o/r/issues/7"));
         assertFalse(GitHubPaths.allowed("PATCH", "/repos/o/r"));
+        // Releases and tags, as the server allows them: read, create, generate notes, save or
+        // publish a draft by its number; never delete, upload or make a tag object.
+        for (String p : new String[] {"/repos/o/r/releases", "/repos/o/r/releases?per_page=20&page=2", "/repos/o/r/releases/latest", "/repos/o/r/tags?per_page=50"}) {
+            assertTrue(p, GitHubPaths.allowed("GET", p));
+        }
+        for (String p : new String[] {"/repos/o/r/releases/42", "/repos/o/r/releases/tags/v1.0.0", "/repos/o/r/releases/42/assets",
+            "/repos/o/r/releases/assets/7", "/repos/o/r/releases/latest/assets", "/repos/o/r/tags/v1.0.0", "/repos/o/r/git/tags/0123abc"}) {
+            assertFalse(p, GitHubPaths.allowed("GET", p));
+        }
+        assertTrue(GitHubPaths.allowed("POST", "/repos/o/r/releases"));
+        assertTrue(GitHubPaths.allowed("POST", "/repos/o/r/releases/generate-notes"));
+        assertTrue(GitHubPaths.allowed("PATCH", "/repos/o/r/releases/42"));
+        for (String p : new String[] {"/repos/o/r/releases/latest", "/repos/o/r/releases/4a2", "/repos/o/r/releases/-1", "/repos/o/r/releases/42/assets", "/repos/o/r/releases"}) {
+            assertFalse(p, GitHubPaths.allowed("PATCH", p));
+        }
+        for (String p : new String[] {"/repos/o/r/releases/42", "/repos/o/r/releases/42/assets", "/repos/o/r/releases/generate-notes/x", "/repos/o/r/git/tags"}) {
+            assertFalse(p, GitHubPaths.allowed("POST", p));
+        }
+        for (String p : new String[] {"/repos/o/r/releases/42", "/repos/o/r/releases/assets/7", "/repos/o/r/releases/42/assets/7", "/repos/o/r/git/refs/tags/v1.0.0"}) {
+            assertFalse(p, GitHubPaths.allowed("DELETE", p));
+        }
+        assertFalse(GitHubPaths.allowed("PUT", "/repos/o/r/releases/42"));
         assertFalse(GitHubPaths.allowed("TRACE", "/user"));
     }
 

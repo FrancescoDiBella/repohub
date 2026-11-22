@@ -31,6 +31,7 @@
 | `src/terminal.rs`, `src/terminal_page.rs` | Embedded terminal (desktop): `portable-pty` runs the login shell, `vt100` keeps the screen; key mapping, colours, the Terminal tab |
 | `src/local.rs`, `src/local_page.rs` | The local clone read from disk: `git` run on the computer, the file list (`git ls-files`, `git status`), reading a file safely, and the Code tab's folder listing and file viewer |
 | `src/commits.rs`, `src/commits_page.rs` | The Commits section: reading GitHub's commit list, one commit and a comparison (tested), the day groups and the filter, the sample history, loading with late answers dropped; the history, the commit page and the comparison form |
+| `src/releases.rs`, `src/releases_page.rs` | The Releases section: reading GitHub's releases and tags (tested), the next versions and the tag check, the sample releases, loading with late answers dropped, saving and publishing (publishing only after its question); the list, the tags without a release, the form, and the latest release's tag in the header |
 | `src/diffs.rs`, `src/changes_page.rs` | Diffs with rune-kit's `DiffView`: the local changes (`local::changes`, commit, push, pull) in the Changes tab, and a pull request's files (`github::load_pull_files`) with Merge, Squash and Rebase |
 | `src/clones.rs` | Finding and remembering each repository's local clone |
 | `assets/fonts/` | Inter and IBM Plex Mono (SIL OFL), bundled so mono text is monospaced everywhere |
@@ -75,6 +76,9 @@ Add `tab notes` (a section's name) after `page repo`, and `REPOHUB_TRACE=1` to p
 `diff 14` also opens that pull request's diff, and `section appearance` picks the Settings section.
 `tab commits` reads the history before the first frame; `commit 0123abc` (or `commit 2`, the
 second in the list) opens a commit, and `compare main...feature/x` compares two branches.
+`tab releases` reads the releases before the first frame; `release new` opens the New release
+form, `release notes` also picks the next minor version and generates the notes, `release
+publish` adds the publish question, and `release edit` opens the first draft in the form.
 With `tab changes` and a clone found (`REPOHUB_REPOS_DIR`), its changes are read before the first frame.
 
 `scripts/screenshots.sh` regenerates the README's pictures in `docs/` from the sample data, with a
@@ -150,12 +154,13 @@ the same; the clients bypass HTTP proxies for `localhost` and `NO_PROXY` hosts.
 - Never commit `.env` or anything that contains a token.
 - Keep the proxy allowlist (`server/src/main.rs`, `allowed`) as narrow as the app needs. Add an
   endpoint there only together with the feature that uses it.
-- RepoHub creates (issues, branches, pull requests), closes issues, merges pull requests, edits
-  an issue's or pull request's labels, assignees, milestone, title and description and who is
-  asked to review, and, in the notes repository the user chose for board sync, writes and deletes
-  board files under `boards/` (one commit each), and nothing more: deleting repositories or
-  branches and rewriting history stay on GitHub. The only other `DELETE` in a repository takes
-  back a review request. A new write goes through `github::Write` (board sync through
+- RepoHub creates issues, branches, pull requests and releases (drafts, and publishing them),
+  closes issues, merges pull requests, edits an issue's or pull request's labels, assignees,
+  milestone, title and description and who is asked to review, and, in the notes repository the
+  user chose for board sync, writes and deletes board files under `boards/` (one commit each),
+  and nothing more: deleting repositories, branches, releases or tags, uploading release files
+  and rewriting history stay on GitHub. The only other `DELETE` in a repository takes back a
+  review request. A new write goes through `github::Write` (board sync through
   `sync_io::GhRemote` on the same transport), the proxy allowlist (`server/src/main.rs`) and its
   test. The board paths are checked on the raw address (`board_contents_path`), as narrowly as
   the app writes them.
@@ -163,7 +168,7 @@ the same; the clients bypass HTTP proxies for `localhost` and `NO_PROXY` hosts.
 - Every action gives feedback when it finishes or fails: a toast (`notify`, `notify_problem`) or
   a message where it happened. Nothing returns silently.
 - An action that changes something on GitHub or deletes local data either asks first (merging,
-  removing a plugin, deleting a drawing) or offers **Undo** in its toast (`notify_undo`, with a
+  publishing a release, removing a plugin, deleting a drawing) or offers **Undo** in its toast (`notify_undo`, with a
   `state::Undo` that knows how to put it back: closing an issue, deleting a theme).
 - The Android app forwards the same writes: add a new one to `android/.../GitHubPaths.java` too,
   with its test.

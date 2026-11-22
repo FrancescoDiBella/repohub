@@ -10,6 +10,13 @@ The sections are **Added**, **Changed** and **Fixed**.
 ## Unreleased
 
 ### Added
+- **Releases** on a repository's page: its releases with their notes, files and download counts,
+  20 at a time with **Load more**, marked **Latest**, **Pre-release** or **Draft**, and the tags
+  that have no release. **New release** offers the next versions as the tag, picks the branch a
+  new tag is made from, and fills the notes with **Generate notes**; save it as a draft, or
+  publish it after a question. Drafts have **Edit** and **Publish**. The repository's header
+  shows the latest release's tag, and the palette has "Releases of …" and "New release in …".
+  RepoHub doesn't delete releases or tags or upload files.
 - Triage in a conversation: a details block (beside it on a wide window, above it on a phone)
   with **Labels**, **Assignees**, **Milestone** and, on pull requests, **Reviewers** (who is
   asked, and who reviewed with their verdict). **Edit** opens a picker with a filter and the

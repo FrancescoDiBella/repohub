@@ -151,6 +151,30 @@ The history (`History`), the open commit (`Open`) and the comparison (`Compare`)
 commit or comparison, or a reload since) is dropped, as is one for another account (`load_gen`).
 Leaving the section closes the commit and the comparison; the history stays for next time.
 
+## The Releases section: `releases::Releases`
+
+```mermaid
+stateDiagram-v2
+    [*] --> List: set_tab(Releases)
+    List --> Form: New release / Draft a release / Edit (a draft)
+    Form --> Asking: Publish release
+    Asking --> Form: Cancel / Esc
+    Asking --> Sending: Publish
+    Form --> Sending: Save draft
+    Sending --> List: saved (the list and the header follow)
+    Sending --> Form: GitHub refuses (what was typed stays)
+    Form --> List: × / Cancel / Esc
+    List --> DraftAsking: Publish (on a draft)
+    DraftAsking --> List: Cancel / Esc, or published
+```
+
+The list (`List`) holds a `Load` and the epoch of the request it waits for; an answer for another
+repository, a reload since, or another account is dropped. Generate notes waits the same way, and
+its answer waits for a yes (`Form::offered`) when the notes field has something you typed.
+Publishing happens only from the question (`Form::confirm`, `Releases::confirm`); leaving the
+section drops the question and keeps the form. Each repository's latest release (`latest`) is
+read when its page opens, for the header.
+
 ## The Terminal tab: `terminal_page::Panel`
 
 ```mermaid
@@ -175,6 +199,8 @@ stateDiagram-v2
 | `Toast` | none → shown (`Done` / `Problem`) → none | its timer hides only its own message |
 | `Facet` | `Labels`, `Assignees`, `Milestone`, `Reviewers` | the open triage picker (one at a time, or none); Apply sends one `triage::Change` |
 | `markdown::Block` | `Text`, `Fence`, `Comment` | the README pass, line by line |
+| `releases::TagUse` | `Invalid`, `Taken`, `Existing`, `New` | what the form's tag does: refused, another release's, used as it is, or created from the target branch |
+| `releases::NotesJob` | `Idle`, `Asking`, `Failed` | Generate notes |
 
 ## For agents and scripts
 
