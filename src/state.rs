@@ -443,6 +443,8 @@ pub enum Undo {
     Look { look: crate::themes::Look, at: usize, light: bool, dark: bool },
     /// An issue you closed: it's reopened on GitHub and comes back to the list.
     Reopen { repo: String, issue: crate::model::Issue },
+    /// A pull request you closed without merging: it's reopened on GitHub.
+    ReopenPull { repo: String, number: u32 },
 }
 
 /// A form that sends something to GitHub.

@@ -1493,6 +1493,7 @@ impl App {
                 self.reopening.push(issue);
                 self.write(&repo, github::Write::ReopenIssue(number));
             }
+            state::Undo::ReopenPull { repo, number } => self.write(&repo, github::Write::SetPullOpen { number, open: true }),
         }
     }
 
@@ -2375,7 +2376,11 @@ impl App {
                         *t += 1;
                     }
                 }
-                self.notify(format!("{} pull request #{n}", if open { "Reopened" } else { "Closed" }));
+                if open {
+                    self.notify(format!("Reopened pull request #{n}"));
+                } else {
+                    self.notify_undo(format!("Closed pull request #{n}"), state::Undo::ReopenPull { repo: full_name.clone(), number: n });
+                }
             }
             github::Done::Release(r) => self.release_done(&full_name, *r),
             github::Done::Triaged { number, change, applied } => self.apply_triaged(&full_name, number, change, applied),
@@ -5468,6 +5473,21 @@ mod fix66_tests {
         assert!(s.toast.as_ref().is_some_and(|t| t.text.contains("no local copy")), "it doesn't return silently");
         assert!(s.git_job.is_none());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Closing a pull request changes GitHub as closing an issue does: its toast offers Undo,
+    /// which reopens it.
+    #[test]
+    fn a_closed_pull_request_offers_undo() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = app();
+        let p = s.data.pulls.iter().find(|p| p.state == crate::model::PullState::Open).unwrap().clone();
+        s.apply_done(&p.repo, github::Done::PullOpen(p.number, false));
+        let undo = s.toast.as_ref().and_then(|t| t.undo.clone());
+        assert!(matches!(&undo, Some(state::Undo::ReopenPull { number, .. }) if *number == p.number), "{undo:?}");
+        // Reopening it isn't undone in turn.
+        s.apply_done(&p.repo, github::Done::PullOpen(p.number, true));
+        assert!(s.toast.as_ref().is_some_and(|t| t.undo.is_none() && t.text.starts_with("Reopened")));
     }
 
     /// GitHub's answer to a New issue form belongs to that form: a form opened since keeps
