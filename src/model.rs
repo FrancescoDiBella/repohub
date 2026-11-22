@@ -80,6 +80,10 @@ pub struct Pull {
     pub url: String,
     /// Label names and hues.
     pub labels: Vec<(String, f32)>,
+    /// Who it's assigned to (logins).
+    pub assignees: Vec<String>,
+    /// Your review is requested on it (GitHub's `review-requested:` search).
+    pub review_requested: bool,
 }
 
 impl Pull {
@@ -220,6 +224,9 @@ pub struct Data {
     pub issues_total: Option<usize>,
     pub runs_total: usize,
     pub repos_capped: bool,
+    /// How many open pull requests wait for your review, as GitHub counts them (the list keeps
+    /// the first page, flagged with `Pull::review_requested`).
+    pub review_total: Option<usize>,
 }
 
 /// A stable hue for a language name, close to GitHub's colours for the common ones.
@@ -433,27 +440,35 @@ impl Data {
             repo("iot-sensor-gateway", "MQTT to NGSI-LD bridge for low-power environmental sensors.", "Python", 18, 4, 2, 30 * DAY, true, false, "main", &["mqtt", "iot", "fiware"], false),
             repo("university-notes", "Lecture notes in Markdown, compiled to a searchable static site.", "Markdown", 25, 6, 1, 60 * DAY, false, false, "main", &["notes", "mkdocs"], false),
         ];
-        let pull = |number, title: &str, repo: &str, author: &str, state, checks, age_secs: i64, comments| Pull { labels: Vec::new(),
+        let pull = |number, title: &str, repo: &str, author: &str, state, checks, age_secs: i64, comments| Pull { labels: Vec::new(), assignees: Vec::new(), review_requested: false,
             number, title: title.into(), repo: repo.into(), author: author.into(), state, checks: Some(checks), updated_at: now - age_secs, comments,
             url: format!("https://github.com/francescodibella/{repo}/pull/{number}"),
         };
-        let pulls = vec![
+        let mut pulls = vec![
             pull(14, "Add procedural Three.js Blue Bunny model", "francescodibella.github.io", "claude", PullState::Open, Checks::Passing, 2 * HOUR, 3),
             pull(9, "Mixed reality context v0.2: anchors and spatial meshes", "ngsi-ld-xr-contexts", "francescodibella", PullState::Draft, Checks::Running, DAY + 60, 1),
             pull(8, "Fix @vocab for VR entity relationships", "ngsi-ld-xr-contexts", "contributor42", PullState::Open, Checks::Failing, 4 * DAY, 6),
             pull(3, "Repo manager example on the web target", "rune", "francescodibella", PullState::Open, Checks::Passing, 14 * DAY, 0),
             pull(21, "Chapter 4: latency measurements", "xr-digital-twin-thesis", "francescodibella", PullState::Merged, Checks::Passing, 21 * DAY, 12),
         ];
+        // What triage shows: labels, who works on what, and one pull request that waits for your review.
+        pulls[0].labels = vec![("enhancement".into(), 200.0)];
+        pulls[0].assignees = vec!["claude".into(), "francescodibella".into()];
+        pulls[1].assignees = vec!["francescodibella".into()];
+        pulls[2].labels = vec![("bug".into(), 25.0)];
+        pulls[2].review_requested = true;
         let issue = |number, title: &str, repo: &str, label: &str, hue, age_secs: i64| Issue { labels: vec![(label.into(), hue)], assignees: Vec::new(),
             number, title: title.into(), repo: repo.into(), label: Some((label.into(), hue)), created_at: now - age_secs, comments: 0,
             url: format!("https://github.com/francescodibella/{repo}/issues/{number}"),
         };
-        let issues = vec![
+        let mut issues = vec![
             issue(31, "Bunny poncho clips through lowered arms", "francescodibella.github.io", "bug", 25.0, HOUR),
             issue(12, "Document the MR context with examples", "ngsi-ld-xr-contexts", "docs", 240.0, 2 * DAY),
             issue(44, "Measure headset frame pacing over Wi-Fi 6", "xr-digital-twin-thesis", "research", 300.0, 5 * DAY),
             issue(7, "Battery drain on the CO2 sensor node", "iot-sensor-gateway", "bug", 25.0, 7 * DAY),
         ];
+        issues[0].assignees = vec!["francescodibella".into()];
+        issues[2].assignees = vec!["francescodibella".into(), "hubot".into()];
         let run = |id, workflow: &str, repo: &str, branch: &str, checks, duration: &str, age_secs: i64, pull_numbers: Vec<u32>| Run {
             id, workflow: workflow.into(), repo: repo.into(), branch: branch.into(), checks, duration: duration.into(), updated_at: now - age_secs,
             url: format!("https://github.com/francescodibella/{repo}/actions/runs/{id}"),
@@ -484,6 +499,7 @@ impl Data {
             issues_total: None,
             runs_total: 5,
             repos_capped: false,
+            review_total: Some(1),
         }
     }
 }
@@ -606,7 +622,7 @@ mod tests {
         assert_eq!(issue.age_ago(t), "just now");
         assert_eq!(issue.age_ago(t + 5 * 60), "5 minutes ago");
 
-        let pull = Pull { labels: Vec::new(),
+        let pull = Pull { labels: Vec::new(), assignees: Vec::new(), review_requested: false,
             number: 2, title: "Fix".into(), repo: "a/b".into(), author: "u".into(),
             state: PullState::Open, checks: None,
             updated_at: t, comments: 0, url: String::new(),

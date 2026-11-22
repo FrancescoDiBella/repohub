@@ -126,13 +126,15 @@ pub fn overview(s: &App, k: &Kit) -> El {
             |p, pr| p.child(rule(k)).child(pull_row(k, pr, s.now, true)),
         )
     };
+    // What waits for your review, above the open pull requests, when anything does.
+    let waiting = (!empty_loading).then(|| crate::triage_page::waiting_panel(s, k)).flatten();
     col().w_full().gap(16.0)
         .child(head)
         .child(metrics)
         .child(activity)
         .child(row().w_full().gap(16.0).flex_wrap()
             .child(col().grow(1.0).min_w(if s.compact { 260.0 } else { 320.0 }).child(recent))
-            .child(col().grow(1.0).min_w(if s.compact { 260.0 } else { 320.0 }).child(review)))
+            .child(col().grow(1.0).min_w(if s.compact { 260.0 } else { 320.0 }).gap(16.0).children(waiting).child(review)))
 }
 
 fn see_all(k: &Kit, label: &str, page: Page) -> El {

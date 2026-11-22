@@ -53,6 +53,8 @@ mod runs_page;
 mod terminal;
 mod thread;
 mod thread_page;
+mod triage;
+mod triage_page;
 mod terminal_page;
 mod themes;
 mod themes_page;
@@ -211,6 +213,13 @@ pub struct App {
     issue_filter: filters::ListFilter,
     /// What the Actions page is narrowed to.
     pub(crate) runs_filter: runs_page::RunsFilter,
+    /// The repositories' labels, assignable people and milestones, kept once loaded (triage).
+    choices: triage::Cache,
+    /// The labels and assignees picked in the New issue form.
+    issue_picks: triage::Picks,
+    /// The list filters last saved in the preferences (`filters::Saved`), so they're written only
+    /// when they change.
+    saved_filters: Option<String>,
     /// The issue or pull request whose conversation is on screen, in place of the page.
     thread: Option<thread::Open>,
     /// Counts conversation loads (see [`thread::Open::epoch`]).
@@ -415,6 +424,7 @@ impl App {
             prefs::set("place", self.place().to_json());
         }
         self.save_layout();
+        self.save_filters();
     }
 
     /// The sidebar and the list's sort and owner, saved when they changed.
@@ -544,7 +554,7 @@ impl App {
         self.confirm_merge = None;
         self.open_run = None;
         self.thread_epoch = self.thread_epoch.wrapping_add(1);
-        self.thread = Some(thread::Open { repo: repo.to_owned(), number, pull, load: Load::Loading, reply: TextEdit::new(""), sending: false, epoch: self.thread_epoch });
+        self.thread = Some(thread::Open { repo: repo.to_owned(), number, pull, load: Load::Loading, reply: TextEdit::new(""), sending: false, epoch: self.thread_epoch, edit: Default::default() });
         self.load_thread();
     }
 
@@ -566,7 +576,9 @@ impl App {
                 self.data.issues.iter().find(|x| x.number == number && same_repo(&x.repo, &repo))
                     .map(|x| (x.title.clone(), self.data.profile.login.clone(), thread::Standing::Open))
             }.unwrap_or_else(|| (format!("#{number}"), self.data.profile.login.clone(), thread::Standing::Open));
-            t.load = Load::Ready(thread::sample(&title, &author, pull, standing, self.now));
+            let mut sample = thread::sample(&title, &author, pull, standing, self.now);
+            triage::sample_thread(&mut sample, &self.data, &repo, number, pull);
+            t.load = Load::Ready(sample);
             return;
         }
         let Some(h) = self.handle.clone() else {
@@ -846,6 +858,7 @@ impl App {
             self.refresh();
         }
         self.save_layout();
+        self.save_filters();
         // A new Latest build is looked for every 6 hours, unless one is already waiting.
         if self.update.available().is_none() && self.update_checked.is_some_and(|c| self.clock - c >= 6.0 * 3600.0) {
             self.check_update(false);
@@ -1052,6 +1065,7 @@ impl App {
                 self.pull_filter.mine = true;
                 self.pull_filter.failing = true;
             }
+            tray::Action::ReviewRequested => self.show_review_requested(),
             tray::Action::OpenRepo(full) => if let Some(i) = repo(self, &full) { self.open(i) },
             tray::Action::NewIssue(full) => if let Some(i) = repo(self, &full) {
                 if !matches!(&self.page, Page::Repo(f) if f.eq_ignore_ascii_case(&full)) {
@@ -1112,6 +1126,8 @@ impl App {
         // Another account has other repositories and labels.
         self.pull_filter.clear();
         self.issue_filter.clear();
+        self.choices.clear();
+        self.issue_picks = triage::Picks::default();
         self.runs_filter.clear();
         self.data = Data::default();
         self.data_gen = self.data_gen.wrapping_add(1);
@@ -1972,6 +1988,7 @@ impl App {
         } else {
             self.branches.get(&full).and_then(Load::ready).and_then(|b| b.iter().find(|n| **n != default).cloned()).unwrap_or(shown.clone())
         };
+        self.issue_picks = triage::Picks::for_repo(&full);
         self.form = Some(actions::Form {
             repo: full,
             kind,
@@ -2000,6 +2017,7 @@ impl App {
         }
         let Some(f) = self.form.as_mut() else { return };
         let Ok(w) = f.write() else { return };
+        let w = triage::with_picks(w, &self.issue_picks);
         if !f.submit.start() {
             return;
         }
@@ -2043,9 +2061,15 @@ impl App {
             github::Write::RerunRun { run_id, .. } => Some(*run_id),
             _ => None,
         };
-        let key = match rerun_id {
-            Some(run_id) => runs_page::run_busy_key(&full, run_id),
-            None => actions::busy_key(repo, number),
+        // A triage change: what it's about, and whether it takes several requests.
+        let triage = match &w {
+            github::Write::Triage { change, .. } => Some((change.part(), change.requests(&full, number).len() > 1)),
+            _ => None,
+        };
+        let key = match (rerun_id, triage) {
+            (Some(run_id), _) => runs_page::run_busy_key(&full, run_id),
+            (None, Some(_)) => triage::busy_key(repo, number),
+            (None, None) => actions::busy_key(repo, number),
         };
         if !self.busy.insert(key.clone()) {
             return;
@@ -2062,7 +2086,11 @@ impl App {
             s.busy.remove(&key);
             // What was typed stays in the box when sending fails.
             if let Some(t) = s.thread.as_mut().filter(|t| t.is(&full_cb, number)) {
-                t.sending = false;
+                if triage.is_some() {
+                    t.edit.saving = None;
+                } else {
+                    t.sending = false;
+                }
             }
             if s.pull_diff_of.as_ref().is_some_and(|(f, n)| *n == number && same_repo(f, &full_cb))
                 && let Some(d) = s.pull_review.as_mut().and_then(|r| r.draft.as_mut())
@@ -2071,6 +2099,8 @@ impl App {
             }
             match r {
                 Ok(done) => s.apply_done(&full_cb, done),
+                // A refused triage change is said where it was made, once.
+                Err(e) if triage.is_some_and(|(part, partial)| s.triage_failed(&full_cb, number, part, partial, &e)) => {}
                 Err(e) => {
                     if let Some(run_id) = rerun_id
                         && let Some(o) = s.open_run.as_mut().filter(|o| o.run_id == run_id && same_repo(&o.repo, &full_cb))
@@ -2113,7 +2143,8 @@ impl App {
         match done {
             github::Done::Issue(c) => {
                 let title = self.form_title.take().unwrap_or_default();
-                self.data.issues.insert(0, model::Issue { labels: Vec::new(), assignees: Vec::new(), number: c.number, title, repo: full_name.clone(), label: None, created_at: self.now, comments: 0, url: c.url });
+                let (labels, assignees) = self.picked_for_new_issue(&full_name);
+                self.data.issues.insert(0, model::Issue { label: labels.first().cloned(), labels, assignees, number: c.number, title, repo: full_name.clone(), created_at: self.now, comments: 0, url: c.url });
                 if let Some(r) = self.data.repos.iter_mut().find(|r| r.full_name.eq_ignore_ascii_case(&full_name)) {
                     r.issues += 1;
                 }
@@ -2136,7 +2167,7 @@ impl App {
             github::Done::Pull(c) => {
                 let (title, draft) = self.pull_meta.take().unwrap_or_default();
                 let author = self.data.profile.login.clone();
-                self.data.pulls.insert(0, model::Pull { labels: Vec::new(),
+                self.data.pulls.insert(0, model::Pull { labels: Vec::new(), assignees: Vec::new(), review_requested: false,
                     number: c.number, title, repo: full_name.clone(), author,
                     state: if draft { PullState::Draft } else { PullState::Open },
                     checks: None, updated_at: self.now, comments: 0, url: c.url,
@@ -2238,6 +2269,7 @@ impl App {
                 }
                 self.notify(format!("{} pull request #{n}", if open { "Reopened" } else { "Closed" }));
             }
+            github::Done::Triaged { number, change, applied } => self.apply_triaged(&full_name, number, change, applied),
             github::Done::Reran { run_id, failed_only } => {
                 for r in self.data.runs.iter_mut().filter(|r| r.id == run_id && same_repo(&r.repo, &full_name)) {
                     r.checks = model::Checks::Running;
@@ -3099,6 +3131,9 @@ fn init() -> App {
         pull_filter: filters::ListFilter::default(),
         issue_filter: filters::ListFilter::default(),
         runs_filter: runs_page::RunsFilter::default(),
+        choices: triage::Cache::default(),
+        issue_picks: triage::Picks::default(),
+        saved_filters: None,
         thread: None,
         thread_epoch: 0,
         open_run: None,
@@ -3214,6 +3249,10 @@ fn init() -> App {
             s.open_thread(&repo, number, false);
         }
     }
+    // `-- picker labels` (assignees, milestone, reviewers) opens that picker in the conversation
+    // (on a repository's page without one: the New issue form's), `-- edit title` (or `body`) the
+    // title's or the description's editor (headless stills).
+    s.triage_still(arg("picker"), arg("edit"));
     // `-- section appearance` picks the Settings page's section.
     if let Some(sec) = arg("section")
         && let Some(n) = state::SettingsSection::LABELS.iter().position(|l| l.eq_ignore_ascii_case(&sec))
@@ -3249,6 +3288,10 @@ fn init() -> App {
         s.sort = l.sort;
         s.owner = l.owner.clone();
         s.saved_layout = Some(l);
+    }
+    // The list filters of last time (an account's own: the sample data starts with none).
+    if !s.data.sample {
+        s.restore_filters();
     }
     // The sample data has no places of its own to go back to.
     if arg("page").is_none() && !s.data.sample {
@@ -4104,7 +4147,7 @@ pub fn start() {
     if tray::keeps_running() {
         app = app.keep_running().on_close(on_close);
     }
-    let app = app.on_quit(|s: &mut App, _| s.save_layout());
+    let app = app.on_quit(|s: &mut App, _| { s.save_layout(); s.save_filters(); });
     let handle = app.handle();
     let h2 = handle.clone();
     handle.update(move |s: &mut App, _| {
@@ -5248,7 +5291,7 @@ mod fix60_tests {
         // 40 mixed PRs (12 open + 28 merged) shows "12+" on Overview and Sidebar; 39 shows "12".
         rt.update(|s, _| {
             s.page = crate::Page::Overview;
-            s.data.pulls = (0..crate::model::SEARCH_CAP).map(|i| crate::model::Pull { labels: Vec::new(),
+            s.data.pulls = (0..crate::model::SEARCH_CAP).map(|i| crate::model::Pull { labels: Vec::new(), assignees: Vec::new(), review_requested: false,
                 number: i as u32 + 1,
                 title: format!("PR #{i}"),
                 repo: "a/b".into(),
@@ -5402,7 +5445,7 @@ mod fix60_tests {
         s.data.repos[0].issues = 5;
 
         // Add a pull request and an issue belonging to external repo other-org/app
-        s.data.pulls.insert(0, crate::model::Pull { labels: Vec::new(),
+        s.data.pulls.insert(0, crate::model::Pull { labels: Vec::new(), assignees: Vec::new(), review_requested: false,
             number: 42,
             title: "External PR".into(),
             repo: "other-org/app".into(),
@@ -5683,7 +5726,7 @@ mod fix60_tests {
         // Generate enough PRs so the list extends well beyond a 720px viewport
         let mut prs = Vec::new();
         for i in 1..=20 {
-            prs.push(crate::model::Pull { labels: Vec::new(),
+            prs.push(crate::model::Pull { labels: Vec::new(), assignees: Vec::new(), review_requested: false,
                 number: i,
                 title: format!("Pull request #{i} with long description to take space"),
                 repo: "francescodibella.github.io".into(),
@@ -7073,7 +7116,7 @@ mod fix58_tests {
         // When there are 0 open PRs, but closed_pulls_total has 200, prs_capped() must be false!
         let data = Data {
             pulls: vec![
-                model::Pull { labels: Vec::new(),
+                model::Pull { labels: Vec::new(), assignees: Vec::new(), review_requested: false,
                     number: 1,
                     title: "Closed PR".into(),
                     repo: "alice/repo1".into(),
@@ -8023,6 +8066,8 @@ mod fix67_tests {
             updated_at: s.now,
             comments: 0,
             labels: Vec::new(),
+            assignees: Vec::new(),
+            review_requested: false,
             url: "https://github.com/alice/app/pull/12".into(),
         }];
         s.open_run = Some(crate::runs_page::OpenRun {
@@ -8119,6 +8164,8 @@ mod perf61_tests {
                 comments: (i % 8) as u32,
                 url: format!("{}/pull/{}", r.url, 100 + i),
                 labels: vec![("performance".into(), 40.0)],
+                assignees: Vec::new(),
+                review_requested: false,
             });
             d.issues.push(Issue {
                 number: (200 + i) as u32,

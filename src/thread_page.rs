@@ -45,8 +45,9 @@ fn checks(k: &Kit, list: &[Check]) -> El {
     p
 }
 
-/// One description, comment or review.
-fn entry(k: &Kit, e: &Entry, n: usize, now: i64) -> El {
+/// One description, comment or review; `tool` goes at the end of its head (Edit on the
+/// description).
+fn entry(k: &Kit, e: &Entry, n: usize, now: i64, tool: Option<El>) -> El {
     let mut head = row().w_full().px(16.0).py(10.0).gap(10.0).center_y().flex_wrap()
         .child(ui::user(k, &e.author, 22.0))
         .child(text(e.author.clone()).font(k.ty.small_medium).color(k.c.text_strong));
@@ -60,7 +61,8 @@ fn entry(k: &Kit, e: &Entry, n: usize, now: i64) -> El {
         head = head.child(ui::pill(k, v.label(), ink));
     }
     head = head.child(el().grow(1.0))
-        .child(text(model::fmt_ago(e.at, now)).font(k.ty.text_small).color(k.c.text_faint));
+        .child(text(model::fmt_ago(e.at, now)).font(k.ty.text_small).color(k.c.text_faint))
+        .children(tool);
     let body = if e.body.trim().is_empty() {
         text(if n == 0 { "No description." } else { "No comment." }).font(k.ty.small).color(k.c.text_faint)
     } else {
@@ -163,34 +165,49 @@ pub fn view(s: &App, k: &Kit, o: &Open) -> El {
     if let Some((head, base)) = &t.branches {
         meta = meta.child(ui::stat(k, &icons::BRANCH, format!("{head} → {base}")));
     }
-    for (name, hue) in &t.labels {
-        meta = meta.child(ui::label_chip(k, name, *hue));
-    }
+    // The labels are in the details block, with the assignees, milestone and reviewers.
     page = page.child(top)
         .child(col().w_full().gap(8.0)
-            .child(text(t.title.clone()).font(ui::H2).color(k.c.text_strong).wrap())
+            .child(crate::triage_page::title(s, k, o, t))
             .child(meta));
+    let mut body = col().gap(16.0);
     if let Some(list) = &t.checks {
-        page = page.child(checks(k, list));
+        body = body.child(checks(k, list));
     }
     // A pull request's changes: the diff panel the lists use, opened here.
+    let mut diff_open = false;
     if o.pull {
         let active = s.pull_diff_of.as_ref().is_some_and(|(full, n)| *n == o.number && model::same_repo(full, &o.repo));
+        diff_open = active;
         let (repo, number) = (o.repo.clone(), o.number);
         let files = Button::new(if active { "Hide the changes" } else { "See the changes" }).icon(&icons::FILE)
             .variant(if active { ButtonVariant::Contrast } else { ButtonVariant::Ghost }).control_size(ControlSize::Small)
             .on_press(move |s: &mut App| if active { s.close_pull_diff() } else { s.open_pull_diff(repo.clone(), number) })
             .build(k).key("thread-files");
-        page = page.child(row().w_full().child(files));
+        body = body.child(row().w_full().child(files));
         if active {
-            page = page.children(crate::changes_page::pull_panel_for(s, k, None));
+            body = body.children(crate::changes_page::pull_panel_for(s, k, None));
         }
     }
     for (n, e) in t.entries.iter().enumerate() {
-        page = page.child(entry(k, e, n, s.now));
+        body = body.child(match (n, &o.edit.body) {
+            (0, Some(editing)) => crate::triage_page::body_editor(s, k, o, e, editing),
+            (0, None) => entry(k, e, n, s.now, crate::triage_page::edit_body_button(s, k, o, t)),
+            _ => entry(k, e, n, s.now, None),
+        });
     }
     if t.more {
-        page = page.child(text("This conversation is longer than what's shown here: the rest is on GitHub.").font(k.ty.small).color(k.c.text_muted).wrap().key("thread-more"));
+        body = body.child(text("This conversation is longer than what's shown here: the rest is on GitHub.").font(k.ty.small).color(k.c.text_muted).wrap().key("thread-more"));
     }
-    page.child(reply(s, k, o, t))
+    body = body.child(reply(s, k, o, t));
+    // The details beside the conversation on a wide page (not while the diff wants the width),
+    // above it on a phone or a narrow window.
+    let details = crate::triage_page::details(s, k, o, t);
+    if crate::triage_page::side(s) && !diff_open {
+        page.child(row().w_full().gap(16.0).items_start()
+            .child(body.grow(1.0).shrink().min_w(0.0))
+            .child(details.w(crate::triage_page::SIDE_W)))
+    } else {
+        page.child(details).child(body.w_full())
+    }
 }

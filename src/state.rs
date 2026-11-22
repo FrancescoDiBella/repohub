@@ -19,6 +19,7 @@
 //! | [`Submit`] | Editing → Sending → (closed) / Failed | a form that writes to GitHub |
 //! | [`Compose`] | Issue / Branch / Pull | which form is open |
 //! | [`BranchSlot`] | View / From / Head / Base | what the branch picker fills in |
+//! | [`Facet`] | Labels / Assignees / Milestone / Reviewers | what the open triage picker edits |
 
 /// Where the data on screen comes from.
 ///
@@ -459,6 +460,44 @@ pub enum BranchSlot {
     /// A pull request's branch, and the branch it goes into.
     Head,
     Base,
+}
+
+/// What a triage picker edits on an issue or a pull request (see `triage`). One picker is open at
+/// a time: `None` (closed) → `Some(facet)` → Apply / Cancel → `None`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Facet {
+    Labels,
+    Assignees,
+    /// One choice, or none.
+    Milestone,
+    /// Pull requests only: who is asked to review.
+    Reviewers,
+}
+
+impl Facet {
+    /// The section's title, as the details block shows it.
+    pub fn title(self) -> &'static str {
+        match self {
+            Facet::Labels => "Labels",
+            Facet::Assignees => "Assignees",
+            Facet::Milestone => "Milestone",
+            Facet::Reviewers => "Reviewers",
+        }
+    }
+
+    /// A word for keys (`triage-edit-labels`) and the start-up argument (`-- picker labels`).
+    pub fn key(self) -> &'static str {
+        match self {
+            Facet::Labels => "labels",
+            Facet::Assignees => "assignees",
+            Facet::Milestone => "milestone",
+            Facet::Reviewers => "reviewers",
+        }
+    }
+
+    pub fn parse(word: &str) -> Option<Facet> {
+        [Facet::Labels, Facet::Assignees, Facet::Milestone, Facet::Reviewers].into_iter().find(|f| f.key().eq_ignore_ascii_case(word.trim()))
+    }
 }
 
 /// Which organizations' repositories to load (`REPOHUB_ORGS`).

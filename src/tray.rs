@@ -37,6 +37,8 @@ pub enum Action {
     Open,
     Go(Page),
     MyFailingPulls,
+    /// The pull requests that wait for your review.
+    ReviewRequested,
     OpenRepo(String),
     NewIssue(String),
     Refresh,
@@ -51,6 +53,7 @@ pub fn parse(id: &str) -> Option<Action> {
         "open" => Action::Open,
         "go" => match arg {
             "pulls:mine-failing" => Action::MyFailingPulls,
+            "pulls:review" => Action::ReviewRequested,
             "pulls" => Action::Go(Page::Pulls),
             "issues" => Action::Go(Page::Issues),
             "actions" => Action::Go(Page::Actions),
@@ -89,6 +92,14 @@ pub fn my_failing_pulls(d: &crate::model::Data) -> usize {
                 || d.runs.iter().any(|r| r.checks == Checks::Failing && same_repo(&r.repo, &p.repo) && r.pull_numbers.contains(&p.number))
         })
         .count()
+}
+
+/// How many open pull requests wait for your review, and whether GitHub counts more than were
+/// read.
+pub fn waiting_for_review(d: &crate::model::Data) -> (usize, bool) {
+    use crate::model::PullState;
+    let n = d.pulls.iter().filter(|p| p.review_requested && matches!(p.state, PullState::Open | PullState::Draft)).count();
+    (n, d.review_total.is_some_and(|t| t > n))
 }
 
 /// The menu for the app's current state.
@@ -142,6 +153,15 @@ pub fn menu(s: &App) -> Vec<Entry> {
             format!("{my_failing} of your pull requests have failing checks")
         };
         m.push(Entry::item("go:pulls:mine-failing", label));
+    }
+    let (waiting, more) = waiting_for_review(d);
+    if waiting > 0 {
+        let label = if waiting == 1 && !more {
+            "1 pull request waits for your review".to_owned()
+        } else {
+            format!("{} pull requests wait for your review", crate::model::capped_if(waiting, more))
+        };
+        m.push(Entry::item("go:pulls:review", label));
     }
     m.extend([
         Entry::item("go:issues", issues_label),
@@ -363,7 +383,7 @@ mod tests {
         let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut s = crate::init();
         s.data = crate::model::Data::sample_at(1_700_000_000);
-        s.data.pulls = (0..crate::model::SEARCH_CAP).map(|i| crate::model::Pull { labels: Vec::new(),
+        s.data.pulls = (0..crate::model::SEARCH_CAP).map(|i| crate::model::Pull { labels: Vec::new(), assignees: Vec::new(), review_requested: false,
             number: i as u32 + 1,
             title: format!("PR #{i}"),
             repo: "a/b".into(),
@@ -401,5 +421,32 @@ mod tests {
         );
         assert!(tooltip(&s).contains("1 failing check on your PRs"), "{}", tooltip(&s));
         assert_eq!(parse("go:pulls:mine-failing"), Some(Action::MyFailingPulls));
+    }
+
+    #[test]
+    fn the_review_line_follows_the_data() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = crate::init();
+        s.data = crate::model::Data::sample_at(1_700_000_000);
+        // One sample pull request waits for your review.
+        assert!(menu(&s).iter().any(|e| e.id == "go:pulls:review" && e.label == "1 pull request waits for your review"), "{:#?}", menu(&s));
+        s.data.pulls[0].review_requested = true;
+        s.data.review_total = Some(2);
+        assert!(menu(&s).iter().any(|e| e.id == "go:pulls:review" && e.label == "2 pull requests wait for your review"));
+        // GitHub counts more than the page read.
+        s.data.review_total = Some(45);
+        assert!(menu(&s).iter().any(|e| e.label == "2+ pull requests wait for your review"));
+        // A merged one doesn't wait; at zero the line goes.
+        for p in s.data.pulls.iter_mut() {
+            p.review_requested = false;
+        }
+        s.data.review_total = Some(0);
+        assert!(!menu(&s).iter().any(|e| e.id == "go:pulls:review"), "hidden at zero");
+        assert_eq!(parse("go:pulls:review"), Some(Action::ReviewRequested));
+        // The line opens the list narrowed to them.
+        s.data.pulls[2].review_requested = true;
+        s.tray_action("go:pulls:review");
+        assert_eq!(s.page, Page::Pulls);
+        assert!(s.pull_filter.review && !s.pull_filter.mine && s.pr_filter == crate::model::PullState::Open);
     }
 }
