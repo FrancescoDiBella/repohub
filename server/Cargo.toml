@@ -9,6 +9,10 @@ description = "Serves the RepoHub web build and proxies the GitHub API, keeping 
 tiny_http = "0.12"
 ureq = { version = "2.12", default-features = false, features = ["tls", "native-certs", "proxy-from-env"] }
 
+# Optimized for size as one unit: the server only forwards requests and sends files, and its
+# binary is a third smaller (a layer of the Docker image).
 [profile.release]
 strip = true
-lto = "thin"
+opt-level = "s"
+lto = "fat"
+codegen-units = 1

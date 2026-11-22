@@ -6,14 +6,15 @@ VERSION="${1:?usage: packaging/macos/bundle.sh <version>}"
 export MACOSX_DEPLOYMENT_TARGET=11.0
 
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
-cargo build --release --bin repohub --target aarch64-apple-darwin
-cargo build --release --bin repohub --target x86_64-apple-darwin
+# The `dist` profile (Cargo.toml) is the release profile tuned for size.
+cargo build --profile dist --bin repohub --target aarch64-apple-darwin
+cargo build --profile dist --bin repohub --target x86_64-apple-darwin
 
 APP=dist/RepoHub.app
 rm -rf dist
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 lipo -create -output "$APP/Contents/MacOS/RepoHub" \
-    target/aarch64-apple-darwin/release/repohub target/x86_64-apple-darwin/release/repohub
+    target/aarch64-apple-darwin/dist/repohub target/x86_64-apple-darwin/dist/repohub
 sed "s/@VERSION@/$VERSION/g" packaging/macos/Info.plist > "$APP/Contents/Info.plist"
 
 # The icon, in every size macOS asks for.
