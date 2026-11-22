@@ -51,6 +51,7 @@ mod plugins_page;
 mod prefs;
 mod state;
 mod review;
+mod runs_page;
 mod terminal;
 mod thread;
 mod thread_page;
@@ -210,12 +211,18 @@ pub struct App {
     /// What the Pull requests and the Issues pages are narrowed to.
     pull_filter: filters::ListFilter,
     issue_filter: filters::ListFilter,
+    /// What the Actions page is narrowed to.
+    pub(crate) runs_filter: runs_page::RunsFilter,
     /// The Commits section: the branch's history, the commit open and the comparison.
     commits: commits::Commits,
     /// The issue or pull request whose conversation is on screen, in place of the page.
     thread: Option<thread::Open>,
     /// Counts conversation loads (see [`thread::Open::epoch`]).
     thread_epoch: u64,
+    /// The workflow run whose jobs and log are on screen, in place of the page.
+    pub(crate) open_run: Option<runs_page::OpenRun>,
+    /// Counts workflow run detail loads (see [`runs_page::OpenRun::epoch`]).
+    run_epoch: u64,
     /// Rows with a write running (`owner/repo#12`), so their buttons wait.
     busy: std::collections::HashSet<String>,
     /// The title (and draft flag) of the item a form is creating, for showing it once created.
@@ -247,6 +254,20 @@ pub struct App {
     /// Rows and columns the terminal area fits.
     term_grid: (u16, u16),
     clone_path: TextEdit,
+    /// Cached local clone path per repository (`full_name`), avoiding filesystem/git probes in `view()`.
+    clone_dirs: std::cell::RefCell<HashMap<String, Option<std::path::PathBuf>>>,
+    /// Cached lookalike folder per repository (`full_name`), avoiding `git remote -v` probes in `view()`.
+    lookalike_dirs: std::cell::RefCell<HashMap<String, Option<std::path::PathBuf>>>,
+    default_clone_parent: std::path::PathBuf,
+    plugins_folder: std::path::PathBuf,
+    /// How many cards `Page::Repos` renders before **Show more**.
+    repos_limit: usize,
+    /// Counts changes to `data`. The cached repository lists, the pinned set and the palette's
+    /// entries are rebuilt when it moves, so **every** change to `data` in place must go through
+    /// [`App::data_changed`]; replacing `data` bumps it where it's replaced.
+    data_gen: u64,
+    /// Cached filtered/sorted repository indices, pinned indices, and organization counts.
+    repo_cache: std::cell::RefCell<RepoCache>,
     // The account form in Settings (desktop).
     acct_user: TextEdit,
     acct_token: TextEdit,
@@ -289,6 +310,18 @@ pub struct App {
     #[cfg(not(target_arch = "wasm32"))]
     tray: Option<tray::Native>,
     tray_menu: Vec<tray::Entry>,
+}
+
+#[derive(Default)]
+struct RepoCache {
+    orgs_stamp: Option<u64>,
+    orgs: Vec<(String, usize)>,
+    mine_count: usize,
+    pins_stamp: Option<u64>,
+    pinned: Vec<usize>,
+    pinned_set: std::collections::HashSet<usize>,
+    shown_stamp: Option<u64>,
+    shown: Vec<usize>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -356,6 +389,7 @@ impl App {
         }
         self.page = p;
         self.thread = None;
+        self.open_run = None;
         if self.page == Page::Notifications {
             self.load_inbox();
         }
@@ -435,6 +469,7 @@ impl App {
         self.picker = None;
         self.confirm_merge = None;
         self.thread = None;
+        self.open_run = None;
         self.close_pull_diff();
         self.commits.leave();
     }
@@ -512,6 +547,7 @@ impl App {
     pub(crate) fn open_thread(&mut self, repo: &str, number: u32, pull: bool) {
         self.close_pull_diff();
         self.confirm_merge = None;
+        self.open_run = None;
         self.thread_epoch = self.thread_epoch.wrapping_add(1);
         self.thread = Some(thread::Open { repo: repo.to_owned(), number, pull, load: Load::Loading, reply: TextEdit::new(""), sending: false, epoch: self.thread_epoch });
         self.load_thread();
@@ -590,6 +626,161 @@ impl App {
         }
     }
 
+    /// Opens workflow run `r` in the in-app detail view (jobs, steps, and job logs).
+    pub(crate) fn open_run(&mut self, r: &model::Run) {
+        self.close_pull_diff();
+        self.confirm_merge = None;
+        self.thread = None;
+        self.run_epoch = self.run_epoch.wrapping_add(1);
+        let repo = runs_page::full_repo_of(self, &r.repo);
+        self.open_run = Some(runs_page::OpenRun {
+            repo,
+            run_id: r.id,
+            workflow: r.workflow.clone(),
+            branch: r.branch.clone(),
+            checks: r.checks,
+            duration: r.duration.clone(),
+            updated_at: r.updated_at,
+            url: r.url.clone(),
+            epoch: self.run_epoch,
+            jobs: Load::Loading,
+            selected_job: None,
+            logs: HashMap::new(),
+            write_error: None,
+        });
+        self.load_run_jobs();
+    }
+
+    /// Reloads jobs and cached logs for the open workflow run.
+    pub(crate) fn reload_open_run(&mut self) {
+        if let Some(o) = self.open_run.as_mut() {
+            o.logs.clear();
+            o.write_error = None;
+        }
+        self.load_run_jobs();
+    }
+
+    /// Reads the jobs and steps of the open workflow run from GitHub (or sample data).
+    pub(crate) fn load_run_jobs(&mut self) {
+        let Some(o) = self.open_run.as_mut() else { return };
+        let (repo, run_id, epoch) = (o.repo.clone(), o.run_id, o.epoch);
+        if self.data.sample {
+            let run = o.as_run();
+            let jobs = model::sample_run_jobs(&run);
+            let selected = jobs.iter().find(|j| j.checks == model::Checks::Failing)
+                .or_else(|| jobs.first())
+                .map(|j| j.id);
+            o.selected_job = selected;
+            o.logs.clear();
+            if let Some(jid) = selected
+                && let Some(job) = jobs.iter().find(|j| j.id == jid)
+            {
+                o.logs.insert(jid, Load::Ready(model::sample_job_log(&run, job)));
+            }
+            o.jobs = Load::Ready(jobs);
+            return;
+        }
+        let Some(h) = self.handle.clone() else {
+            o.jobs = Load::Failed("The app isn't ready to load this yet: try again in a moment.".into());
+            return;
+        };
+        if !matches!(o.jobs, Load::Ready(_)) {
+            o.jobs = Load::Loading;
+        }
+        let cfg = self.cfg.clone();
+        let account = self.load_gen;
+        net::spawn(h, move || async move { github::load_run_jobs(&cfg, &repo, run_id).await }, move |s: &mut App, r| {
+            if s.load_gen != account {
+                return;
+            }
+            let Some(o) = s.open_run.as_mut().filter(|o| o.epoch == epoch) else { return };
+            match r {
+                Ok(jobs) => {
+                    let keep = o.selected_job.filter(|id| jobs.iter().any(|j| j.id == *id));
+                    let pick = keep
+                        .or_else(|| jobs.iter().find(|j| j.checks == model::Checks::Failing).map(|j| j.id))
+                        .or_else(|| jobs.first().map(|j| j.id));
+                    o.selected_job = pick;
+                    o.jobs = Load::Ready(jobs);
+                    if let Some(jid) = pick {
+                        s.load_job_log(jid);
+                    }
+                }
+                Err(e) if matches!(o.jobs, Load::Ready(_)) => {
+                    s.notify_problem(e);
+                }
+                Err(e) => {
+                    o.jobs = Load::Failed(e);
+                }
+            }
+        });
+    }
+
+    /// Selects job `job_id` in the open workflow run and loads its log if not yet fetched.
+    pub(crate) fn select_run_job(&mut self, job_id: u64) {
+        let need_load = match self.open_run.as_mut() {
+            Some(o) => {
+                o.selected_job = Some(job_id);
+                !matches!(o.logs.get(&job_id), Some(Load::Ready(_) | Load::Loading))
+            }
+            None => false,
+        };
+        if need_load {
+            self.load_job_log(job_id);
+        }
+    }
+
+    /// Fetches the plain-text log tail (last 200 lines) for `job_id` in the open workflow run.
+    pub(crate) fn load_job_log(&mut self, job_id: u64) {
+        let Some(o) = self.open_run.as_mut() else { return };
+        if self.data.sample {
+            let run = o.as_run();
+            if let Some(job) = o.jobs.ready().and_then(|jobs| jobs.iter().find(|j| j.id == job_id)) {
+                let log = model::sample_job_log(&run, job);
+                o.logs.insert(job_id, Load::Ready(log));
+            }
+            return;
+        }
+        let Some(h) = self.handle.clone() else {
+            o.logs.insert(job_id, Load::Failed("The app isn't ready to load this yet: try again in a moment.".into()));
+            return;
+        };
+        let (repo, epoch) = (o.repo.clone(), o.epoch);
+        if !matches!(o.logs.get(&job_id), Some(Load::Ready(_))) {
+            o.logs.insert(job_id, Load::Loading);
+        }
+        let cfg = self.cfg.clone();
+        let account = self.load_gen;
+        net::spawn(h, move || async move { github::load_job_log(&cfg, &repo, job_id).await }, move |s: &mut App, r| {
+            if s.load_gen != account {
+                return;
+            }
+            let Some(o) = s.open_run.as_mut().filter(|o| o.epoch == epoch) else { return };
+            match r {
+                Ok(log) => {
+                    o.logs.insert(job_id, Load::Ready(log));
+                }
+                Err(e) if matches!(o.logs.get(&job_id), Some(Load::Ready(_))) => {
+                    s.notify_problem(e);
+                }
+                Err(e) => {
+                    o.logs.insert(job_id, Load::Failed(e));
+                }
+            }
+        });
+    }
+
+    /// Triggers a workflow re-run (`failed_only` = failed jobs only, otherwise the whole workflow).
+    pub(crate) fn rerun_open_run(&mut self, failed_only: bool) {
+        let Some((repo, run_id)) = self.open_run.as_mut().map(|o| {
+            o.write_error = None;
+            (o.repo.clone(), o.run_id)
+        }) else {
+            return;
+        };
+        self.write(&repo, github::Write::RerunRun { run_id, failed_only });
+    }
+
     /// Switches the repository page of repository `i` to `tab`.
     /// The sections a repository's page shows, in order: Claude only while it's on.
     fn tabs(&self) -> Vec<RepoTab> {
@@ -602,6 +793,7 @@ impl App {
 
     fn set_tab(&mut self, i: usize, tab: RepoTab) {
         self.plugin_tab = None;
+        self.recheck_missing_clone(i);
         let tab = if self.tabs().contains(&tab) { tab } else { RepoTab::Code };
         if self.tab != tab {
             state::trace("tab", &self.tab, &tab);
@@ -851,6 +1043,21 @@ impl App {
         match action {
             tray::Action::Open => {}
             tray::Action::Go(p) => self.go(p),
+            tray::Action::MyFailingPulls => {
+                let me = self.data.profile.login.trim();
+                let is_failing = |p: &model::Pull| {
+                    p.checks == Some(model::Checks::Failing)
+                        || self.data.runs.iter().any(|r| r.checks == model::Checks::Failing && same_repo(&r.repo, &p.repo) && r.pull_numbers.contains(&p.number))
+                };
+                let draft_only = !me.is_empty()
+                    && !self.data.pulls.iter().any(|p| p.state == PullState::Open && p.author.eq_ignore_ascii_case(me) && is_failing(p))
+                    && self.data.pulls.iter().any(|p| p.state == PullState::Draft && p.author.eq_ignore_ascii_case(me) && is_failing(p));
+                self.go(Page::Pulls);
+                self.pr_filter = if draft_only { PullState::Draft } else { PullState::Open };
+                self.pull_filter.clear();
+                self.pull_filter.mine = true;
+                self.pull_filter.failing = true;
+            }
             tray::Action::OpenRepo(full) => if let Some(i) = repo(self, &full) { self.open(i) },
             tray::Action::NewIssue(full) => if let Some(i) = repo(self, &full) {
                 if !matches!(&self.page, Page::Repo(f) if f.eq_ignore_ascii_case(&full)) {
@@ -911,7 +1118,11 @@ impl App {
         // Another account has other repositories and labels.
         self.pull_filter.clear();
         self.issue_filter.clear();
+        self.runs_filter.clear();
         self.data = Data::default();
+        self.data_gen = self.data_gen.wrapping_add(1);
+        self.repos_limit = pages::REPOS_PAGE;
+        self.refresh_clone_cache();
         self.tab = RepoTab::Code;
         self.plugin_tab = None;
         self.pending_place = None;
@@ -1019,6 +1230,7 @@ impl App {
         } else {
             self.now = net::now();
             self.data = Data::sample();
+            self.data_gen = self.data_gen.wrapping_add(1);
             self.set_status(Status::Sample);
             self.notify("Signed out. Showing the sample data.");
         }
@@ -1067,6 +1279,7 @@ impl App {
                 } else {
                     s.now = net::now();
                     s.data = Data::sample();
+                    s.data_gen = s.data_gen.wrapping_add(1);
                     s.set_status(Status::Sample);
                     s.notify("Signed out. Showing the sample data.");
                 }
@@ -1088,6 +1301,8 @@ impl App {
             }
         } else if self.thread.is_some() && self.pull_diff_of.is_none() {
             self.thread = None;
+        } else if self.open_run.is_some() {
+            self.open_run = None;
         } else if self.pull_diff_of.is_some() {
             self.close_pull_diff();
         } else if self.commits.open.is_some() {
@@ -1282,6 +1497,8 @@ impl App {
                     }).collect();
                 self.branches.clear();
                 self.data = d;
+                self.data_gen = self.data_gen.wrapping_add(1);
+                self.refresh_clone_cache();
                 self.details = kept;
                 self.loaded_at = Some(net::now());
                 self.loaded_clock = Some(self.clock);
@@ -1389,7 +1606,7 @@ impl App {
     fn load_local(&mut self, i: usize, again: bool) {
         let Some(r) = self.data.repos.get(i) else { return };
         let full = r.full_name.clone();
-        let Some(dir) = clones_shim::find(&full) else { return };
+        let Some(dir) = self.known_clone(&full) else { return };
         if !again && matches!(self.local.get(&full), Some(Load::Ready(_) | Load::Loading)) {
             return;
         }
@@ -1409,7 +1626,7 @@ impl App {
     fn load_changes(&mut self, i: usize) {
         let Some(r) = self.data.repos.get(i) else { return };
         let full = r.full_name.clone();
-        let Some(root) = clones_shim::find(&full) else { return };
+        let Some(root) = self.known_clone(&full) else { return };
         let Some(h) = self.handle.clone() else { return };
         if self.diff_of.as_ref() != Some(&diffs::DiffOf::Local(full.clone())) {
             self.diff.set_files(Vec::new());
@@ -1444,7 +1661,7 @@ impl App {
         }
         let Some(r) = self.data.repos.get(i) else { return };
         let full = r.full_name.clone();
-        let Some(root) = clones_shim::find(&full) else {
+        let Some(root) = self.known_clone(&full) else {
             // Say why nothing happens rather than doing nothing.
             self.notify_problem(format!("There's no local copy of {full} on this computer: pick its folder in the Terminal tab, or clone it there."));
             return;
@@ -1494,7 +1711,7 @@ impl App {
     fn preview_merge(&mut self, i: usize, branch: String) {
         let Some(r) = self.data.repos.get(i) else { return };
         let full = r.full_name.clone();
-        let Some(root) = clones_shim::find(&full) else { return };
+        let Some(root) = self.known_clone(&full) else { return };
         let Some(h) = self.handle.clone() else { return };
         let key = diffs::DiffOf::Merge(full, branch.clone());
         self.diff_of = Some(key.clone());
@@ -1660,7 +1877,8 @@ impl App {
             self.local_file = None;
             return;
         }
-        let Some(root) = self.data.repos.get(i).and_then(|r| clones_shim::find(&r.full_name)) else { return };
+        let Some(full) = self.data.repos.get(i).map(|r| r.full_name.clone()) else { return };
+        let Some(root) = self.known_clone(&full) else { return };
         let Some(h) = self.handle.clone() else { return };
         self.local_file = Some((path.clone(), Load::Loading));
         let p = path.clone();
@@ -1835,20 +2053,27 @@ impl App {
         });
     }
 
-    /// Runs a row's write (close an issue, merge a pull request) on repository `repo`.
-    fn write(&mut self, repo: &str, w: github::Write) {
+    /// Runs a row's write (close an issue, merge a pull request, re-run a workflow) on repository `repo`.
+    pub(crate) fn write(&mut self, repo: &str, w: github::Write) {
         if actions::blocked(self).is_some() {
             return;
         }
+        let full = self.data.repos.iter()
+            .find(|r| r.full_name.eq_ignore_ascii_case(repo) || (!repo.contains('/') && r.name.eq_ignore_ascii_case(repo)))
+            .map(|r| r.full_name.clone()).unwrap_or_else(|| repo.to_owned());
         let number = w.number().unwrap_or(0);
-        let key = actions::busy_key(repo, number);
+        let rerun_id = match &w {
+            github::Write::RerunRun { run_id, .. } => Some(*run_id),
+            _ => None,
+        };
+        let key = match rerun_id {
+            Some(run_id) => runs_page::run_busy_key(&full, run_id),
+            None => actions::busy_key(repo, number),
+        };
         if !self.busy.insert(key.clone()) {
             return;
         }
         self.confirm_merge = None;
-        let full = self.data.repos.iter()
-            .find(|r| r.full_name.eq_ignore_ascii_case(repo) || (!repo.contains('/') && r.name.eq_ignore_ascii_case(repo)))
-            .map(|r| r.full_name.clone()).unwrap_or_else(|| repo.to_owned());
         let full_cb = full.clone();
         let Some(h) = self.handle.clone() else { return };
         let cfg = self.cfg.clone();
@@ -1869,7 +2094,14 @@ impl App {
             }
             match r {
                 Ok(done) => s.apply_done(&full_cb, done),
-                Err(e) => s.notify_problem(e),
+                Err(e) => {
+                    if let Some(run_id) = rerun_id
+                        && let Some(o) = s.open_run.as_mut().filter(|o| o.run_id == run_id && same_repo(&o.repo, &full_cb))
+                    {
+                        o.write_error = Some(e.clone());
+                    }
+                    s.notify_problem(e);
+                }
             }
         });
     }
@@ -1882,6 +2114,9 @@ impl App {
         };
         let sent = matches!(done, github::Done::Commented(_) | github::Done::Reviewed(..));
         self.apply_done_inner(repo, done);
+        // Counts, states and lists changed in place: the cached lists follow.
+        self.data_changed();
+        self.data_gen = self.data_gen.wrapping_add(1);
         // The conversation on screen shows the change: read it again.
         if let Some(n) = about
             && let Some(t) = self.thread.as_mut().filter(|t| t.is(repo, n))
@@ -2027,6 +2262,24 @@ impl App {
                 }
                 self.notify(format!("{} pull request #{n}", if open { "Reopened" } else { "Closed" }));
             }
+            github::Done::Reran { run_id, failed_only } => {
+                for r in self.data.runs.iter_mut().filter(|r| r.id == run_id && same_repo(&r.repo, &full_name)) {
+                    r.checks = model::Checks::Running;
+                    r.updated_at = self.now;
+                }
+                let reload = if let Some(o) = self.open_run.as_mut().filter(|o| o.run_id == run_id && same_repo(&o.repo, &full_name)) {
+                    o.checks = model::Checks::Running;
+                    o.updated_at = self.now;
+                    o.write_error = None;
+                    true
+                } else {
+                    false
+                };
+                if reload {
+                    self.reload_open_run();
+                }
+                self.notify(if failed_only { "Re-running failed jobs" } else { "Re-running workflow" });
+            }
         }
     }
 
@@ -2064,6 +2317,7 @@ impl App {
                             s.data.pulls.push(p);
                         }
                     }
+                    s.data_gen = s.data_gen.wrapping_add(1);
                     s.sync_tray();
                 }
                 Err(e) => {
@@ -2106,6 +2360,7 @@ impl App {
                         }
                     }
                     s.data.issues.sort_by_key(|i| std::cmp::Reverse(i.created_at));
+                    s.data_gen = s.data_gen.wrapping_add(1);
                     s.sync_tray();
                 }
                 Err(e) => {
@@ -2121,10 +2376,13 @@ impl App {
             self.notify_problem("Writes are disabled on this server (set REPOHUB_ALLOW_WRITES=true).");
             return;
         }
-        let Some(r) = self.data.repos.get_mut(i) else { return };
-        let on = !r.starred;
-        r.starred = on;
-        r.stars = if on { r.stars + 1 } else { r.stars.saturating_sub(1) };
+        let Some((on, full)) = self.data.repos.get_mut(i).map(|r| {
+            let on = !r.starred;
+            r.starred = on;
+            r.stars = if on { r.stars + 1 } else { r.stars.saturating_sub(1) };
+            (on, r.full_name.clone())
+        }) else { return };
+        self.data_gen = self.data_gen.wrapping_add(1);
         if !self.cfg.live() || self.cfg.token.is_none() {
             if self.cfg.live() {
                 self.notify("Star changed here only: GITHUB_TOKEN is needed to save it on GitHub.");
@@ -2132,7 +2390,7 @@ impl App {
             return;
         }
         if let Some(h) = self.handle.clone() {
-            let (cfg, full) = (self.cfg.clone(), r.full_name.clone());
+            let cfg = self.cfg.clone();
             let key = full.clone();
             let epoch = self.load_gen;
             net::spawn(h, move || async move { github::set_star(&cfg, &full, on).await }, move |s: &mut App, res| {
@@ -2144,6 +2402,7 @@ impl App {
                         r.starred = !on;
                         r.stars = if on { r.stars.saturating_sub(1) } else { r.stars + 1 };
                     }
+                    s.data_gen = s.data_gen.wrapping_add(1);
                     s.notify_problem(format!("Couldn't change the star: {e}"));
                 }
             });
@@ -2422,7 +2681,7 @@ impl App {
         let prompt = prompt.trim().to_owned();
         let Some(r) = self.data.repos.get(i) else { return };
         let full = r.full_name.clone();
-        let Some(dir) = clones_shim::find(&full) else { return };
+        let Some(dir) = self.known_clone(&full) else { return };
         let Some(h) = self.handle.clone() else { return };
         let chat = self.chats.entry(full.clone()).or_default();
         if prompt.is_empty() || chat.run.is_busy() {
@@ -2663,7 +2922,7 @@ impl App {
         let running = self.data.repos.get(i).and_then(|r| self.terms.get(&r.full_name)).is_some_and(|t| t.is_running());
         if running {
             self.term_type(i, &line);
-        } else if let Some(dir) = self.data.repos.get(i).and_then(|r| clones_shim::find(&r.full_name)) {
+        } else if let Some(dir) = self.data.repos.get(i).map(|r| r.full_name.clone()).and_then(|full| self.known_clone(&full)) {
             if let Some(r) = self.data.repos.get(i) {
                 self.terms.remove(&r.full_name);
             }
@@ -2675,11 +2934,11 @@ impl App {
 
     /// Opens the terminal in the repository's known clone, if any.
     fn open_terminal(&mut self, i: usize) {
-        let Some(r) = self.data.repos.get(i) else { return };
-        if self.terms.get(&r.full_name).is_some_and(|t| t.is_running()) {
+        let Some(full) = self.data.repos.get(i).map(|r| r.full_name.clone()) else { return };
+        if self.terms.get(&full).is_some_and(|t| t.is_running()) {
             return;
         }
-        if let Some(dir) = clones_shim::find(&r.full_name) {
+        if let Some(dir) = self.known_clone(&full) {
             self.start_terminal(i, dir, None);
         }
     }
@@ -2689,11 +2948,14 @@ impl App {
     /// user says it is.
     fn use_lookalike(&mut self, i: usize) {
         let Some(full) = self.data.repos.get(i).map(|r| r.full_name.clone()) else { return };
-        let Some(dir) = clones_shim::lookalike(&full) else { return };
+        let Some(dir) = self.lookalike_clone(&full) else { return };
         match clones_shim::remember(&full, &dir) {
             Ok(()) => {
+                self.clone_dirs.borrow_mut().insert(full.clone(), Some(dir.clone()));
+                self.lookalike_dirs.borrow_mut().insert(full.clone(), None);
                 self.term_error = None;
                 self.notify(format!("Using {} for {full}", dir.display()));
+                self.load_local(i, true);
             }
             Err(e) => self.term_error = Some(e),
         }
@@ -2711,8 +2973,11 @@ impl App {
             self.term_error = Some(e);
             return;
         }
+        self.clone_dirs.borrow_mut().insert(full.clone(), Some(dir.clone()));
+        self.lookalike_dirs.borrow_mut().insert(full.clone(), None);
         self.clone_path.clear();
         self.terms.remove(&full);
+        self.load_local(i, true);
         // From the Claude tab the folder is all that's needed; the Terminal tab opens a shell there.
         if self.tab == RepoTab::Terminal {
             self.start_terminal(i, dir, None);
@@ -2723,7 +2988,7 @@ impl App {
     fn clone_repo(&mut self, i: usize) {
         let Some(r) = self.data.repos.get(i) else { return };
         let (full, name, url) = (r.full_name.clone(), r.name.clone(), r.url.clone());
-        let parent = clones_shim::default_parent();
+        let parent = self.default_clone_parent.clone();
         if let Err(e) = std::fs::create_dir_all(&parent) {
             self.term_error = Some(format!("Couldn't create {}: {e}", parent.display()));
             return;
@@ -2735,7 +3000,10 @@ impl App {
                 return;
             }
         };
-        let _ = clones_shim::remember(&full, &parent.join(&name));
+        let target = parent.join(&name);
+        let _ = clones_shim::remember(&full, &target);
+        self.clone_dirs.borrow_mut().insert(full.clone(), Some(target));
+        self.lookalike_dirs.borrow_mut().insert(full.clone(), None);
         self.terms.remove(&full);
         // The clone runs in the terminal, so show it.
         if self.tab != RepoTab::Terminal {
@@ -2854,9 +3122,12 @@ fn init() -> App {
         inbox_busy: std::collections::HashSet::new(),
         pull_filter: filters::ListFilter::default(),
         issue_filter: filters::ListFilter::default(),
+        runs_filter: runs_page::RunsFilter::default(),
         commits: commits::Commits::default(),
         thread: None,
         thread_epoch: 0,
+        open_run: None,
+        run_epoch: 0,
         busy: std::collections::HashSet::new(),
         form_title: None,
         pull_meta: None,
@@ -2876,6 +3147,13 @@ fn init() -> App {
         term_cell: [7.8, 17.0],
         term_grid: (24, 100),
         clone_path: TextEdit::new(""),
+        clone_dirs: std::cell::RefCell::new(HashMap::new()),
+        lookalike_dirs: std::cell::RefCell::new(HashMap::new()),
+        default_clone_parent: clones_shim::default_parent(),
+        plugins_folder: plugins_folder_init(),
+        repos_limit: pages::REPOS_PAGE,
+        data_gen: 0,
+        repo_cache: std::cell::RefCell::new(RepoCache::default()),
         acct_user: TextEdit::new(cfg.user.clone().unwrap_or_default()),
         acct_token: TextEdit::new(""),
         acct_error: None,
@@ -2962,10 +3240,10 @@ fn init() -> App {
         }
     }
     // `-- section appearance` picks the Settings page's section.
-    if let Some(sec) = arg("section") {
-        if let Some(n) = state::SettingsSection::LABELS.iter().position(|l| l.eq_ignore_ascii_case(&sec)) {
-            s.settings_section = state::SettingsSection::ALL[n];
-        }
+    if let Some(sec) = arg("section")
+        && let Some(n) = state::SettingsSection::LABELS.iter().position(|l| l.eq_ignore_ascii_case(&sec))
+    {
+        s.settings_section = state::SettingsSection::ALL[n];
     }
     // `-- diff 14` also opens that pull request's changes.
     if let Some(number) = arg("diff").and_then(|n| n.parse::<u32>().ok())
@@ -3062,6 +3340,24 @@ fn kit(dark: bool) -> Kit {
     k
 }
 
+fn plugins_folder_init() -> std::path::PathBuf {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        plugins::folder()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        std::path::PathBuf::new()
+    }
+}
+
+fn hash_stamp(f: impl FnOnce(&mut std::collections::hash_map::DefaultHasher)) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    f(&mut h);
+    h.finish()
+}
+
 fn nav(s: &App, k: &Kit, label: &str, icon: &'static rune::Icon, page: Page, badge: Option<String>) -> El {
     let selected = s.page == page || (page == Page::Repos && matches!(s.page, Page::Repo(_)));
     let target = page.clone();
@@ -3069,6 +3365,7 @@ fn nav(s: &App, k: &Kit, label: &str, icon: &'static rune::Icon, page: Page, bad
     let mut r = SidebarRow::new(label).icon(icon).height(32.0).selected(selected).on_select(move |s: &mut App, _| {
         if target == Page::Repos {
             s.owner = OwnerFilter::All;
+            s.repos_limit = pages::REPOS_PAGE;
         }
         s.go(target.clone())
     });
@@ -3080,22 +3377,220 @@ fn nav(s: &App, k: &Kit, label: &str, icon: &'static rune::Icon, page: Page, bad
 
 /// The organizations whose repositories are loaded, with how many each, most first.
 fn orgs(s: &App) -> Vec<(String, usize)> {
-    let me = &s.data.profile.login;
-    let mut out: Vec<(String, usize)> = Vec::new();
-    for r in s.data.repos.iter().filter(|r| !r.owner.eq_ignore_ascii_case(me)) {
-        match out.iter_mut().find(|(o, _)| o.eq_ignore_ascii_case(&r.owner)) {
-            Some((_, n)) => *n += 1,
-            None => out.push((r.owner.clone(), 1)),
-        }
-    }
-    out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase())));
-    out
+    s.ensure_orgs_cache();
+    s.repo_cache.borrow().orgs.clone()
 }
 
 impl App {
+    fn repos_stamp(&self) -> u64 {
+        use std::hash::Hash;
+        hash_stamp(|h| {
+            self.data_gen.hash(h);
+            self.data.repos.len().hash(h);
+            self.data.profile.login.hash(h);
+            if let Some(r) = self.data.repos.first() {
+                r.full_name.hash(h);
+                r.stars.hash(h);
+                r.pushed.hash(h);
+                r.private.hash(h);
+                r.fork.hash(h);
+            }
+            if let Some(r) = self.data.repos.last() {
+                r.full_name.hash(h);
+                r.stars.hash(h);
+                r.pushed.hash(h);
+                r.private.hash(h);
+                r.fork.hash(h);
+            }
+        })
+    }
+
+    fn pins_stamp(&self) -> u64 {
+        use std::hash::Hash;
+        hash_stamp(|h| {
+            self.repos_stamp().hash(h);
+            self.pins.hash(h);
+            self.cfg.pinned.hash(h);
+        })
+    }
+
+    fn ensure_orgs_cache(&self) {
+        let stamp = self.repos_stamp();
+        if self.repo_cache.borrow().orgs_stamp == Some(stamp) {
+            return;
+        }
+        let me = &self.data.profile.login;
+        let mut out: Vec<(String, usize)> = Vec::new();
+        let mut mine = 0usize;
+        for r in &self.data.repos {
+            if r.owner.eq_ignore_ascii_case(me) {
+                mine += 1;
+            } else {
+                match out.iter_mut().find(|(o, _)| o.eq_ignore_ascii_case(&r.owner)) {
+                    Some((_, n)) => *n += 1,
+                    None => out.push((r.owner.clone(), 1)),
+                }
+            }
+        }
+        out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase())));
+        let mut c = self.repo_cache.borrow_mut();
+        c.orgs = out;
+        c.mine_count = mine;
+        c.orgs_stamp = Some(stamp);
+    }
+
+    pub(crate) fn mine_repo_count(&self) -> usize {
+        self.ensure_orgs_cache();
+        self.repo_cache.borrow().mine_count
+    }
+
+    fn ensure_pins_cache(&self) {
+        let stamp = self.pins_stamp();
+        if self.repo_cache.borrow().pins_stamp == Some(stamp) {
+            return;
+        }
+        let repos = &self.data.repos;
+        let list: Vec<usize> = if let Some(pins) = &self.pins {
+            pins.iter().filter_map(|p| repos.iter().position(|r| r.full_name.eq_ignore_ascii_case(p))).collect()
+        } else if self.cfg.pinned.is_empty() {
+            (0..repos.len().min(3)).collect()
+        } else {
+            self.cfg.pinned.iter().filter_map(|p| repos.iter().position(|r| r.name.eq_ignore_ascii_case(p) || r.full_name.eq_ignore_ascii_case(p))).collect()
+        };
+        let set: std::collections::HashSet<usize> = list.iter().copied().collect();
+        let mut c = self.repo_cache.borrow_mut();
+        c.pinned = list;
+        c.pinned_set = set;
+        c.pins_stamp = Some(stamp);
+    }
+
+    /// Indices into `data.repos` matching the current owner, visibility/fork filter, search, and sort.
+    pub(crate) fn filtered_repos(&self) -> Vec<usize> {
+        use std::hash::Hash;
+        let stamp = hash_stamp(|h| {
+            self.repos_stamp().hash(h);
+            std::mem::discriminant(&self.owner).hash(h);
+            if let OwnerFilter::Org(o) = &self.owner {
+                o.hash(h);
+            }
+            self.filter.index().hash(h);
+            self.sort.index().hash(h);
+            self.search.text.hash(h);
+        });
+        if self.repo_cache.borrow().shown_stamp == Some(stamp) {
+            return self.repo_cache.borrow().shown.clone();
+        }
+        let q = self.search.text.trim().to_lowercase();
+        let all = &self.data.repos;
+        let login = &self.data.profile.login;
+        let mut shown: Vec<usize> = (0..all.len()).filter(|&i| {
+            let r = &all[i];
+            if !self.owner.matches(&r.owner, login) || !self.filter.matches(r.private, r.fork) {
+                return false;
+            }
+            if q.is_empty() {
+                return true;
+            }
+            let keys = r.keys();
+            keys.name_lower.contains(&q) || keys.desc_lower.contains(&q) || keys.topics_lower.iter().any(|t| t.contains(&q))
+        }).collect();
+        match self.sort {
+            RepoSort::Recent => {} // GitHub's order: most recently pushed first
+            RepoSort::Stars => shown.sort_by(|a, b| all[*b].stars.cmp(&all[*a].stars)),
+            RepoSort::Name => shown.sort_by(|a, b| all[*a].keys().name_lower.cmp(&all[*b].keys().name_lower)),
+        }
+        let mut c = self.repo_cache.borrow_mut();
+        c.shown = shown.clone();
+        c.shown_stamp = Some(stamp);
+        shown
+    }
+
+    /// Cheap fingerprint of everything [`palette::entries`] reads, so typing in the palette
+    /// reuses pre-indexed entries without rebuilding or re-lowercasing them.
+    pub(crate) fn palette_stamp(&self) -> u64 {
+        use std::hash::Hash;
+        hash_stamp(|h| {
+            self.pins_stamp().hash(h);
+            self.data.pulls.len().hash(h);
+            if let Some(p) = self.data.pulls.first() {
+                p.number.hash(h);
+                std::mem::discriminant(&p.state).hash(h);
+            }
+            self.data.issues.len().hash(h);
+            if let Some(x) = self.data.issues.first() {
+                x.number.hash(h);
+            }
+            std::mem::discriminant(&self.page).hash(h);
+            match &self.page {
+                Page::Repo(full) => {
+                    full.hash(h);
+                    self.local.contains_key(full).hash(h);
+                }
+                Page::Plugin(id) => id.hash(h),
+                _ => {}
+            }
+            self.tab.index().hash(h);
+            self.plugin_tab.hash(h);
+            std::mem::discriminant(&self.theme).hash(h);
+            self.shown_dark.get().hash(h);
+            self.looks.light.hash(h);
+            self.looks.dark.hash(h);
+            self.looks.all.len().hash(h);
+            self.assist.claude.hash(h);
+            self.assist.harnesses.len().hash(h);
+            self.plugins.list.len().hash(h);
+            std::mem::discriminant(&self.update).hash(h);
+            self.cfg.live().hash(h);
+            self.status.can_load().hash(h);
+        })
+    }
+
+    /// Cached local clone path for `full`, probing disk/remotes at most once until invalidated.
+    pub(crate) fn known_clone(&self, full: &str) -> Option<std::path::PathBuf> {
+        if let Some(cached) = self.clone_dirs.borrow().get(full) {
+            return cached.clone();
+        }
+        let found = clones_shim::find(full);
+        self.clone_dirs.borrow_mut().insert(full.to_owned(), found.clone());
+        found
+    }
+
+    /// Cached lookalike checkout path for `full`, probing disk/remotes at most once until invalidated.
+    pub(crate) fn lookalike_clone(&self, full: &str) -> Option<std::path::PathBuf> {
+        if let Some(cached) = self.lookalike_dirs.borrow().get(full) {
+            return cached.clone();
+        }
+        let found = clones_shim::lookalike(full);
+        self.lookalike_dirs.borrow_mut().insert(full.to_owned(), found.clone());
+        found
+    }
+
+    /// Says `data` changed in place (a count, a star, a state), so what's cached from it is
+    /// rebuilt on the next frame.
+    pub(crate) fn data_changed(&mut self) {
+        self.data_gen = self.data_gen.wrapping_add(1);
+    }
+
+    /// Forgets that repository `i` had no local clone, so the next look checks the disk again:
+    /// a clone made outside RepoHub (in a terminal) shows when its page or a section is opened.
+    fn recheck_missing_clone(&mut self, i: usize) {
+        let Some(full) = self.data.repos.get(i).map(|r| r.full_name.clone()) else { return };
+        if self.clone_dirs.borrow().get(&full) == Some(&None) {
+            self.clone_dirs.borrow_mut().remove(&full);
+            self.lookalike_dirs.borrow_mut().remove(&full);
+        }
+    }
+
+    fn refresh_clone_cache(&mut self) {
+        self.clone_dirs.borrow_mut().clear();
+        self.lookalike_dirs.borrow_mut().clear();
+        self.default_clone_parent = clones_shim::default_parent();
+    }
+
     /// Whether repository `i` is in the sidebar's Pinned section.
     fn is_pinned(&self, i: usize) -> bool {
-        pinned(self).contains(&i)
+        self.ensure_pins_cache();
+        self.repo_cache.borrow().pinned_set.contains(&i)
     }
 
     /// Pins or unpins repository `i`. The first change starts from what the sidebar shows, so
@@ -3123,21 +3618,15 @@ impl App {
     fn show_owner(&mut self, owner: OwnerFilter) {
         state::trace("owner", &self.owner, &owner);
         self.owner = owner;
+        self.repos_limit = pages::REPOS_PAGE;
         self.go(Page::Repos);
     }
 }
 
 /// The pinned repositories: the names in REPOHUB_PINNED, else the three most recently pushed.
 pub(crate) fn pinned(s: &App) -> Vec<usize> {
-    let repos = &s.data.repos;
-    // Pins chosen in the app win; a repository that's no longer loaded is skipped.
-    if let Some(pins) = &s.pins {
-        return pins.iter().filter_map(|p| repos.iter().position(|r| r.full_name.eq_ignore_ascii_case(p))).collect();
-    }
-    if s.cfg.pinned.is_empty() {
-        return (0..repos.len().min(3)).collect();
-    }
-    s.cfg.pinned.iter().filter_map(|p| repos.iter().position(|r| r.name.eq_ignore_ascii_case(p) || r.full_name.eq_ignore_ascii_case(p))).collect()
+    s.ensure_pins_cache();
+    s.repo_cache.borrow().pinned.clone()
 }
 
 fn sidebar(s: &App, k: &Kit) -> El {
@@ -3317,26 +3806,29 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
     let k = themes::kit(look);
     s.shown_dark.set(dark);
     s.plugins.set_colors(&k);
-    let content = match (&s.thread, &s.page) {
-        (Some(t), _) => thread_page::view(s, &k, t),
-        (None, page) => match page {
-        Page::Overview => pages::overview(s, &k),
-        Page::Repos => pages::repos(s, &k),
-        Page::Repo(full) => {
-            if let Some(i) = s.repo_index_of(full) {
-                let extra = s.plugin_tab.as_deref().and_then(|p| s.plugins.surface(p, cx, "repo"));
-                pages::repo_detail(s, &k, i, extra)
-            } else {
-                pages::repos(s, &k)
+    let content = if let Some(t) = &s.thread {
+        thread_page::view(s, &k, t)
+    } else if let Some(o) = &s.open_run {
+        runs_page::view(s, &k, o)
+    } else {
+        match &s.page {
+            Page::Overview => pages::overview(s, &k),
+            Page::Repos => pages::repos(s, &k),
+            Page::Repo(full) => {
+                if let Some(i) = s.repo_index_of(full) {
+                    let extra = s.plugin_tab.as_deref().and_then(|p| s.plugins.surface(p, cx, "repo"));
+                    pages::repo_detail(s, &k, i, extra)
+                } else {
+                    pages::repos(s, &k)
+                }
             }
+            Page::Plugin(id) => s.plugins.surface(id, cx, "page").unwrap_or_else(|| pages::overview(s, &k)),
+            Page::Pulls => lists::pulls(s, &k),
+            Page::Issues => lists::issues(s, &k),
+            Page::Actions => lists::actions(s, &k),
+            Page::Notifications => inbox::page(s, &k),
+            Page::Settings => lists::settings(s, &k),
         }
-        Page::Plugin(id) => s.plugins.surface(id, cx, "page").unwrap_or_else(|| pages::overview(s, &k)),
-        Page::Pulls => lists::pulls(s, &k),
-        Page::Issues => lists::issues(s, &k),
-        Page::Actions => lists::actions(s, &k),
-        Page::Notifications => inbox::page(s, &k),
-        Page::Settings => lists::settings(s, &k),
-        },
     };
     let mut inner = col().w_full().max_w(1080.0).gap(16.0);
     if let Some(b) = update_banner(s, &k) {
@@ -3557,12 +4049,14 @@ fn shortcuts(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
         s.palette = if s.palette.is_some() { None } else { Some(palette::Palette::new()) };
         return true;
     }
-    // ⌘/Ctrl+[ goes back: out of a conversation, a commit or a comparison, or from a
-    // repository to the list.
+    // ⌘/Ctrl+[ goes back: out of a conversation, a workflow run, a commit or a comparison, or
+    // from a repository to the list.
     if ev.is_command('[') {
         if s.thread.is_some() {
             s.close_pull_diff();
             s.thread = None;
+        } else if s.open_run.is_some() {
+            s.open_run = None;
         } else if s.commits.open.is_some() {
             s.close_commit(Some(tx));
         } else if s.commits.compare.is_some() {
@@ -3584,6 +4078,8 @@ fn shortcuts(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
             s.close_pull_diff();
         } else if s.thread.is_some() {
             s.thread = None;
+        } else if s.open_run.is_some() {
+            s.open_run = None;
         } else if s.commits.open.is_some() {
             s.close_commit(Some(tx));
         } else if s.commits.compare.is_some() {
@@ -3678,6 +4174,7 @@ pub fn start() {
                 s.refresh();
             } else {
                 s.data = Data::sample();
+                s.data_gen = s.data_gen.wrapping_add(1);
                 s.set_status(Status::Sample);
             }
         });
@@ -6398,6 +6895,7 @@ mod fix58_tests {
 
         // When runs is not empty with passing run, but runs_failed is true, label must still be "Workflow runs couldn't load"
         app.data.runs = vec![crate::model::Run {
+            id: 1,
             workflow: "CI".into(),
             repo: "alice/repo1".into(),
             branch: "main".into(),
@@ -6405,6 +6903,7 @@ mod fix58_tests {
             duration: "1m".into(),
             updated_at: 1_700_000_000,
             url: String::new(),
+            pull_numbers: Vec::new(),
         }];
         app.data.runs_failed = true;
         let menu = crate::tray::menu(&app);
@@ -6855,6 +7354,7 @@ mod fix62_tests {
             branch: "main".into(),
             topics: vec![],
             url: format!("https://github.com/{full}"),
+            ..model::Repo::default()
         }
     }
 
@@ -7331,5 +7831,502 @@ mod update_channel_ui {
         assert_eq!(crate::update::Channel::load(), crate::update::Channel::Preview, "saved");
         rt.update(|s, _| s.set_update_channel(crate::update::Channel::Stable));
         assert_eq!(crate::update::Channel::load(), crate::update::Channel::Stable);
+    }
+}
+
+#[cfg(test)]
+mod fix67_tests {
+    use std::io::{Read, Write as _};
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use crate::model::Checks;
+    use crate::state::RunStatusFilter;
+    use crate::{App, Page, Status, github, state};
+
+    fn click(rt: &mut rune::Runtime<App>, key: &str, t: &mut f64) {
+        let (x, y) = rt.find(key).unwrap_or_else(|| panic!("missing element `{key}`"));
+        rt.pointer_move(x, y);
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        *t += 0.1;
+        rt.frame(*t);
+    }
+
+    #[test]
+    fn actions_filters_and_run_detail_view_jobs_steps_and_logs() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = crate::init();
+        s.pending_place = None;
+        s.toast = None;
+        s.page = Page::Actions;
+
+        let mut rt = rune::Runtime::new(s, crate::view, (1180.0, 1800.0), rune::Env::new(true, 1.0));
+        rt.reduced_motion = true;
+        let mut t = 0.0;
+        rt.frame(t);
+
+        // Filter bar and sample runs are rendered; the failing run has a quick Re-run failed button.
+        assert!(rt.find("runs-status").is_some(), "status segmented control shown");
+        assert!(rt.find("runs-repo-ngsi-ld-xr-contexts").is_some(), "repository chip shown");
+        assert!(rt.find("runs-workflow-validate-jsonld").is_some(), "workflow chip shown");
+        assert!(rt.find("run-ngsi-ld-xr-contexts-1003").is_some(), "failing run row shown");
+        assert!(rt.find("rerun-row-ngsi-ld-xr-contexts-1003").is_some(), "quick Re-run failed button shown on failing row");
+        assert!(rt.find("run-francescodibella.github.io-1001").is_some(), "passing run row shown");
+
+        // Filter by Failed status -> keeps only the failing run and exposes Clear.
+        rt.update(|app, _| app.runs_filter.status = RunStatusFilter::Failed);
+        t += 0.1;
+        rt.frame(t);
+        assert!(rt.find("run-ngsi-ld-xr-contexts-1003").is_some());
+        assert!(rt.find("run-francescodibella.github.io-1001").is_none());
+        assert!(rt.find("runs-clear").is_some());
+
+        // Clear restores all runs.
+        click(&mut rt, "runs-clear", &mut t);
+        assert!(rt.find("run-francescodibella.github.io-1001").is_some());
+
+        // Filter by repository chip and workflow chip.
+        click(&mut rt, "runs-repo-francescodibella.github.io", &mut t);
+        assert!(rt.find("run-francescodibella.github.io-1001").is_some());
+        assert!(rt.find("run-ngsi-ld-xr-contexts-1003").is_none());
+        click(&mut rt, "runs-clear", &mut t);
+
+        // Clicking a failing run opens the in-app run detail view with auto-selected failed job & log.
+        click(&mut rt, "run-ngsi-ld-xr-contexts-1003", &mut t);
+        assert!(rt.find("run-detail").is_some(), "run detail view opened");
+        assert!(rt.find("run-jobs").is_some(), "jobs panel shown");
+        assert!(rt.find("run-log").is_some(), "log panel shown");
+        assert!(rt.find("run-log-text").is_some(), "selected job log text rendered");
+        assert!(rt.find("run-copy-log").is_some(), "Copy log button rendered");
+        assert!(rt.find("run-rerun-failed").is_some(), "Re-run failed jobs button rendered");
+        assert!(rt.find("run-rerun-all").is_some(), "Re-run all button rendered");
+        assert!(
+            rt.elements().iter().any(|e| e.key.as_deref() == Some("run-log-text") && e.text.as_deref().is_some_and(|txt| txt.contains("Process completed with exit code 1."))),
+            "failing job log automatically loaded and displayed",
+        );
+
+        // Selecting the passing lint job switches the displayed log.
+        let lint_job_id = 1003 * 10 + 1;
+        click(&mut rt, &format!("run-job-{lint_job_id}"), &mut t);
+        assert_eq!(rt.state.open_run.as_ref().and_then(|o| o.selected_job), Some(lint_job_id));
+
+        // Back button closes the run detail view back to Actions.
+        click(&mut rt, "run-back", &mut t);
+        assert!(rt.find("run-detail").is_none());
+        assert!(rt.find("runs-status").is_some());
+
+        // Re-open and verify Escape also closes the run detail view.
+        click(&mut rt, "run-ngsi-ld-xr-contexts-1003", &mut t);
+        assert!(rt.find("run-detail").is_some());
+        rt.update(|app, _| {
+            let handled = crate::shortcuts(app, &rune::KeyEvent { key: rune::Key::Escape, mods: rune::Mods::default() });
+            assert!(handled);
+        });
+        t += 0.1;
+        rt.frame(t);
+        assert!(rt.find("run-detail").is_none());
+        assert!(rt.find("runs-status").is_some());
+    }
+
+    #[test]
+    fn live_job_log_follows_redirect_without_auth_and_rerun_handles_success_and_403() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Blob storage server: serves 250 ANSI-formatted log lines and checks Authorization is NOT forwarded.
+        let blob_listener = TcpListener::bind("127.0.0.1:0").expect("bind blob mock");
+        let blob_port = blob_listener.local_addr().unwrap().port();
+        let blob_saw_auth = Arc::new(AtomicBool::new(false));
+        let blob_saw_auth_bg = blob_saw_auth.clone();
+        let blob_thread = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = blob_listener.accept() {
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+                if req.contains("\nauthorization:") || req.contains("\r\nauthorization:") {
+                    blob_saw_auth_bg.store(true, Ordering::SeqCst);
+                }
+                let mut body = String::new();
+                for i in 1..=250 {
+                    body.push_str(&format!("\x1b[32mstep\x1b[0m line {i}\n"));
+                }
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+
+        // GitHub API mock server: serves jobs, 302 redirect for logs, 403 then 201 for rerun-failed-jobs, and 201 for rerun.
+        let api_listener = TcpListener::bind("127.0.0.1:0").expect("bind api mock");
+        let api_port = api_listener.local_addr().unwrap().port();
+        let api_saw_auth = Arc::new(AtomicBool::new(false));
+        let api_saw_auth_bg = api_saw_auth.clone();
+        let rerun_calls = Arc::new(AtomicUsize::new(0));
+        let rerun_calls_bg = rerun_calls.clone();
+        let api_thread = std::thread::spawn(move || {
+            for _ in 0..5 {
+                let Ok((mut stream, _)) = api_listener.accept() else { break };
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let first_line = req.lines().next().unwrap_or("");
+                if req.to_ascii_lowercase().contains("authorization: bearer secret-pat") {
+                    api_saw_auth_bg.store(true, Ordering::SeqCst);
+                }
+                let resp = if first_line.starts_with("GET /repos/alice/app/actions/runs/77/jobs") {
+                    let body = r#"{"jobs":[
+                        {"id":501,"name":"lint","status":"completed","conclusion":"success","started_at":"2026-11-18T10:00:00Z","completed_at":"2026-11-18T10:00:20Z","html_url":"https://github.com/alice/app/actions/runs/77/job/501","steps":[{"number":1,"name":"cargo clippy","status":"completed","conclusion":"success"}]},
+                        {"id":502,"name":"test","status":"completed","conclusion":"failure","started_at":"2026-11-18T10:00:00Z","completed_at":"2026-11-18T10:01:05Z","html_url":"https://github.com/alice/app/actions/runs/77/job/502","steps":[{"number":1,"name":"cargo test","status":"completed","conclusion":"failure"}]}
+                    ]}"#;
+                    format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body)
+                } else if first_line.starts_with("GET /repos/alice/app/actions/jobs/502/logs") {
+                    format!(
+                        "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{blob_port}/raw-log\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                } else if first_line.starts_with("POST /repos/alice/app/actions/runs/77/rerun-failed-jobs") {
+                    let call = rerun_calls_bg.fetch_add(1, Ordering::SeqCst);
+                    if call == 0 {
+                        let body = r#"{"message":"Resource not accessible by personal access token"}"#;
+                        format!("HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body)
+                    } else {
+                        "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".to_owned()
+                    }
+                } else if first_line.starts_with("POST /repos/alice/app/actions/runs/77/rerun") {
+                    "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".to_owned()
+                } else {
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned()
+                };
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+
+        let mut cfg = crate::config::Config::load();
+        cfg.api = format!("http://127.0.0.1:{api_port}");
+        cfg.user = Some("alice".into());
+        cfg.token = Some("secret-pat".into());
+        cfg.allow_writes = true;
+
+        // 1. Load jobs and verify parsing.
+        let jobs = pollster::block_on(github::load_run_jobs(&cfg, "alice/app", 77)).expect("jobs load");
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[1].id, 502);
+        assert_eq!(jobs[1].checks, Checks::Failing);
+
+        // 2. Load job log via 302 redirect -> ANSI stripped, tailed to 200 of 250 lines, Authorization NOT leaked!
+        let log = pollster::block_on(github::load_job_log(&cfg, "alice/app", 502)).expect("job log load");
+        assert!(api_saw_auth.load(Ordering::SeqCst), "GitHub API request carried Authorization");
+        assert!(!blob_saw_auth.load(Ordering::SeqCst), "redirected blob host MUST NOT receive Authorization header");
+        assert!(log.truncated);
+        assert_eq!(log.total_lines, 250);
+        assert!(log.text.starts_with("step line 51\n"), "tailed to last 200 lines");
+        assert!(log.text.ends_with("step line 250"));
+        assert!(!log.text.contains("\x1b["), "ANSI escape sequences stripped");
+
+        // 3. First re-run attempt returns 403 -> clear Actions write permission explanation, rendered in run-write-error.
+        let err = pollster::block_on(github::run(&cfg, "alice/app", github::Write::RerunRun { run_id: 77, failed_only: true }))
+            .expect_err("403 must surface error");
+        assert!(err.contains("Actions: Read and write"), "403 message names fine-grained permission: {err}");
+        assert!(err.contains("workflow"), "403 message names classic scope: {err}");
+
+        let mut s = crate::init();
+        s.pending_place = None;
+        s.toast = None;
+        s.cfg = Arc::new(cfg.clone());
+        s.data.sample = false;
+        s.status = Status::Ready;
+        s.data.profile.login = "alice".into();
+        s.data.runs = vec![crate::model::Run {
+            id: 77,
+            workflow: "CI".into(),
+            repo: "alice/app".into(),
+            branch: "feat/ci".into(),
+            checks: Checks::Failing,
+            duration: "1m 5s".into(),
+            updated_at: s.now,
+            url: "https://github.com/alice/app/actions/runs/77".into(),
+            pull_numbers: vec![12],
+        }];
+        s.data.pulls = vec![crate::model::Pull {
+            number: 12,
+            title: "Fix CI".into(),
+            repo: "alice/app".into(),
+            author: "alice".into(),
+            state: crate::model::PullState::Open,
+            checks: Some(Checks::Failing),
+            updated_at: s.now,
+            comments: 0,
+            labels: Vec::new(),
+            url: "https://github.com/alice/app/pull/12".into(),
+        }];
+        s.open_run = Some(crate::runs_page::OpenRun {
+            repo: "alice/app".into(),
+            run_id: 77,
+            workflow: "CI".into(),
+            branch: "feat/ci".into(),
+            checks: Checks::Failing,
+            duration: "1m 5s".into(),
+            updated_at: s.now,
+            url: "https://github.com/alice/app/actions/runs/77".into(),
+            epoch: 1,
+            jobs: state::Load::Ready(jobs),
+            selected_job: Some(502),
+            logs: std::collections::HashMap::from([(502, state::Load::Ready(log))]),
+            write_error: Some(err),
+        });
+        let mut rt = rune::Runtime::new(s, crate::view, (1180.0, 1800.0), rune::Env::new(true, 1.0));
+        rt.reduced_motion = true;
+        rt.frame(0.0);
+        assert!(rt.find("run-write-error").is_some(), "permission error banner rendered in run detail");
+
+        // 4. Second re-run attempt succeeds (201) -> transitions run to Running; full re-run also succeeds (201).
+        let done = pollster::block_on(github::run(&cfg, "alice/app", github::Write::RerunRun { run_id: 77, failed_only: true }))
+            .expect("201 rerun-failed-jobs succeeds");
+        rt.update(|app, _| app.apply_done_inner("alice/app", done));
+        assert_eq!(rt.state.data.runs[0].checks, Checks::Running);
+        assert_eq!(rt.state.toast.as_ref().map(|t| t.text.as_str()), Some("Re-running failed jobs"));
+
+        let done_all = pollster::block_on(github::run(&cfg, "alice/app", github::Write::RerunRun { run_id: 77, failed_only: false }))
+            .expect("201 rerun succeeds");
+        assert!(matches!(done_all, github::Done::Reran { run_id: 77, failed_only: false }));
+
+        // 5. Status-bar tray action opens Pull requests narrowed to Mine + Failing checks.
+        rt.update(|app, _| app.tray_action("go:pulls:mine-failing"));
+        assert_eq!(rt.state.page, Page::Pulls);
+        assert!(rt.state.pull_filter.mine);
+        assert!(rt.state.pull_filter.failing);
+
+        let _ = blob_thread.join();
+        let _ = api_thread.join();
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod perf61_tests {
+    use std::time::Instant;
+    use rune::{Key, KeyEvent, Mods};
+    use crate::model::{Data, Issue, Pull, PullState, Repo, lang_hue};
+    use crate::{App, Page};
+
+    fn sample_500() -> Data {
+        let mut d = Data::sample_at(1_731_000_000);
+        let orgs = ["octo", "acme-cloud", "zeta-labs", "nimbus-io", "hyperion-dev", "aurora-sys"];
+        let langs = ["Rust", "TypeScript", "Python", "Go", "Java", "C++"];
+        d.repos.clear();
+        for i in 0..500 {
+            let owner = orgs[i % orgs.len()];
+            let lang = langs[i % langs.len()];
+            let name = format!("service-{owner}-{i:03}");
+            let r = Repo {
+                full_name: format!("{owner}/{name}"),
+                owner: owner.into(),
+                name: name.clone(),
+                description: format!("High-throughput distributed {lang} component #{i} for {owner} pipelines and telemetry"),
+                language: lang.into(),
+                hue: lang_hue(lang),
+                stars: ((i * 37) % 1200) as u32,
+                forks: ((i * 7) % 90) as u32,
+                issues: (i % 25) as u32,
+                pushed: 1_731_000_000 - (i as i64) * 3600,
+                private: i % 3 == 0,
+                fork: i % 7 == 0,
+                archived: i % 29 == 0,
+                branch: "main".into(),
+                topics: vec!["cloud".into(), "telemetry".into(), lang.to_lowercase(), format!("tier-{}", i % 5)],
+                url: format!("https://github.com/{owner}/{name}"),
+                starred: i % 5 == 0,
+                ..Repo::default()
+            };
+            r.precompute_keys();
+            d.repos.push(r);
+        }
+        for i in 0..80 {
+            let r = &d.repos[i % d.repos.len()];
+            d.pulls.push(Pull {
+                number: (100 + i) as u32,
+                title: format!("Optimize batching pipeline in {} ({i})", r.name),
+                repo: r.full_name.clone(),
+                author: "octo".into(),
+                state: if i % 4 == 0 { PullState::Draft } else { PullState::Open },
+                checks: None,
+                updated_at: 1_731_000_000 - (i as i64) * 600,
+                comments: (i % 8) as u32,
+                url: format!("{}/pull/{}", r.url, 100 + i),
+                labels: vec![("performance".into(), 40.0)],
+            });
+            d.issues.push(Issue {
+                number: (200 + i) as u32,
+                title: format!("Investigate latency spike on {} #{i}", r.name),
+                repo: r.full_name.clone(),
+                label: Some(("bug".into(), 20.0)),
+                created_at: 1_731_000_000 - (i as i64) * 900,
+                comments: (i % 5) as u32,
+                url: format!("{}/issues/{}", r.url, 200 + i),
+                labels: vec![("bug".into(), 20.0)],
+                assignees: Vec::new(),
+            });
+        }
+        d
+    }
+
+    #[test]
+    fn measure_500_repos_search_and_palette() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = crate::init();
+        s.data = sample_500();
+        s.pending_place = None;
+        s.page = Page::Repos;
+        let mut rt = rune::Runtime::new(s, crate::view, (1180.0, 760.0), rune::Env::new(true, 1.0));
+        rt.reduced_motion = true;
+        rt.on_key = Some(crate::on_key);
+        let mut t = 0.0;
+        rt.frame(t);
+
+        // Initial page renders REPOS_PAGE (60) cards and offers "Show more (440 left)".
+        let card_count = |rt: &rune::Runtime<App>| {
+            rt.elements().iter().filter(|e| e.key.as_deref().is_some_and(|k| k.starts_with("card-"))).count()
+        };
+        assert_eq!(card_count(&rt), crate::pages::REPOS_PAGE);
+        assert!(rt.find("repos-show-more").is_some(), "Show more button appears when >60 repos match");
+
+        // Focus search input on Repositories page.
+        let (sx, sy) = rt.find("search").expect("search input present");
+        rt.pointer_move(sx, sy);
+        rt.pointer_down(sx, sy);
+        rt.pointer_up(sx, sy);
+        t += 0.05;
+        rt.frame(t);
+
+        let mut search_ms = Vec::new();
+        for ch in "service-ze".chars() {
+            let t0 = Instant::now();
+            rt.key(KeyEvent { key: Key::Text(ch.to_string()), mods: Mods::default() });
+            t += 0.05;
+            rt.frame(t);
+            search_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
+        }
+
+        // Clear search so all 500 repos are eligible again, then open Palette and type.
+        rt.update(|s: &mut App, _| s.search.clear());
+        t += 0.05;
+        rt.frame(t);
+
+        let cmd = Mods { cmd: true, ..Mods::default() };
+        let t0_open = Instant::now();
+        rt.key(KeyEvent { key: Key::Command('k'), mods: cmd });
+        t += 0.05;
+        rt.frame(t);
+        let open_ms = t0_open.elapsed().as_secs_f64() * 1000.0;
+        assert!(rt.state.palette.is_some());
+
+        let mut palette_ms = Vec::new();
+        for ch in "service-ze".chars() {
+            let t0 = Instant::now();
+            rt.key(KeyEvent { key: Key::Text(ch.to_string()), mods: Mods::default() });
+            t += 0.05;
+            rt.frame(t);
+            palette_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
+        }
+
+        let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+        let max = |v: &[f64]| v.iter().copied().fold(0.0_f64, f64::max);
+        println!(
+            "PERF61_METRICS repos_search_mean={:.2}ms repos_search_max={:.2}ms palette_open={:.2}ms palette_type_mean={:.2}ms palette_type_max={:.2}ms",
+            mean(&search_ms), max(&search_ms), open_ms, mean(&palette_ms), max(&palette_ms)
+        );
+
+        // One frame (16 ms) is the target, checked with `REPOHUB_PERF_ASSERT=1` on a quiet
+        // machine. Tests run in parallel on shared CI runners, where timings swing: there the
+        // bound only catches a return to the old cost (hundreds of milliseconds).
+        #[cfg(not(debug_assertions))]
+        {
+            let budget = if std::env::var("REPOHUB_PERF_ASSERT").is_ok_and(|v| v == "1") { 16.0 } else { 120.0 };
+            assert!(mean(&search_ms) < budget, "expected Repos search typing < {budget} ms in release, got {:.2} ms", mean(&search_ms));
+            assert!(mean(&palette_ms) < budget, "expected Palette typing < {budget} ms in release, got {:.2} ms", mean(&palette_ms));
+        }
+
+        // Close palette and verify clicking "Show more" expands to 120 cards, and changing search resets to 60.
+        rt.update(|s: &mut App, _| s.palette = None);
+        t += 0.05;
+        rt.frame(t);
+        rt.update(|s: &mut App, _| s.repos_limit += crate::pages::REPOS_PAGE);
+        t += 0.05;
+        rt.frame(t);
+        assert_eq!(card_count(&rt), crate::pages::REPOS_PAGE * 2);
+    }
+
+    #[test]
+    fn clone_cache_avoids_reprobing_disk_after_first_lookup() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let s = crate::init();
+        assert!(!s.clone_dirs.borrow().contains_key("nobody/nonexistent-repo-61"));
+        assert_eq!(s.known_clone("nobody/nonexistent-repo-61"), None);
+        assert_eq!(s.clone_dirs.borrow().get("nobody/nonexistent-repo-61"), Some(&None));
+    }
+}
+
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod cache_freshness {
+    use crate::state::{RepoSort, RepoTab};
+
+    /// A change to a repository in the middle of the list reaches the cached order.
+    #[test]
+    fn a_change_in_the_middle_of_the_list_reorders_it() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = crate::init();
+        s.pending_place = None;
+        s.data = crate::model::Data::sample();
+        s.data_changed();
+        s.sort = RepoSort::Stars;
+        let before = s.filtered_repos();
+        assert!(before.len() >= 3, "the sample has a few repositories");
+        let middle = before[before.len() / 2];
+        assert_ne!(before[0], middle);
+        s.data.repos[middle].stars = 1_000_000;
+        s.data_changed();
+        assert_eq!(s.filtered_repos()[0], middle, "the most starred repository comes first");
+        // A finished write goes through the same door.
+        let gen_before = s.data_gen;
+        let repo = s.data.repos[middle].full_name.clone();
+        s.apply_done(&repo, crate::github::Done::Commented(1));
+        assert_ne!(s.data_gen, gen_before);
+    }
+
+    /// A clone made outside the app after "no local copy" was remembered is found when a
+    /// section of the repository is opened.
+    #[test]
+    fn a_clone_made_in_a_terminal_is_found_when_a_section_opens() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!("repohub-recheck-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let prev = (std::env::var_os("REPOHUB_REPOS_DIR"), std::env::var_os("REPOHUB_DATA_DIR"));
+        // SAFETY: the environment lock is held.
+        unsafe {
+            std::env::set_var("REPOHUB_REPOS_DIR", base.join("work"));
+            std::env::set_var("REPOHUB_DATA_DIR", base.join("data"));
+        }
+        let mut s = crate::init();
+        s.pending_place = None;
+        s.data = crate::model::Data::sample();
+        s.data_changed();
+        s.data.repos[0].full_name = "octo/demo".into();
+        s.data.repos[0].name = "demo".into();
+        assert_eq!(s.known_clone("octo/demo"), None);
+        let repo = base.join("work").join("demo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join(".git/config"), "[remote \"origin\"]\n\turl = git@github.com:octo/demo.git\n").unwrap();
+        assert_eq!(s.known_clone("octo/demo"), None, "the miss is remembered between frames");
+        s.set_tab(0, RepoTab::Code);
+        assert_eq!(s.known_clone("octo/demo"), Some(repo));
+        // SAFETY: as above.
+        unsafe {
+            match prev.0 { Some(v) => std::env::set_var("REPOHUB_REPOS_DIR", v), None => std::env::remove_var("REPOHUB_REPOS_DIR") }
+            match prev.1 { Some(v) => std::env::set_var("REPOHUB_DATA_DIR", v), None => std::env::remove_var("REPOHUB_DATA_DIR") }
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

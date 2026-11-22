@@ -337,6 +337,36 @@ impl RepoSort {
     }
 }
 
+/// Which workflow runs the Actions page shows by status.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RunStatusFilter {
+    #[default]
+    All,
+    Failed,
+    Running,
+}
+
+impl RunStatusFilter {
+    pub const ALL: [RunStatusFilter; 3] = [RunStatusFilter::All, RunStatusFilter::Failed, RunStatusFilter::Running];
+    pub const LABELS: [&'static str; 3] = ["All", "Failed", "Running"];
+
+    pub fn index(self) -> usize {
+        RunStatusFilter::ALL.iter().position(|f| *f == self).unwrap_or(0)
+    }
+
+    pub fn from_index(i: usize) -> RunStatusFilter {
+        RunStatusFilter::ALL.get(i).copied().unwrap_or_default()
+    }
+
+    pub fn matches(self, checks: crate::model::Checks) -> bool {
+        match self {
+            RunStatusFilter::All => true,
+            RunStatusFilter::Failed => checks == crate::model::Checks::Failing,
+            RunStatusFilter::Running => checks == crate::model::Checks::Running,
+        }
+    }
+}
+
 /// Who owns the GitHub account setting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Account {
@@ -654,5 +684,12 @@ mod tests {
         assert_eq!(RepoTab::parse("claude"), Some(RepoTab::Claude));
         assert_eq!(RepoTab::from_index(99), RepoTab::Code);
         assert!(RepoFilter::Private.matches(true, false) && !RepoFilter::Fork.matches(true, false));
+        for (i, f) in RunStatusFilter::ALL.into_iter().enumerate() {
+            assert_eq!((f.index(), RunStatusFilter::from_index(i)), (i, f));
+        }
+        assert_eq!(RunStatusFilter::from_index(99), RunStatusFilter::All);
+        assert!(RunStatusFilter::All.matches(crate::model::Checks::Passing));
+        assert!(RunStatusFilter::Failed.matches(crate::model::Checks::Failing) && !RunStatusFilter::Failed.matches(crate::model::Checks::Running));
+        assert!(RunStatusFilter::Running.matches(crate::model::Checks::Running) && !RunStatusFilter::Running.matches(crate::model::Checks::Passing));
     }
 }

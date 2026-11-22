@@ -335,10 +335,10 @@ pub fn kit(look: &Look) -> Kit {
     c.danger.icon = col(Part::Danger);
     if look.accent_buttons {
         c.bg_icon_button_contrast = accent;
-        let ink = if accent.luminance() > 0.45 { Color::BLACK } else { Color::WHITE };
-        c.submit_fg = ink;
-        c.submit_icon = ink;
     }
+    let ink = contrast_ink(c.bg_icon_button_contrast);
+    c.submit_fg = ink;
+    c.submit_icon = ink;
     let r = look.radius;
     k.radius.lg = r;
     k.radius.xl = r;
@@ -351,6 +351,157 @@ pub fn kit(look: &Look) -> Kit {
         k.elevation.button_neutral.push(glow(0.45));
     }
     k
+}
+
+/// WCAG 2.1 minimum contrast for normal text (`4.5:1`) and large text or graphical marks (`3:1`).
+pub const MIN_CONTRAST: f32 = 4.5;
+pub const MIN_LARGE_CONTRAST: f32 = 3.0;
+
+/// `fg` (possibly translucent) composited over opaque `bg` in linear sRGB.
+pub fn blend_over(fg: Color, bg: Color) -> Color {
+    let [r, g, b, _] = rune::color::over(fg.premul(1.0), bg.alpha(1.0).premul(1.0));
+    Color { r, g, b, a: 1.0 }
+}
+
+/// WCAG 2.1 contrast ratio between two colours (`1.0` to `21.0`).
+pub fn contrast(a: Color, b: Color) -> f32 {
+    let (la, lb) = (a.luminance(), b.luminance());
+    (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+}
+
+/// Whether `contrast(a, b)` reaches `min` at the one-decimal precision shown in the editor.
+pub fn meets_contrast(a: Color, b: Color, min: f32) -> bool {
+    (contrast(a, b) * 10.0).round() >= (min * 10.0).round()
+}
+
+/// Black or white, whichever gives higher WCAG contrast against `bg`.
+pub fn contrast_ink(bg: Color) -> Color {
+    if contrast(bg, Color::BLACK) >= contrast(bg, Color::WHITE) { Color::BLACK } else { Color::WHITE }
+}
+
+/// A colour pair in a [`Look`] whose contrast falls below its WCAG target.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContrastWarning {
+    pub pair: &'static str,
+    pub ratio: f32,
+    pub min: f32,
+}
+
+impl ContrastWarning {
+    pub fn message(&self) -> String {
+        format!("Low contrast {:.1}:1, aim for {:.1}:1", self.ratio, self.min)
+    }
+}
+
+fn check_pairs(fg: Color, checks: &[(&'static str, Color, f32)]) -> Option<ContrastWarning> {
+    checks.iter()
+        .filter(|(_, bg, min)| !meets_contrast(fg, *bg, *min))
+        .map(|(pair, bg, min)| ContrastWarning { pair, ratio: contrast(fg, *bg), min: *min })
+        .min_by(|a, b| a.ratio.total_cmp(&b.ratio))
+}
+
+/// The backgrounds and minimum contrast a colour [`Part`] is checked against in the editor.
+fn part_targets(look: &Look, part: Part) -> Vec<(&'static str, Color, f32)> {
+    match part {
+        Part::Text => vec![
+            ("Text/Page", look.color(Part::Page), MIN_CONTRAST),
+            ("Text/Panel", look.color(Part::Panel), MIN_CONTRAST),
+        ],
+        Part::Muted => vec![("Secondary/Panel", look.color(Part::Panel), MIN_CONTRAST)],
+        Part::Accent => vec![("Accent/Panel", look.color(Part::Panel), MIN_CONTRAST)],
+        Part::Success => vec![("Success/Panel", look.color(Part::Panel), MIN_LARGE_CONTRAST)],
+        Part::Warning => vec![("Warning/Panel", look.color(Part::Panel), MIN_LARGE_CONTRAST)],
+        Part::Danger => vec![("Danger/Panel", look.color(Part::Panel), MIN_LARGE_CONTRAST)],
+        _ => Vec::new(),
+    }
+}
+
+/// The worst contrast failure for `part` in `look`, if any.
+pub fn part_contrast_warning(look: &Look, part: Part) -> Option<ContrastWarning> {
+    let targets = part_targets(look, part);
+    if targets.is_empty() {
+        return None;
+    }
+    check_pairs(look.color(part), &targets)
+}
+
+/// Contrast warning for the main buttons (`bg_icon_button_contrast` vs `submit_fg`, and when
+/// **Accent buttons** is on, the button fill against the panel at 3:1).
+pub fn button_contrast_warning(look: &Look) -> Option<ContrastWarning> {
+    let k = kit(look);
+    let mut checks = vec![("Accent buttons/ink", k.c.submit_fg, MIN_CONTRAST)];
+    if look.accent_buttons {
+        checks.push(("Accent buttons/Panel", look.color(Part::Panel), MIN_LARGE_CONTRAST));
+    }
+    check_pairs(k.c.bg_icon_button_contrast, &checks)
+}
+
+/// Every failing contrast check in `look` (empty when the theme passes).
+#[cfg(test)]
+pub fn contrast_warnings(look: &Look) -> Vec<ContrastWarning> {
+    let mut out = Vec::new();
+    for p in Part::ALL {
+        for (pair, bg, min) in part_targets(look, p) {
+            let fg = look.color(p);
+            if !meets_contrast(fg, bg, min) {
+                out.push(ContrastWarning { pair, ratio: contrast(fg, bg), min });
+            }
+        }
+    }
+    if let Some(w) = button_contrast_warning(look) {
+        out.push(w);
+    }
+    out
+}
+
+fn hex6(c: Color) -> String {
+    let h = c.hex();
+    h[..7].to_owned()
+}
+
+/// Moves `part`'s lightness in OKLab (keeping hue and as much chroma as sRGB allows) until it
+/// passes all of its contrast targets in `look`, returning the new `#rrggbb` colour.
+pub fn fix_part_contrast(look: &mut Look, part: Part) -> Option<String> {
+    let targets = part_targets(look, part);
+    if targets.is_empty() {
+        return None;
+    }
+    let fg = look.color(part);
+    if targets.iter().all(|(_, bg, min)| meets_contrast(fg, *bg, *min)) {
+        return None;
+    }
+    let [l0, a, b, _] = fg.to_oklab();
+    // Aim slightly above `min` first so `#rrggbb` rounding stays clear of the boundary; fall back
+    // to exact `meets_contrast` when two extreme backgrounds (black + white) leave a narrow band.
+    for margin in [0.06, 0.0] {
+        for scale in [1.0, 0.75, 0.5, 0.25, 0.0] {
+            let mut best: Option<(f32, String)> = None;
+            for step in 0..=512 {
+                let l = step as f32 / 512.0;
+                let cand_hex = hex6(Color::from_oklab([l, a * scale, b * scale, 1.0]));
+                let Some(cand) = rune::color::hex(&cand_hex) else { continue };
+                let ok = if margin > 0.0 {
+                    targets.iter().all(|(_, bg, min)| contrast(cand, *bg) >= *min + margin)
+                } else {
+                    targets.iter().all(|(_, bg, min)| meets_contrast(cand, *bg, *min))
+                };
+                if !ok {
+                    continue;
+                }
+                // Prefer the smaller lightness jump; break ties toward light ink on dark themes.
+                let dir_bias = if (look.dark && l >= l0) || (!look.dark && l <= l0) { 0.0 } else { 0.001 };
+                let dist = (l - l0).abs() + dir_bias;
+                if best.as_ref().is_none_or(|(d, _)| dist < *d) {
+                    best = Some((dist, cand_hex));
+                }
+            }
+            if let Some((_, chosen)) = best {
+                look.colors[part.index()] = chosen.clone();
+                return Some(chosen);
+            }
+        }
+    }
+    None
 }
 
 /// `#rgb` or `#rrggbb` (the `#` optional) as `#rrggbb`; `None` when it isn't a colour.
@@ -490,5 +641,75 @@ mod tests {
         }
         assert_eq!(step(&STRENGTHS, 0.4), 1);
         assert_eq!(step(&SIZES, 40.0), 2);
+    }
+
+    #[test]
+    fn every_builtin_theme_and_label_chip_passes_contrast_checks() {
+        for look in builtin() {
+            let warnings = contrast_warnings(&look);
+            assert!(warnings.is_empty(), "{} failed contrast: {warnings:?}", look.id);
+            let k = kit(&look);
+            assert!(
+                contrast(k.c.bg_icon_button_contrast, k.c.submit_fg) >= MIN_CONTRAST,
+                "{} main button ink contrast too low",
+                look.id
+            );
+            for step in 0..24 {
+                let hue = step as f32 * 15.0;
+                let (ink, fill, _) = crate::ui::label_chip_colors(&k, hue);
+                let bg = blend_over(fill, k.c.bg_base);
+                let ratio = contrast(ink, bg);
+                assert!(
+                    ratio >= MIN_CONTRAST,
+                    "{} label chip at hue {hue} has {ratio:.2}:1 (< {MIN_CONTRAST})",
+                    look.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn button_ink_uses_contrast_even_without_accent_buttons() {
+        let mut custom = classic(false);
+        custom.builtin = false;
+        // Text and Page have almost identical mid-grey luminance, and accent_buttons is off.
+        custom.colors[Part::Page.index()] = "#707070".into();
+        custom.colors[Part::Text.index()] = "#767676".into();
+        custom.accent_buttons = false;
+        let k = kit(&custom);
+        assert!(contrast(k.c.bg_icon_button_contrast, k.c.submit_fg) >= MIN_CONTRAST);
+    }
+
+    #[test]
+    fn fix_part_contrast_resolves_low_contrast_colours() {
+        for dark in [false, true] {
+            let mut t = classic(dark);
+            t.builtin = false;
+            t.colors[Part::Text.index()] = t.colors[Part::Page.index()].clone();
+            t.colors[Part::Muted.index()] = t.colors[Part::Panel.index()].clone();
+            t.colors[Part::Accent.index()] = t.colors[Part::Panel.index()].clone();
+            t.colors[Part::Warning.index()] = t.colors[Part::Panel.index()].clone();
+
+            let w = part_contrast_warning(&t, Part::Text).expect("Text == Page fails");
+            assert_eq!(w.message(), "Low contrast 1.0:1, aim for 4.5:1");
+            let w_warn = part_contrast_warning(&t, Part::Warning).expect("Warning == Panel fails");
+            assert_eq!(w_warn.message(), "Low contrast 1.0:1, aim for 3.0:1");
+
+            for part in [Part::Text, Part::Muted, Part::Accent, Part::Warning] {
+                assert!(fix_part_contrast(&mut t, part).is_some(), "{part:?} fixed");
+                assert_eq!(part_contrast_warning(&t, part), None, "{part:?} passes after fix");
+            }
+            assert!(contrast_warnings(&t).is_empty());
+        }
+
+        // Split Page/Panel extremes (black page, white panel) still find a readable Text colour.
+        let mut split = classic(true);
+        split.builtin = false;
+        split.colors[Part::Page.index()] = "#000000".into();
+        split.colors[Part::Panel.index()] = "#ffffff".into();
+        split.colors[Part::Text.index()] = "#ffffff".into();
+        assert!(part_contrast_warning(&split, Part::Text).is_some());
+        assert!(fix_part_contrast(&mut split, Part::Text).is_some());
+        assert_eq!(part_contrast_warning(&split, Part::Text), None);
     }
 }

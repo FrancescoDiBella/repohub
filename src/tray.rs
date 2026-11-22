@@ -36,6 +36,7 @@ impl Entry {
 pub enum Action {
     Open,
     Go(Page),
+    MyFailingPulls,
     OpenRepo(String),
     NewIssue(String),
     Refresh,
@@ -48,14 +49,15 @@ pub fn parse(id: &str) -> Option<Action> {
     let (kind, arg) = id.split_once(':').unwrap_or((id, ""));
     Some(match kind {
         "open" => Action::Open,
-        "go" => Action::Go(match arg {
-            "pulls" => Page::Pulls,
-            "issues" => Page::Issues,
-            "actions" => Page::Actions,
-            "repos" => Page::Repos,
-            "notifications" => Page::Notifications,
-            _ => Page::Overview,
-        }),
+        "go" => match arg {
+            "pulls:mine-failing" => Action::MyFailingPulls,
+            "pulls" => Action::Go(Page::Pulls),
+            "issues" => Action::Go(Page::Issues),
+            "actions" => Action::Go(Page::Actions),
+            "repos" => Action::Go(Page::Repos),
+            "notifications" => Action::Go(Page::Notifications),
+            _ => Action::Go(Page::Overview),
+        },
         "repo" if !arg.is_empty() => Action::OpenRepo(arg.to_owned()),
         "new-issue" if !arg.is_empty() => Action::NewIssue(arg.to_owned()),
         "refresh" => Action::Refresh,
@@ -73,6 +75,22 @@ fn plural_capped(n: usize, full: bool, one: &str, many: &str) -> String {
     format!("{} {}", crate::model::capped_if(n, full), if n == 1 && !full { one } else { many })
 }
 
+/// Number of open/draft pull requests authored by the signed-in user that have failing checks or a failing workflow run.
+pub fn my_failing_pulls(d: &crate::model::Data) -> usize {
+    use crate::model::{Checks, PullState, same_repo};
+    let me = d.profile.login.trim();
+    if me.is_empty() {
+        return 0;
+    }
+    d.pulls.iter()
+        .filter(|p| matches!(p.state, PullState::Open | PullState::Draft) && p.author.eq_ignore_ascii_case(me))
+        .filter(|p| {
+            p.checks == Some(Checks::Failing)
+                || d.runs.iter().any(|r| r.checks == Checks::Failing && same_repo(&r.repo, &p.repo) && r.pull_numbers.contains(&p.number))
+        })
+        .count()
+}
+
 /// The menu for the app's current state.
 pub fn menu(s: &App) -> Vec<Entry> {
     use crate::model::{Checks, PullState, SEARCH_CAP};
@@ -80,6 +98,7 @@ pub fn menu(s: &App) -> Vec<Entry> {
     let prs_capped = d.prs_capped();
     let issues_capped = d.issues_capped();
     let prs = d.pulls.iter().filter(|p| matches!(p.state, PullState::Open | PullState::Draft)).count();
+    let my_failing = my_failing_pulls(d);
     let failed = d.runs.iter().filter(|r| r.checks == Checks::Failing).count();
     let mut m = vec![
         Entry::item("open", format!("Open {}", s.cfg.title)),
@@ -115,8 +134,16 @@ pub fn menu(s: &App) -> Vec<Entry> {
     } else {
         "Recent runs passed".into()
     };
+    m.push(Entry::item("go:pulls", pulls_label));
+    if my_failing > 0 {
+        let label = if my_failing == 1 {
+            "1 of your pull requests has failing checks".to_owned()
+        } else {
+            format!("{my_failing} of your pull requests have failing checks")
+        };
+        m.push(Entry::item("go:pulls:mine-failing", label));
+    }
     m.extend([
-        Entry::item("go:pulls", pulls_label),
         Entry::item("go:issues", issues_label),
         Entry::item("go:actions", runs_label),
     ]);
@@ -163,7 +190,13 @@ pub fn menu(s: &App) -> Vec<Entry> {
 pub fn tooltip(s: &App) -> String {
     let prs_capped = s.data.prs_capped();
     let prs = s.data.pulls.iter().filter(|p| matches!(p.state, crate::model::PullState::Open | crate::model::PullState::Draft)).count();
-    format!("{} · {}", s.cfg.title, plural_capped(prs, prs_capped, "open pull request", "open pull requests"))
+    let my_failing = my_failing_pulls(&s.data);
+    let base = format!("{} · {}", s.cfg.title, plural_capped(prs, prs_capped, "open pull request", "open pull requests"));
+    if my_failing > 0 {
+        format!("{base} · {}", plural(my_failing, "failing check on your PRs", "failing checks on your PRs"))
+    } else {
+        base
+    }
 }
 
 /// Whether to show the widget: a desktop window (not a headless run), unless `REPOHUB_TRAY=0`.
@@ -349,5 +382,24 @@ mod tests {
         let m = menu(&s);
         assert!(m.iter().any(|e| e.id == "go:pulls" && e.label == "12 open pull requests"), "{m:#?}");
         assert!(tooltip(&s).ends_with("12 open pull requests"));
+    }
+
+    #[test]
+    fn failing_checks_on_own_open_pulls_show_alert_in_menu_and_tooltip() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = crate::init();
+        s.data = crate::model::Data::sample_at(1_700_000_000);
+        // Sample data has no failing PR authored by francescodibella initially.
+        assert!(!menu(&s).iter().any(|e| e.id == "go:pulls:mine-failing"));
+
+        // Mark PR #9 (authored by francescodibella) as failing via a matching workflow run.
+        s.data.runs[1].checks = crate::model::Checks::Failing;
+        let m = menu(&s);
+        assert!(
+            m.iter().any(|e| e.id == "go:pulls:mine-failing" && e.label == "1 of your pull requests has failing checks"),
+            "{m:#?}"
+        );
+        assert!(tooltip(&s).contains("1 failing check on your PRs"), "{}", tooltip(&s));
+        assert_eq!(parse("go:pulls:mine-failing"), Some(Action::MyFailingPulls));
     }
 }

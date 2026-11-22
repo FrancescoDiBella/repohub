@@ -51,10 +51,43 @@ pub fn topic(k: &Kit, name: &str) -> El {
         .px(9.0).py(3.0).radius(10.0).fill(k.c.bg_accent.alpha(0.14))
 }
 
+/// Ink, fill and border for an issue label chip of `hue` over `k`'s panel (`>= 4.5:1` contrast).
+pub fn label_chip_colors(k: &Kit, hue: f32) -> (Color, Color, Color) {
+    let tint = oklch(0.62, 0.12, hue);
+    let fill = tint.alpha(0.16);
+    let border = tint.alpha(0.45);
+    let bg = crate::themes::blend_over(fill, k.c.bg_base);
+    let start = if k.dark { 0.78 } else { 0.42 };
+    let mut ink = oklch(start, 0.13, hue);
+    if crate::themes::contrast(ink, bg) < 4.55 {
+        let toward_white = crate::themes::contrast(Color::WHITE, bg) >= crate::themes::contrast(Color::BLACK, bg);
+        let pole = if toward_white { 1.0 } else { 0.0 };
+        for chroma in [0.13, 0.09, 0.04, 0.0] {
+            let edge = oklch(pole, chroma, hue);
+            if crate::themes::contrast(edge, bg) >= 4.55 {
+                let (mut lo, mut hi) = (0.0f32, 1.0f32);
+                for _ in 0..16 {
+                    let mid = (lo + hi) * 0.5;
+                    let cand = oklch(start + (pole - start) * mid, chroma, hue);
+                    if crate::themes::contrast(cand, bg) >= 4.55 {
+                        hi = mid;
+                    } else {
+                        lo = mid;
+                    }
+                }
+                ink = oklch(start + (pole - start) * hi, chroma, hue);
+                break;
+            }
+        }
+    }
+    (ink, fill, border)
+}
+
 /// A coloured label chip (issue labels).
 pub fn label_chip(k: &Kit, name: &str, hue: f32) -> El {
-    text(name.to_owned()).font(k.ty.text_xsmall_medium).color(oklch(0.72, 0.13, hue))
-        .px(8.0).py(2.0).radius(10.0).fill(oklch(0.62, 0.12, hue).alpha(0.16)).border(1.0, oklch(0.62, 0.12, hue).alpha(0.45))
+    let (ink, fill, border) = label_chip_colors(k, hue);
+    text(name.to_owned()).font(k.ty.text_xsmall_medium).color(ink)
+        .px(8.0).py(2.0).radius(10.0).fill(fill).border(1.0, border)
 }
 
 /// A square avatar with the first letter of `name`.
@@ -70,22 +103,22 @@ pub fn user(k: &Kit, name: &str, size: f32) -> El {
     avatar(k, name, hue as f32, size).radius(size / 2.0)
 }
 
-/// The CI state as a coloured icon.
+/// The CI state as a distinct, labelled icon.
 pub fn checks(k: &Kit, c: Checks) -> El {
     match c {
-        Checks::Passing => ico(&icons::CHECK, 14.0, k.c.success.icon),
-        Checks::Failing => ico(&icons::CROSS, 14.0, k.c.danger.icon),
-        Checks::Running => ico(&icons::DOT, 14.0, k.c.warning.icon),
+        Checks::Passing => ico(&icons::CHECK, 14.0, k.c.success.icon).label("CI passing"),
+        Checks::Failing => ico(&icons::CROSS, 14.0, k.c.danger.icon).label("CI failing"),
+        Checks::Running => ico(&icons::DOT, 14.0, k.c.warning.icon).label("CI running"),
     }
 }
 
-/// The pull request state icon.
+/// The pull request state icon, with a distinct shape and accessible label for each state.
 pub fn pull_icon(k: &Kit, s: PullState) -> El {
     match s {
-        PullState::Open => ico(&icons::PULL, 16.0, k.c.success.icon),
-        PullState::Draft => ico(&icons::PULL, 16.0, k.c.icon_faint),
-        PullState::Merged => ico(&icons::MERGE, 16.0, oklch(0.62, 0.17, 300.0)),
-        PullState::Closed => ico(&icons::PULL, 16.0, k.c.danger.icon),
+        PullState::Open => ico(&icons::PULL, 16.0, k.c.success.icon).label("Pull request open"),
+        PullState::Draft => ico(&icons::PULL_DRAFT, 16.0, k.c.icon_faint).label("Draft pull request"),
+        PullState::Merged => ico(&icons::MERGE, 16.0, oklch(0.62, 0.17, 300.0)).label("Pull request merged"),
+        PullState::Closed => ico(&icons::PULL_CLOSED, 16.0, k.c.danger.icon).label("Pull request closed"),
     }
 }
 

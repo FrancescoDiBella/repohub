@@ -17,14 +17,41 @@ pub struct Palette {
     pub query: TextEdit,
     /// The highlighted row among the results.
     pub selected: usize,
+    cache: std::cell::RefCell<PaletteCache>,
 }
 
 impl Palette {
     pub fn new() -> Palette {
         let mut query = TextEdit::new("");
         query.focused = true;
-        Palette { query, selected: 0 }
+        Palette { query, selected: 0, cache: std::cell::RefCell::new(PaletteCache::default()) }
     }
+}
+
+struct IndexedEntry {
+    entry: Entry,
+    title_lower: String,
+    combined_lower: String,
+}
+
+impl IndexedEntry {
+    fn of(entry: Entry) -> Self {
+        let title_lower = entry.title.to_lowercase();
+        let combined_lower = if entry.detail.is_empty() {
+            String::new()
+        } else {
+            format!("{} {}", title_lower, entry.detail.to_lowercase())
+        };
+        Self { entry, title_lower, combined_lower }
+    }
+}
+
+#[derive(Default)]
+struct PaletteCache {
+    state_stamp: Option<u64>,
+    all: Vec<IndexedEntry>,
+    last_query: Option<String>,
+    top: Vec<usize>,
 }
 
 /// What an entry does.
@@ -72,12 +99,13 @@ pub const MOD: &str = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl" };
 
 /// Every command, in the order shown before anything is typed.
 pub fn entries(s: &App) -> Vec<Entry> {
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(32 + s.data.repos.len() + s.data.pulls.len() + s.data.issues.len());
     // The repository on screen first: what you most likely want next.
     if let Page::Repo(full) = &s.page
         && let Some((i, r)) = s.data.repos.iter().enumerate().find(|(_, r)| r.full_name.eq_ignore_ascii_case(full))
     {
         let n = &r.name;
+        let tabs = s.tabs();
         out.push(entry(format!("New issue in {n}"), "Action", &icons::ISSUE, Command::Compose(i, Compose::Issue)));
         out.push(entry(format!("New pull request in {n}"), "Action", &icons::PULL, Command::Compose(i, Compose::Pull)));
         out.push(entry(format!("New branch in {n}"), "Action", &icons::BRANCH, Command::Compose(i, Compose::Branch)));
@@ -103,7 +131,7 @@ pub fn entries(s: &App) -> Vec<Entry> {
         for (p, label) in s.plugins.repo_tabs() {
             out.push(Entry { detail: "plugin".into(), ..entry(format!("{label} · {n}"), "Plugin", &icons::SPARK, Command::PluginTab(i, p)) });
         }
-        for t in s.tabs() {
+        for t in tabs {
             if t != s.tab && t != RepoTab::Commits {
                 out.push(entry(format!("{} · {n}", RepoTab::LABELS[t.index()]), "Section", &icons::REPO, Command::Tab(i, t)));
             }
@@ -167,19 +195,31 @@ pub fn entries(s: &App) -> Vec<Entry> {
     out
 }
 
-/// How well `query` matches `text` (higher is better), or `None` when some word of the query
-/// doesn't appear. Each word scores most at the start of the text, then at the start of a word,
-/// then anywhere, then as letters in order ("rhb" finds "repohub").
-pub fn score(query: &str, text: &str) -> Option<i32> {
-    let hay = text.to_lowercase();
+/// Scores pre-lowercased query `words` (and `trimmed_lower` full query) against pre-lowercased `hay`.
+fn score_lower(words: &[String], trimmed_lower: &str, hay: &str) -> Option<i32> {
+    if hay.is_empty() {
+        return None;
+    }
     let mut total = 0;
-    for word in query.split_whitespace().map(str::to_lowercase) {
-        let at_word = hay.match_indices(&word).find(|(i, _)| *i == 0 || !hay.as_bytes()[i - 1].is_ascii_alphanumeric()).map(|(i, _)| i);
-        total += if hay.starts_with(&word) {
-            300
-        } else if let Some(i) = at_word {
+    for word in words {
+        if hay.starts_with(word.as_str()) {
+            total += 300;
+            continue;
+        }
+        let mut first_any = None;
+        let mut at_word = None;
+        for (i, _) in hay.match_indices(word.as_str()) {
+            if first_any.is_none() {
+                first_any = Some(i);
+            }
+            if i == 0 || !hay.as_bytes()[i - 1].is_ascii_alphanumeric() {
+                at_word = Some(i);
+                break;
+            }
+        }
+        total += if let Some(i) = at_word {
             200 - i.min(100) as i32
-        } else if let Some(i) = hay.find(&word) {
+        } else if let Some(i) = first_any {
             100 - i.min(90) as i32
         } else {
             // Letters in order, fewer gaps first.
@@ -202,30 +242,75 @@ pub fn score(query: &str, text: &str) -> Option<i32> {
         };
     }
     // The whole name typed out wins over a longer name that starts the same.
-    if hay == query.trim().to_lowercase() {
+    if hay == trimmed_lower {
         total += 100;
     }
     Some(total)
 }
 
+/// How well `query` matches `text` (higher is better), or `None` when some word of the query
+/// doesn't appear. Each word scores most at the start of the text, then at the start of a word,
+/// then anywhere, then as letters in order ("rhb" finds "repohub").
+#[cfg(test)]
+pub fn score(query: &str, text: &str) -> Option<i32> {
+    let trimmed_lower = query.trim().to_lowercase();
+    if trimmed_lower.is_empty() {
+        return Some(0);
+    }
+    let words: Vec<String> = trimmed_lower.split_whitespace().map(str::to_owned).collect();
+    let hay = text.to_lowercase();
+    score_lower(&words, &trimmed_lower, &hay)
+}
+
 /// The entries matching `query`, best first (all of them, in order, for an empty query).
+#[cfg(test)]
 pub fn search(all: Vec<Entry>, query: &str) -> Vec<Entry> {
-    if query.trim().is_empty() {
+    let trimmed_lower = query.trim().to_lowercase();
+    if trimmed_lower.is_empty() {
         return all;
     }
+    let words: Vec<String> = trimmed_lower.split_whitespace().map(str::to_owned).collect();
     let mut ranked: Vec<(i32, usize, Entry)> = all.into_iter().enumerate().filter_map(|(n, e)| {
-        let title = score(query, &e.title);
-        let detail = score(query, &format!("{} {}", e.title, e.detail)).map(|v| v - 50);
-        title.max(detail).map(|v| (v, n, e))
+        let ie = IndexedEntry::of(e);
+        let title = score_lower(&words, &trimmed_lower, &ie.title_lower);
+        let detail = (!ie.combined_lower.is_empty()).then(|| score_lower(&words, &trimmed_lower, &ie.combined_lower)).flatten().map(|v| v - 50);
+        title.max(detail).map(|v| (v, n, ie.entry))
     }).collect();
     ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
     ranked.into_iter().map(|x| x.2).collect()
 }
 
-/// The results for the open palette.
+/// The results for the open palette, cached across frames while state and query stay the same.
 pub fn results(s: &App) -> Vec<Entry> {
-    let q = s.palette.as_ref().map(|p| p.query.text.clone()).unwrap_or_default();
-    search(entries(s), &q).into_iter().take(60).collect()
+    let Some(p) = &s.palette else {
+        return entries(s).into_iter().take(60).collect();
+    };
+    let stamp = s.palette_stamp();
+    let mut cache = p.cache.borrow_mut();
+    if cache.state_stamp != Some(stamp) {
+        cache.all = entries(s).into_iter().map(IndexedEntry::of).collect();
+        cache.state_stamp = Some(stamp);
+        cache.last_query = None;
+        cache.top.clear();
+    }
+    let q = p.query.text.trim();
+    if cache.last_query.as_deref() != Some(q) {
+        if q.is_empty() {
+            cache.top = (0..cache.all.len().min(60)).collect();
+        } else {
+            let trimmed_lower = q.to_lowercase();
+            let words: Vec<String> = trimmed_lower.split_whitespace().map(str::to_owned).collect();
+            let mut ranked: Vec<(i32, usize)> = cache.all.iter().enumerate().filter_map(|(n, ie)| {
+                let title = score_lower(&words, &trimmed_lower, &ie.title_lower);
+                let detail = (!ie.combined_lower.is_empty()).then(|| score_lower(&words, &trimmed_lower, &ie.combined_lower)).flatten().map(|v| v - 50);
+                title.max(detail).map(|v| (v, n))
+            }).collect();
+            ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+            cache.top = ranked.into_iter().take(60).map(|(_, n)| n).collect();
+        }
+        cache.last_query = Some(q.to_owned());
+    }
+    cache.top.iter().map(|&n| cache.all[n].entry.clone()).collect()
 }
 
 /// Runs a command (the palette is already closed).

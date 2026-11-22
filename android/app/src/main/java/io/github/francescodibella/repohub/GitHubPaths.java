@@ -130,6 +130,12 @@ final class GitHubPaths {
                     if (rest.length == 3 && rest[0].equals("issues") && number(rest[1]) && rest[2].equals("comments")) {
                         return true;
                     }
+                    if (rest.length == 4 && rest[0].equals("actions") && rest[1].equals("runs") && number(rest[2]) && rest[3].equals("jobs")) {
+                        return true;
+                    }
+                    if (rest.length == 4 && rest[0].equals("actions") && rest[1].equals("jobs") && number(rest[2]) && rest[3].equals("logs")) {
+                        return true;
+                    }
                     // The checks on a pull request's last commit (a hex commit id).
                     if (rest.length == 3 && rest[0].equals("commits") && rest[1].matches("[0-9a-fA-F]{7,64}") && rest[2].equals("check-runs")) {
                         return true;
@@ -152,10 +158,11 @@ final class GitHubPaths {
             case "DELETE":
                 return starred(seg);
             case "POST":
-                // Creating an issue, a pull request or a branch; commenting; reviewing a pull request.
+                // Creating an issue, a pull request or a branch; commenting; reviewing a pull request; re-running a workflow.
                 return repo && ((rest.length == 1 && (rest[0].equals("issues") || rest[0].equals("pulls")))
                     || (rest.length == 2 && rest[0].equals("git") && rest[1].equals("refs"))
-                    || (rest.length == 3 && number(rest[1]) && ((rest[0].equals("issues") && rest[2].equals("comments")) || (rest[0].equals("pulls") && (rest[2].equals("reviews") || rest[2].equals("comments"))))));
+                    || (rest.length == 3 && number(rest[1]) && ((rest[0].equals("issues") && rest[2].equals("comments")) || (rest[0].equals("pulls") && (rest[2].equals("reviews") || rest[2].equals("comments")))))
+                    || (rest.length == 4 && rest[0].equals("actions") && rest[1].equals("runs") && number(rest[2]) && (rest[3].equals("rerun") || rest[3].equals("rerun-failed-jobs"))));
             case "PATCH":
                 // Closing or reopening an issue; marking one notification as read.
                 return (repo && rest.length == 2 && rest[0].equals("issues") && number(rest[1]))
