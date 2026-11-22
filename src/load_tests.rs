@@ -596,3 +596,58 @@ fn conversations_and_repository_pages_read_before_show_at_once() {
     s.apply_detail(s.load_gen, key.clone(), crate::model::Detail { error: Some("offline".into()), ..Default::default() });
     assert!(matches!(s.details.get(&key), Some(crate::state::Load::Ready(d)) if d.readme.as_deref() == Some("old")));
 }
+
+/// Only a token is set, and it was changed outside the app to another account's: the copy
+/// (named after the host, not an account) is the previous account's. It goes as soon as the
+/// new account's profile and repositories are in, not after the whole load (nor never, when
+/// the rest of the load fails).
+#[test]
+fn another_accounts_copy_goes_as_soon_as_its_profile_is_in() {
+    let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _tmp = crate::load_gen_tests::TempDataDir::new("saved-copy-other");
+    etag::clear();
+    let token_only = |s: &mut crate::App| {
+        let mut cfg = (*s.cfg).clone();
+        cfg.user = None;
+        s.cfg = Arc::new(cfg);
+    };
+    let mut first = live_app("octo");
+    token_only(&mut first);
+    first.refresh();
+    let epoch = first.load_gen;
+    first.apply(epoch, Ok(loaded("octo")));
+    assert_eq!(copies(), vec![cache::file(&first.cfg.api, "")], "the token's copy");
+
+    // The next start, with another account's token in the same place.
+    let mut next = live_app("octo");
+    token_only(&mut next);
+    next.show_saved_copy();
+    assert_eq!(next.data.profile.login, "octo");
+    next.refresh();
+    let epoch = next.load_gen;
+    let mut alice = loaded("alice");
+    (alice.pulls, alice.issues, alice.runs) = (Vec::new(), Vec::new(), Vec::new());
+    next.apply_early(epoch, alice);
+    assert_eq!(next.data.profile.login, "alice", "the other account's lists are gone");
+    assert!(next.data.repos.iter().all(|r| r.owner == "alice"));
+    assert!(!next.fresh.from_copy && next.lists_loading(), "the rest of the lists are loading");
+    assert!(copies().is_empty(), "and its copy");
+    next.apply(epoch, Err("GitHub is down".into()));
+    assert_eq!(next.data.profile.login, "alice", "a failure doesn't bring it back");
+
+    // The same account's copy stays on screen until the whole load is in.
+    let mut same = live_app("octo");
+    token_only(&mut same);
+    let mut octo = loaded("octo");
+    octo.repos.truncate(1);
+    same.data = loaded("octo");
+    same.data_changed();
+    same.fresh.from_copy = true;
+    same.refresh();
+    let epoch = same.load_gen;
+    let shown = same.data.repos.len();
+    same.apply_early(epoch, octo);
+    assert_eq!(same.data.repos.len(), shown);
+    assert!(same.fresh.from_copy);
+    etag::clear();
+}
