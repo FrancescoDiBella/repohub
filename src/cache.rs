@@ -82,6 +82,9 @@ pub struct Fresh {
     pub info: Option<Info>,
     /// Where the first load reports until the window (and the app's handle) exists.
     pub early: Option<net::Mailbox>,
+    /// With only a token, the copy read at start waits here until GitHub says whose the token
+    /// is (`App::profile_known`): it may have been changed outside the app.
+    pub held: Option<(Copy, usize)>,
 }
 
 /// Whether the copy is kept: `REPOHUB_CACHE=off` (or `0`, `false`, `no`) turns it off.
@@ -589,12 +592,43 @@ pub fn trace_time(what: &str) {
 // ------------------------------------------------------------------ the app
 
 impl App {
-    /// At start: shows the saved copy for this account at once, while the first load runs.
+    /// At start: shows the saved copy for this account at once, while the first load runs. With
+    /// only a token (no user name), whose account it is isn't known until GitHub answers the
+    /// first request: the copy waits for that (`profile_known`), and the lists show they're
+    /// loading meanwhile.
     pub(crate) fn show_saved_copy(&mut self) {
         if !self.cfg.live() || !self.data.is_empty() {
             return;
         }
         let Some((copy, bytes)) = read(&self.cfg) else { return };
+        if self.cfg.user.is_none() {
+            state::trace("held", &"saved copy", &"until GitHub says whose the token is");
+            self.fresh.held = Some((copy, bytes));
+            return;
+        }
+        self.show_copy(copy, bytes);
+    }
+
+    /// The first request of a load said whose account it is: a copy held back (only a token is
+    /// set) shows now if it's that account's, while the rest loads; another account's is
+    /// removed, unseen.
+    pub(crate) fn profile_known(&mut self, epoch: u64, login: &str) {
+        if epoch != self.load_gen {
+            return;
+        }
+        let Some((copy, bytes)) = self.fresh.held.take() else { return };
+        if login.is_empty() || !copy.data.profile.login.eq_ignore_ascii_case(login) {
+            state::trace("held", &"saved copy", &"another account's, removed");
+            forget_all();
+            return;
+        }
+        if self.data.is_empty() && self.status == state::Status::Loading {
+            self.show_copy(copy, bytes);
+            self.restore_place();
+        }
+    }
+
+    fn show_copy(&mut self, copy: Copy, bytes: usize) {
         etag::import(etag::generation(), copy.etags);
         self.data = copy.data;
         self.data_gen = self.data_gen.wrapping_add(1);

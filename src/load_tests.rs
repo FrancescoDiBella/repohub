@@ -607,9 +607,9 @@ fn conversations_and_repository_pages_read_before_show_at_once() {
 }
 
 /// Only a token is set, and it was changed outside the app to another account's: the copy
-/// (named after the host, not an account) is the previous account's. It goes as soon as the
-/// new account's profile and repositories are in, not after the whole load (nor never, when
-/// the rest of the load fails).
+/// (named after the host, not an account) is the previous account's. It never shows: it waits
+/// for GitHub to say whose the token is, and goes then (#138), not after the whole load (nor
+/// never, when the rest of the load fails).
 #[test]
 fn another_accounts_copy_goes_as_soon_as_its_profile_is_in() {
     let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -631,9 +631,12 @@ fn another_accounts_copy_goes_as_soon_as_its_profile_is_in() {
     let mut next = live_app("octo");
     token_only(&mut next);
     next.show_saved_copy();
-    assert_eq!(next.data.profile.login, "octo");
+    assert!(next.data.is_empty(), "not shown before GitHub says whose the token is");
     next.refresh();
     let epoch = next.load_gen;
+    next.profile_known(epoch, "alice");
+    assert!(next.data.is_empty(), "never shown");
+    assert!(copies().is_empty(), "and removed as soon as GitHub has said");
     let mut alice = loaded("alice");
     (alice.pulls, alice.issues, alice.runs) = (Vec::new(), Vec::new(), Vec::new());
     next.apply_early(epoch, alice);

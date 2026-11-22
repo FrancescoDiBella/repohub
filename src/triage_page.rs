@@ -7,7 +7,7 @@ use rune_kit::{Button, ButtonVariant, ControlSize, Kit, TextArea, TextInput};
 
 use crate::actions::{self, Form};
 use crate::model::PullState;
-use crate::state::{Facet, Load};
+use crate::state::{Draft, Facet, Load};
 use crate::thread::{Entry, Open, Thread, Verdict};
 use crate::triage::{Choice, Host, Picker, SHOWN, Source};
 use crate::ui::{self, panel, panel_head, rule};
@@ -281,7 +281,7 @@ pub fn title(s: &App, k: &Kit, o: &Open, t: &Thread) -> El {
             .child(TextInput::new(e).label("Title").placeholder("Title")
                 .on_edit(|s: &mut App| s.thread.as_mut().and_then(|o| o.edit.title.as_mut()).expect("editing the title"))
                 .on_submit(|s: &mut App, _| s.save_title()).on_key(esc_closes).build(k).key("triage-title-input").w_full())
-            .child(edit_buttons(k, saving, off, |s| s.save_title(), |s| if let Some(o) = s.thread.as_mut() { o.edit.title = None }, "title"))
+            .child(edit_buttons(k, saving, off, |s| s.save_title(), |s| s.cancel_edit(Draft::Title), "title"))
             .children(edit_notes(s, k, o, "title"));
     }
     let mut r = row().w_full().gap(8.0).items_start()
@@ -312,7 +312,7 @@ pub fn body_editor(s: &App, k: &Kit, o: &Open, first: &Entry, e: &TextEdit) -> E
             .child(TextArea::new(e).label("Description").placeholder("Description (Markdown)").auto_grow(6, 24)
                 .on_edit(|s: &mut App| s.thread.as_mut().and_then(|o| o.edit.body.as_mut()).expect("editing the description"))
                 .on_key(esc_closes).build(k).key("triage-body-input").w_full())
-            .child(edit_buttons(k, saving, off, |s| s.save_body(), |s| if let Some(o) = s.thread.as_mut() { o.edit.body = None }, "body"))
+            .child(edit_buttons(k, saving, off, |s| s.save_body(), |s| s.cancel_edit(Draft::Description), "body"))
             .children(edit_notes(s, k, o, "body")))
 }
 
@@ -687,9 +687,8 @@ mod tests {
         let w = triage::with_picks(s.form.as_ref().unwrap().write().unwrap(), &s.issue_picks);
         assert!(matches!(&w, Write::Issue { labels, assignees, .. } if *labels == ["bug"] && *assignees == ["octocat"]), "{w:?}");
         // Created: the new row has them.
-        s.form_title = Some("Poncho clips".into());
         s.form = None;
-        s.apply_done(&full, Done::Issue(Created { number: 99, url: String::new() }));
+        s.apply_done(&full, Done::Issue(Created { number: 99, title: "Poncho clips".into(), ..Default::default() }));
         let row = s.data.issues.iter().find(|x| x.number == 99).unwrap();
         assert_eq!((row.labels.clone(), row.assignees.clone()), (vec![("bug".to_owned(), 25.0)], vec!["octocat".to_owned()]));
         assert!(s.issue_picks.labels.is_empty(), "the next form starts empty");

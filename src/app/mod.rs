@@ -9,7 +9,7 @@ use rune::{AppHandle, Color, AppSpec, Cx, El, KeyEvent, ScrollSpec, TextEdit, Tx
 use rune_kit::shell::{self, PaneState, Sidebar, SidebarRow, SidebarSection, SidebarToggle, SplitView, Toolbar};
 use rune_kit::{ControlSize, IconButton, IconButtonVariant, Kit, PaletteSeed};
 
-use crate::{actions, board, cache, cache_page, claude, clones_shim, commits, diffs, filters, github, harness, icons, inbox, lists, local, mobile, model, net, notes, notes_page, pages, palette, plugins, prefs, releases, review, runs_page, state, sync_io, terminal, themes, thread, thread_page, tray, triage, ui, update};
+use crate::{actions, board, cache, cache_page, claude, clones_shim, commits, diffs, discard, filters, github, harness, icons, inbox, lists, local, mobile, model, net, notes, notes_page, pages, palette, plugins, prefs, releases, replay, review, runs_page, state, sync_io, terminal, themes, thread, thread_page, tray, triage, ui, update};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::config;
 use crate::config::Config;
@@ -41,6 +41,8 @@ pub(crate) use chrome::banner;
 pub(crate) use frame::poll;
 #[cfg(test)]
 pub(crate) use keys::shortcuts;
+#[cfg(test)]
+pub(crate) use loading::More;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Page {
@@ -210,9 +212,16 @@ pub struct App {
     pub(crate) fresh: cache::Fresh,
     /// Rows with a write running (`owner/repo#12`), so their buttons wait.
     pub(crate) busy: std::collections::HashSet<String>,
-    /// The title (and draft flag) of the item a form is creating, for showing it once created.
-    pub(crate) form_title: Option<String>,
-    pub(crate) pull_meta: Option<(String, bool)>,
+    /// What the writes that finished during the running load changed in the lists: applied
+    /// again when the load lands (see `replay`).
+    pub(crate) replays: Vec<replay::Change>,
+    /// Counts the loads that landed: a write that sees it move while it runs lands on lists
+    /// that may already show it.
+    pub(crate) landed: u64,
+    /// "Discard what you typed?": the question on screen, and what happens on **Discard**.
+    pub(crate) discard: Option<discard::Ask>,
+    /// Counts reads of a diff's line comments (see `review::Review::asked`).
+    line_epoch: u64,
     pub(crate) notes: HashMap<(String, String), notes::NotesView>,
     pub(crate) note_name: TextEdit,
     pub(crate) confirm_delete: Option<String>,
@@ -440,8 +449,10 @@ pub(crate) fn init() -> App {
         run_epoch: 0,
         fresh: cache::Fresh::default(),
         busy: std::collections::HashSet::new(),
-        form_title: None,
-        pull_meta: None,
+        replays: Vec::new(),
+        landed: 0,
+        discard: None,
+        line_epoch: 0,
         notes: HashMap::new(),
         note_name: TextEdit::new(""),
         confirm_delete: None,
@@ -578,6 +589,13 @@ pub(crate) fn init() -> App {
         s.open_thread(&repo, number, true);
         s.open_pull_diff(repo, number);
     }
+    // With an account, the conversation and the diff are read before the first frame (there's no
+    // handle to read them in the background yet); without `REPOHUB_BLOCKING`, once the window is
+    // there (`start`).
+    #[cfg(not(target_arch = "wasm32"))]
+    if blocking {
+        s.read_opened_now();
+    }
     // `-- tab commits` reads the history before the first frame; `-- commit 0123abc` (or `commit 2`,
     // the second in the list) opens a commit, `-- compare main...feature/x` compares two branches.
     s.commits_still(arg("commit"), arg("compare"));
@@ -598,6 +616,9 @@ pub(crate) fn init() -> App {
     // `-- tab releases` reads the releases before the first frame; `-- release new` (or `notes`,
     // `edit`, `publish`) opens the form. Any repository page reads its latest release.
     s.releases_still(arg("release"));
+    // `-- discard form` (or `reply`) types into the New issue form (or the conversation's
+    // comment box) and asks "Discard what you typed?" (headless stills).
+    s.discard_still(arg("discard"));
     // `-- board Name` opens a drawing of that section (for headless stills); `zoom 2` zooms it.
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(name) = arg("board")

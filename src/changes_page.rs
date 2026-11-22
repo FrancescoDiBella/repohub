@@ -255,6 +255,7 @@ pub fn pull_panel_for(s: &App, k: &Kit, repo_filter: Option<&str>) -> Option<El>
     let title = pull.map(|p| format!("#{number} {}", p.title)).unwrap_or_else(|| format!("#{number}"));
     let open = pull.is_some_and(|p| p.state == crate::model::PullState::Open);
     let url = pull.map(|p| p.url.clone()).unwrap_or_else(|| format!("https://github.com/{full}/pull/{number}"));
+    let files_url = format!("{url}/files");
     let key = crate::actions::busy_key(&full, number);
     let busy = s.busy.contains(&key);
     let asking = s.confirm_merge.as_deref() == Some(key.as_str());
@@ -285,13 +286,22 @@ pub fn pull_panel_for(s: &App, k: &Kit, repo_filter: Option<&str>) -> Option<El>
         .child(Button::new("Open on GitHub").icon(&icons::EXTERNAL).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
             .on_press_tx(move |_: &mut App, tx| { let _ = tx.open_url(&url); }).build(k).key("pull-github"))
         .child(rune_kit::IconButton::new(&icons::CROSS).variant(rune_kit::IconButtonVariant::GhostMuted).label("Close the diff")
-            .on_press(|s: &mut App| s.close_pull_diff()).build(k).key("pull-close"));
-    Some(panel(k).key("pull-diff").clip_rounded(k.radius.lg)
+            .on_press(|s: &mut App| s.leave_pull_diff()).build(k).key("pull-close"));
+    // GitHub has more comments on lines than the first page read: they're not all under their lines.
+    let more = s.pull_review.as_ref().filter(|r| r.more).map(|r| {
+        row().w_full().px(16.0).py(8.0).gap(8.0).center_y().flex_wrap().key("pull-comments-more")
+            .child(text(format!("Showing the first {} comments on lines; the rest are on GitHub.", r.comments.len())).font(k.ty.small).color(k.c.text_muted).wrap().shrink())
+            .child(crate::pages::open_button(k, "All comments", &files_url, "pull-comments-all"))
+    });
+    let mut out = panel(k).key("pull-diff").clip_rounded(k.radius.lg)
         .child(row().w_full().px(16.0).py(10.0).gap(12.0).center_y().flex_wrap()
             .child(text(title).font(k.ty.ui_medium).color(k.c.text_base).grow(1.0).shrink().min_w(200.0).max_lines(2))
             .child(tools))
-        .child(rule(k))
-        .child(pull_diff_body(s, k, &full, number, "This pull request changes no files.")))
+        .child(rule(k));
+    if let Some(m) = more {
+        out = out.child(m).child(rule(k));
+    }
+    Some(out.child(pull_diff_body(s, k, &full, number, "This pull request changes no files.")))
 }
 
 /// `owner/name` from a pull request's page address.
@@ -311,7 +321,7 @@ pub fn files_button(k: &Kit, p: &crate::model::Pull, active: bool) -> Option<El>
         .help("See what this pull request changes")
         .on_press_tx(move |s: &mut App, tx| {
             if active {
-                s.close_pull_diff();
+                s.leave_pull_diff();
             } else {
                 s.open_pull_diff(full.clone(), number);
                 tx.scroll_into_view("pull-diff");

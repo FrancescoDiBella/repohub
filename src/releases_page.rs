@@ -272,7 +272,7 @@ fn form_panel(s: &App, k: &Kit, i: usize, f: &Form) -> El {
     let tag = f.tag.text.trim().to_owned();
     let tag_use = releases::tag_use(&tag, listing, f.draft_id);
     let close = IconButton::new(&icons::CROSS).variant(IconButtonVariant::GhostMuted).label("Close the form")
-        .on_press(|s: &mut App| s.close_release_form()).build(k).key("release-form-close");
+        .on_press(|s: &mut App| s.cancel_release_form()).build(k).key("release-form-close");
     let mut body = col().w_full().padding(16.0).gap(12.0);
 
     // The tag, with the next versions to pick from.
@@ -380,7 +380,7 @@ fn form_panel(s: &App, k: &Kit, i: usize, f: &Form) -> El {
         };
         row().w_full().gap(8.0).justify_end().flex_wrap()
             .child(Button::new("Cancel").variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
-                .on_press(|s: &mut App| s.close_release_form()).build(k).key("release-cancel"))
+                .on_press(|s: &mut App| s.cancel_release_form()).build(k).key("release-cancel"))
             .child(Button::new(save_label).control_size(ControlSize::Small)
                 .disabled(sending || save_check.is_err() || blocked.is_some())
                 .help("Save it as a draft: only people who can push see it, and nothing is published")
@@ -508,8 +508,11 @@ mod tests {
         assert!(texts(&rt).iter().any(|t| t.starts_with("This is sample data.")));
         press(&mut rt, "release-publish");
         assert!(rt.find("release-confirm").is_none(), "a disabled Publish asks nothing");
-        // Edit fills the form with the draft; Esc closes it.
+        // Edit fills the form with the draft (the tag picked in the one open is thrown away only
+        // after asking); Esc closes it.
         press(&mut rt, "release-edit-3003");
+        assert!(rt.find("discard-ask").is_some(), "the tag picked isn't thrown away without asking");
+        press(&mut rt, "discard-yes");
         let f = rt.state.releases.form.as_ref().unwrap();
         assert_eq!((f.draft_id, f.tag.text.as_str(), f.title.text.as_str()), (Some(3003), "v1.3.0", "Notes widget and window snapping"));
         assert!(has_text(&rt, "Edit draft"));

@@ -139,6 +139,9 @@ pub struct Thread {
     /// A pull request's checks on its last commit; `None` for an issue, or when the token
     /// can't read them.
     pub checks: Option<Vec<Check>>,
+    /// How many checks GitHub has on that commit: more than `checks` when it has more than
+    /// the first page.
+    pub checks_total: usize,
 }
 
 /// The conversation on screen: which one, what's loaded, and the reply being typed.
@@ -206,5 +209,6 @@ pub fn sample(title: &str, author: &str, pull: bool, standing: Standing, now: i6
             Check { name: "build (macos)".into(), state: CheckState::Running, url: String::new() },
             Check { name: "test".into(), state: CheckState::Passed, url: String::new() },
         ]),
+        checks_total: if pull { 3 } else { 0 },
     }
 }

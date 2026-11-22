@@ -84,8 +84,7 @@ fn the_repositorys_open_count_follows_pull_requests_too() {
     let p = s.data.pulls.iter().find(|p| p.state == crate::model::PullState::Open).unwrap().clone();
     let count = |s: &App| s.data.repos.iter().find(|r| crate::model::same_repo(&r.full_name, &p.repo)).unwrap().issues;
     let before = count(&s);
-    s.pull_meta = Some(("New".into(), false));
-    s.apply_done(&p.repo, github::Done::Pull(github::Created { number: 900, url: String::new() }));
+    s.apply_done(&p.repo, github::Done::Pull(github::Created { number: 900, title: "New".into(), ..Default::default() }));
     assert_eq!(count(&s), before + 1, "a new pull request");
     s.apply_done(&p.repo, github::Done::Merged(900));
     assert_eq!(count(&s), before, "merged");
@@ -139,11 +138,11 @@ fn a_forms_answer_reaches_that_form_or_a_toast() {
     s.form_sent(epoch, &a, Err("GitHub refused".into()));
     let f = s.form.as_ref().expect("the open form stays");
     assert_eq!((f.repo.as_str(), f.title.text.as_str(), f.submit.is_sending() || matches!(f.submit, Submit::Failed(_))), (b.as_str(), "Half-written", false));
-    s.form_sent(epoch, &a, Ok(github::Done::Issue(github::Created { number: 99, url: String::new() })));
+    s.form_sent(epoch, &a, Ok(github::Done::Issue(github::Created { number: 99, ..Default::default() })));
     assert_eq!(s.form.as_ref().map(|f| f.title.text.as_str()), Some("Half-written"), "still open after the other one's success");
     assert!(s.data.issues.iter().any(|x| x.number == 99), "and the new issue is listed");
     // Its own answer closes it.
     s.form.as_mut().unwrap().submit = Submit::Sending;
-    s.form_sent(epoch, &b, Ok(github::Done::Issue(github::Created { number: 100, url: String::new() })));
+    s.form_sent(epoch, &b, Ok(github::Done::Issue(github::Created { number: 100, ..Default::default() })));
     assert!(s.form.is_none());
 }

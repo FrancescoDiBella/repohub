@@ -37,6 +37,11 @@ pub struct Review {
     pub head: String,
     pub comments: Vec<LineComment>,
     pub draft: Option<Draft>,
+    /// GitHub has more line comments than the first page read.
+    pub more: bool,
+    /// The read of the comments this diff waits for (`App::line_epoch`): an older answer that
+    /// comes later is dropped.
+    pub asked: u64,
 }
 
 /// The path a line of `f` is known by on `side`.
@@ -133,6 +138,7 @@ mod tests {
                 LineComment { path: "gone.rs".into(), line: 1, side: Side::New, author: "c".into(), body: "z".into(), at: 0 },
             ],
             draft: None,
+            ..Review::default()
         };
         let a = r.annotations(&files);
         let bunny = files.iter().position(|f| f.new_path.as_deref() == Some("src/bunny.js")).unwrap();

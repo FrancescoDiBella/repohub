@@ -17,8 +17,13 @@ impl App {
         self.data.repos.iter().position(|r| r.full_name.eq_ignore_ascii_case(full))
     }
 
-    /// Opens a page. Leaving a repository's section closes what belonged to it.
+    /// Opens a page. Leaving a repository's section closes what belonged to it; what's typed
+    /// there (a comment, an edit) isn't thrown away without asking.
     pub(crate) fn go(&mut self, p: Page) {
+        let again = p.clone();
+        if self.ask_before_leaving(move |s| s.go(again)) {
+            return;
+        }
         // Moving before the saved place was restored: you chose where to be.
         if self.pending_place.take().is_some() {
             self.save_places = true;
@@ -128,6 +133,11 @@ impl App {
     }
 
     pub(crate) fn set_tab(&mut self, i: usize, tab: RepoTab) {
+        // Another section closes the conversation and the diff on screen.
+        let changes = tab != self.tab || self.plugin_tab.is_some();
+        if changes && self.ask_before_leaving(move |s| s.set_tab(i, tab)) {
+            return;
+        }
         self.plugin_tab = None;
         self.recheck_missing_clone(i);
         let tab = if self.tabs().contains(&tab) { tab } else { RepoTab::Code };
@@ -151,38 +161,43 @@ impl App {
         }
     }
 
-    /// The phone's back button: closes what's open, goes up a level, and leaves the app from
-    /// the first page.
+    /// The phone's back button: closes what's open in the order Esc does (the palette and the
+    /// board editor first), then goes up a level, and leaves the app from the first page.
     #[cfg(target_arch = "wasm32")]
-    pub(super) fn back(&mut self) {
+    pub(super) fn back(&mut self, tx: &mut Tx) {
+        if !self.back_step(tx) {
+            net::leave_app();
+        }
+    }
+
+    /// One press of the back button; false when there's nowhere left to go back to (the app
+    /// leaves then).
+    #[cfg_attr(not(any(test, target_arch = "wasm32")), allow(dead_code))]
+    pub(crate) fn back_step(&mut self, tx: &mut Tx) -> bool {
         if self.palette.is_some() {
             self.palette = None;
-        } else if self.editing_board() {
+        } else if self.editing_board() && self.discard.is_none() {
             if let Page::Repo(full) = &self.page
                 && let Some(i) = self.repo_index_of(full)
             {
                 self.close_board(i);
             }
-        } else if self.thread.is_some() && self.pull_diff_of.is_none() {
-            self.thread = None;
-        } else if self.open_run.is_some() {
-            self.open_run = None;
-        } else if self.pull_diff_of.is_some() {
-            self.close_pull_diff();
-        } else if self.commits.open.is_some() {
-            self.close_commit(None);
-        } else if self.commits.compare.is_some() {
-            self.close_compare();
-        } else if !self.release_escape() {
+        } else if self.close_top(Some(tx)) {
+            // A question, a picker, an editor, a form, a diff, a conversation…
+        } else {
             match self.page {
-                Page::Overview => net::leave_app(),
+                Page::Overview => return false,
                 Page::Repo(_) => self.go(Page::Repos),
                 _ => self.go(Page::Overview),
             }
         }
+        true
     }
 
     pub(crate) fn open(&mut self, i: usize) {
+        if self.ask_before_leaving(move |s| s.open(i)) {
+            return;
+        }
         let Some(r) = self.data.repos.get(i) else { return };
         let full = r.full_name.clone();
         if !matches!(&self.page, Page::Repo(f) if f.eq_ignore_ascii_case(&full)) {
@@ -198,6 +213,10 @@ impl App {
 
     /// Opens plugin `p`'s section on repository `i`'s page.
     pub(crate) fn open_plugin_tab(&mut self, i: usize, p: Option<String>) {
+        let again = p.clone();
+        if self.ask_before_leaving(move |s| s.open_plugin_tab(i, again)) {
+            return;
+        }
         let Some(p) = p else { return };
         let Some(r) = self.data.repos.get(i) else { return };
         let full = r.full_name.clone();
@@ -209,47 +228,66 @@ impl App {
     }
 
     /// Esc: closes what's open on top of the page, the most recent first (a question, a picker,
-    /// an editor, then a form, a conversation…). Only what's on screen: a form left on another
-    /// repository's page stays. True when it closed something.
+    /// an editor, then a form, a conversation…), and last the toast. Only what's on screen: a
+    /// form left on another repository's page stays. What's typed isn't thrown away without
+    /// asking. True when it closed something.
     pub(crate) fn escape(&mut self, tx: &mut Tx) -> bool {
+        if self.close_top(Some(tx)) {
+            return true;
+        }
+        if self.toast.is_some() {
+            self.toast = None;
+            return true;
+        }
+        false
+    }
+
+    /// What Esc and the back button close, in order. True when it closed (or asked about)
+    /// something.
+    fn close_top(&mut self, tx: Option<&mut Tx>) -> bool {
         let form_shown = matches!(&self.page, Page::Repo(full) if self.form.as_ref().is_some_and(|f| f.repo.eq_ignore_ascii_case(full)));
-        let thread_edit = self.thread.as_mut().map(|t| &mut t.edit);
-        if self.confirm_merge.is_some() {
+        let thread_edit = self.thread.as_ref().map(|t| (t.edit.picker.is_some(), t.edit.title.is_some(), t.edit.body.is_some()));
+        if self.discard.is_some() {
+            // "Discard what you typed?" is answered "Keep editing".
+            self.answer_discard(false);
+        } else if self.confirm_merge.is_some() {
             self.confirm_merge = None;
         } else if self.confirm_delete.is_some() {
             self.confirm_delete = None;
         } else if self.picker.is_some() {
             self.picker = None;
-        } else if let Some(e) = thread_edit.filter(|e| e.picker.is_some() || e.title.is_some() || e.body.is_some()) {
+        } else if let Some((picker, title, body)) = thread_edit.filter(|(p, t, b)| *p || *t || *b) {
             // A picker, or the title or description being edited: closed without saving.
-            if e.picker.is_some() {
-                e.picker = None;
-            } else if e.title.is_some() {
-                e.title = None;
-            } else {
-                e.body = None;
+            if picker {
+                if let Some(t) = self.thread.as_mut() {
+                    t.edit.picker = None;
+                }
+            } else if title {
+                self.cancel_edit(state::Draft::Title);
+            } else if body {
+                self.cancel_edit(state::Draft::Description);
             }
         } else if form_shown && self.issue_picks.picker.is_some() {
             self.issue_picks.picker = None;
         } else if form_shown {
-            self.form = None;
-            self.issue_picks = Default::default();
+            self.cancel_form();
         } else if self.release_escape() {
             // The publish question, GitHub's notes on offer, or the release form.
+        } else if self.pull_review.as_ref().is_some_and(|r| r.draft.is_some()) {
+            // The comment being written on the diff's lines, before the diff.
+            self.cancel_line_comment();
         } else if self.pull_diff_of.is_some() {
             self.close_pull_diff();
         } else if self.thread.is_some() {
-            self.thread = None;
+            self.close_thread();
         } else if self.open_run.is_some() {
             self.open_run = None;
         } else if self.commits.open.is_some() {
-            self.close_commit(Some(tx));
+            self.close_commit(tx);
         } else if self.commits.compare.is_some() {
             self.close_compare();
         } else if self.local_file.is_some() && matches!(self.page, Page::Repo(_)) {
             self.local_file = None;
-        } else if self.toast.is_some() {
-            self.toast = None;
         } else {
             return false;
         }
@@ -258,6 +296,10 @@ impl App {
 
     /// Shows the Repositories page for `owner`.
     pub(crate) fn show_owner(&mut self, owner: OwnerFilter) {
+        let again = owner.clone();
+        if self.ask_before_leaving(move |s| s.show_owner(again)) {
+            return;
+        }
         state::trace("owner", &self.owner, &owner);
         self.owner = owner;
         self.repos_limit = pages::REPOS_PAGE;

@@ -4,43 +4,55 @@
 use super::*;
 
 impl App {
-    /// Stars or unstars repository `i`: on GitHub when a token is configured, locally otherwise.
+    /// Stars or unstars repository `i`: on GitHub when a token is configured, locally otherwise
+    /// (and the toast says why nothing was sent).
     pub(crate) fn toggle_star(&mut self, i: usize) {
         if !self.cfg.allow_writes {
             self.notify_problem("Writes are disabled on this server (set REPOHUB_ALLOW_WRITES=true).");
             return;
         }
-        let Some((on, full)) = self.data.repos.get_mut(i).map(|r| {
-            let on = !r.starred;
-            r.starred = on;
-            r.stars = if on { r.stars + 1 } else { r.stars.saturating_sub(1) };
-            (on, r.full_name.clone())
-        }) else { return };
-        self.data_gen = self.data_gen.wrapping_add(1);
-        if !self.cfg.live() || self.cfg.token.is_none() {
-            if self.cfg.live() {
-                self.notify("Star changed here only: GITHUB_TOKEN is needed to save it on GitHub.");
-            }
+        let Some((on, full)) = self.data.repos.get(i).map(|r| (!r.starred, r.full_name.clone())) else { return };
+        // Shown at once, and kept through a load that lands before GitHub has it.
+        self.changed(replay::Change::Star { repo: full.clone(), on }, false);
+        self.data_changed();
+        if !self.cfg.live() || self.data.sample {
+            let why = actions::blocked(self).unwrap_or("This is sample data.");
+            self.notify(format!("Star changed here only, nothing was sent to GitHub. {why}"));
+            return;
+        }
+        if self.cfg.token.is_none() {
+            self.notify("Star changed here only: GITHUB_TOKEN is needed to save it on GitHub.");
             return;
         }
         if let Some(h) = self.handle.clone() {
             let cfg = self.cfg.clone();
             let key = full.clone();
-            let epoch = self.load_gen;
-            net::spawn(h, move || async move { github::set_star(&cfg, &full, on).await }, move |s: &mut App, res| {
-                if s.load_gen != epoch {
-                    return;
-                }
-                if let Err(e) = res {
-                    if let Some(r) = s.data.repos.iter_mut().find(|r| r.full_name == key) {
-                        r.starred = !on;
-                        r.stars = if on { r.stars.saturating_sub(1) } else { r.stars + 1 };
-                    }
-                    s.data_gen = s.data_gen.wrapping_add(1);
-                    s.notify_problem(format!("Couldn't change the star: {e}"));
-                }
-            });
+            let (epoch, landed) = (self.load_gen, self.landed);
+            net::spawn(h, move || async move { github::set_star(&cfg, &full, on).await }, move |s: &mut App, res| s.star_sent(epoch, &key, on, landed, res));
         }
+    }
+
+    /// GitHub's answer to a star (`on`) or an unstar of `repo`, asked when `landed` loads had
+    /// landed. Done: a load that landed meanwhile may have read the star from before, so it's
+    /// put back (exactly: once). Refused: the star goes back to what it was.
+    pub(crate) fn star_sent(&mut self, epoch: u64, repo: &str, on: bool, landed: u64, res: Result<(), String>) {
+        if self.load_gen != epoch {
+            return;
+        }
+        match res {
+            Ok(()) => {
+                if self.landed != landed {
+                    self.changed(replay::Change::Star { repo: repo.to_owned(), on }, true);
+                }
+            }
+            Err(e) => {
+                self.replays.retain(|c| !matches!(c, replay::Change::Star { repo: r, .. } if r.eq_ignore_ascii_case(repo)));
+                let me = self.data.profile.login.clone();
+                replay::apply(&mut self.data, &replay::Change::Star { repo: repo.to_owned(), on: !on }, &me, true);
+                self.notify_problem(format!("Couldn't change the star: {e}"));
+            }
+        }
+        self.data_changed();
     }
 
     pub(crate) fn starred_count(&self) -> u32 {

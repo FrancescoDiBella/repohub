@@ -618,7 +618,7 @@ mod tests {
         // Once it's opened, the result shows it instead of offering another.
         rt.update(|s, _| {
             let full = s.data.repos[0].full_name.clone();
-            s.apply_done(&full, crate::github::Done::Pull(crate::github::Created { number: 99, url: "https://github.com/x/y/pull/99".into() }));
+            s.apply_done(&full, crate::github::Done::Pull(crate::github::Created { number: 99, url: "https://github.com/x/y/pull/99".into(), ..Default::default() }));
         });
         rt.frame(0.1);
         assert!(rt.find("compare-new-pull").is_none() && rt.find("compare-open-pull").is_some());

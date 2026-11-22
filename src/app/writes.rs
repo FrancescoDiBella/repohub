@@ -62,8 +62,12 @@ impl App {
         }
     }
 
-    /// Opens form `kind` for repository `i` on the section it belongs to.
+    /// Opens form `kind` for repository `i` on the section it belongs to. A form with typed
+    /// text (of any repository) isn't replaced without asking.
     pub(crate) fn open_form(&mut self, i: usize, kind: Compose) {
+        if self.ask_first(&[state::Draft::Form], move |s| s.open_form(i, kind)) {
+            return;
+        }
         let Some(r) = self.data.repos.get(i) else { return };
         let (full, default, shown) = (r.full_name.clone(), r.branch.clone(), self.branch(i));
         // A pull request starts from the branch on screen, or the first other branch.
@@ -107,19 +111,23 @@ impl App {
         }
         let repo = f.repo.clone();
         let repo_cb = repo.clone();
-        // What the screen shows for the new item until the lists reload.
-        self.form_title = Some(f.title.text.trim().to_owned());
-        self.pull_meta = Some((f.title.text.trim().to_owned(), f.draft));
         let Some(h) = self.handle.clone() else { return };
         let cfg = self.cfg.clone();
-        let epoch = self.load_gen;
-        net::spawn(h, move || async move { github::run(&cfg, &repo, w).await }, move |s: &mut App, r| s.form_sent(epoch, &repo_cb, r));
+        let (epoch, landed) = (self.load_gen, self.landed);
+        // The new item's row comes from this write's own answer (`github::Created`).
+        net::spawn(h, move || async move { github::run(&cfg, &repo, w).await }, move |s: &mut App, r| s.form_sent_since(epoch, &repo_cb, landed, r));
+    }
+
+    /// `form_sent_since` for a write sent when the lists on screen were loaded.
+    #[cfg(test)]
+    pub(crate) fn form_sent(&mut self, epoch: u64, repo: &str, r: Result<github::Done, String>) {
+        self.form_sent_since(epoch, repo, self.landed, r);
     }
 
     /// The form's write finished: the form closes, or stays with what was typed and GitHub's
     /// reason. A form opened since (or none, after Cancel) is left as it is, and a failure is
-    /// then said in a toast.
-    pub(crate) fn form_sent(&mut self, epoch: u64, repo: &str, r: Result<github::Done, String>) {
+    /// then said in a toast. It was sent when `landed` loads had landed (see `apply_done_since`).
+    pub(crate) fn form_sent_since(&mut self, epoch: u64, repo: &str, landed: u64, r: Result<github::Done, String>) {
         if self.load_gen != epoch {
             return;
         }
@@ -130,7 +138,7 @@ impl App {
                     self.form = None;
                     self.picker = None;
                 }
-                self.apply_done(repo, done);
+                self.apply_done_since(repo, done, landed);
             }
             Err(e) => match self.form.as_mut().filter(|_| ours) {
                 Some(f) => f.submit = Submit::Failed(e),
@@ -169,7 +177,7 @@ impl App {
         let full_cb = full.clone();
         let Some(h) = self.handle.clone() else { return };
         let cfg = self.cfg.clone();
-        let epoch = self.load_gen;
+        let (epoch, landed) = (self.load_gen, self.landed);
         net::spawn(h, move || async move { github::run(&cfg, &full, w).await }, move |s: &mut App, r| {
             if s.load_gen != epoch {
                 return;
@@ -189,7 +197,7 @@ impl App {
                 d.sending = false;
             }
             match r {
-                Ok(done) => s.apply_done(&full_cb, done),
+                Ok(done) => s.apply_done_since(&full_cb, done, landed),
                 // A refused triage change is said where it was made, once.
                 Err(e) if triage.is_some_and(|(part, partial)| s.triage_failed(&full_cb, number, part, partial, &e)) => {}
                 Err(e) => {
@@ -206,15 +214,21 @@ impl App {
 
     /// Shows what a write changed at once, without waiting for GitHub's lists to catch up.
     pub(crate) fn apply_done(&mut self, repo: &str, done: github::Done) {
+        self.apply_done_since(repo, done, self.landed);
+    }
+
+    /// [`App::apply_done`] for a write that started when `landed` loads had landed: if one
+    /// landed since, the lists on screen were read while it ran and may already show it, so
+    /// its change is applied exactly (see `replay`).
+    pub(crate) fn apply_done_since(&mut self, repo: &str, done: github::Done, landed: u64) {
         let about = match &done {
             github::Done::Closed(n) | github::Done::Reopened(n) | github::Done::Merged(n) | github::Done::PullOpen(n, _) | github::Done::Commented(n) | github::Done::Reviewed(n, _) => Some(*n),
             _ => None,
         };
         let sent = matches!(done, github::Done::Commented(_) | github::Done::Reviewed(..));
-        self.apply_done_inner(repo, done);
+        self.done_effects(repo, done, landed != self.landed);
         // Counts, states and lists changed in place: the cached lists follow.
         self.data_changed();
-        self.data_gen = self.data_gen.wrapping_add(1);
         // The conversation on screen shows the change: read it again.
         if let Some(n) = about
             && let Some(t) = self.thread.as_mut().filter(|t| t.is(repo, n))
@@ -227,22 +241,48 @@ impl App {
         self.sync_tray();
     }
 
+    /// What a finished write changes in the lists: shown now, and kept while a load runs so the
+    /// load doesn't undo it when it lands (`apply` puts it back, exactly).
+    pub(crate) fn changed(&mut self, c: replay::Change, exact: bool) {
+        let me = self.data.profile.login.clone();
+        replay::apply(&mut self.data, &c, &me, exact);
+        if self.status == Status::Loading {
+            self.replays.push(c);
+        }
+    }
+
+    /// A load landed: what the writes that finished while it ran changed goes back on top of
+    /// what it brought. A change it already shows does nothing.
+    pub(crate) fn replay_writes(&mut self) {
+        let me = self.data.profile.login.clone();
+        for c in std::mem::take(&mut self.replays) {
+            if replay::apply(&mut self.data, &c, &me, true) {
+                state::trace("replay", &"load", &c.repo());
+            }
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn apply_done_inner(&mut self, repo: &str, done: github::Done) {
+        self.done_effects(repo, done, false);
+    }
+
+    /// The lists, the counts and the toast for a finished write; `exact`: the lists may already
+    /// show it.
+    fn done_effects(&mut self, repo: &str, done: github::Done, exact: bool) {
         let full_name = self.data.repos.iter()
             .find(|r| r.full_name.eq_ignore_ascii_case(repo) || (!repo.contains('/') && r.name.eq_ignore_ascii_case(repo)))
             .map(|r| r.full_name.clone()).unwrap_or_else(|| repo.to_owned());
         match done {
             github::Done::Issue(c) => {
-                let title = self.form_title.take().unwrap_or_default();
-                let (labels, assignees) = self.picked_for_new_issue(&full_name);
-                self.data.issues.insert(0, model::Issue { label: labels.first().cloned(), labels, assignees, number: c.number, title, repo: full_name.clone(), created_at: self.now, comments: 0, url: c.url });
-                if let Some(r) = self.data.repos.iter_mut().find(|r| r.full_name.eq_ignore_ascii_case(&full_name)) {
-                    r.issues += 1;
-                }
-                if let Some(t) = self.data.issues_total.as_mut() {
-                    *t += 1;
-                }
-                self.notify(format!("Opened issue #{} in {full_name}", c.number));
+                // The labels and assignees GitHub set; the form's picks when its answer doesn't say.
+                let (labels, assignees) = match (c.labels, c.assignees) {
+                    (Some(l), Some(a)) => (l, a),
+                    _ => self.picked_for_new_issue(&full_name),
+                };
+                let number = c.number;
+                self.changed(replay::Change::Opened(model::Issue { label: labels.first().cloned(), labels, assignees, number, title: c.title, repo: full_name.clone(), created_at: self.now, comments: 0, url: c.url }), exact);
+                self.notify(format!("Opened issue #{number} in {full_name}"));
             }
             github::Done::Branch(name) => {
                 if let Some(Load::Ready(list)) = self.branches.get_mut(&full_name) {
@@ -257,31 +297,18 @@ impl App {
             }
             github::Done::Pull(c) => {
                 self.commits.pull_opened(&full_name, c.number, &c.url);
-                let (title, draft) = self.pull_meta.take().unwrap_or_default();
                 let author = self.data.profile.login.clone();
-                self.data.pulls.insert(0, model::Pull { labels: Vec::new(), assignees: Vec::new(), review_requested: false,
-                    number: c.number, title, repo: full_name.clone(), author,
-                    state: if draft { PullState::Draft } else { PullState::Open },
+                let number = c.number;
+                self.changed(replay::Change::OpenedPull(model::Pull { labels: Vec::new(), assignees: Vec::new(), review_requested: false,
+                    number, title: c.title, repo: full_name.clone(), author,
+                    state: if c.draft { PullState::Draft } else { PullState::Open },
                     checks: None, updated_at: self.now, comments: 0, url: c.url,
-                });
-                if let Some(t) = self.data.open_pulls_total.as_mut() {
-                    *t += 1;
-                }
-                // GitHub's count of a repository's open issues includes its pull requests.
-                if let Some(r) = self.data.repos.iter_mut().find(|r| r.full_name.eq_ignore_ascii_case(&full_name)) {
-                    r.issues += 1;
-                }
-                self.notify(format!("Opened pull request #{}", c.number));
+                }), exact);
+                self.notify(format!("Opened pull request #{number}"));
             }
             github::Done::Closed(n) => {
                 let closed = self.data.issues.iter().find(|x| x.number == n && same_repo(&x.repo, &full_name)).cloned();
-                self.data.issues.retain(|x| !(x.number == n && same_repo(&x.repo, &full_name)));
-                if let Some(r) = self.data.repos.iter_mut().find(|r| r.full_name.eq_ignore_ascii_case(&full_name)) {
-                    r.issues = r.issues.saturating_sub(1);
-                }
-                if let Some(t) = self.data.issues_total.as_mut() {
-                    *t = t.saturating_sub(1);
-                }
+                self.changed(replay::Change::Closed { repo: full_name.clone(), number: n }, exact);
                 match closed {
                     Some(issue) => self.notify_undo(format!("Closed issue #{n}"), state::Undo::Reopen { repo: full_name.clone(), issue }),
                     None => self.notify(format!("Closed issue #{n}")),
@@ -291,15 +318,7 @@ impl App {
                 // An issue closed from the list and reopened with Undo goes back where it was.
                 if let Some(at) = self.reopening.iter().position(|x| x.number == n && same_repo(&x.repo, &full_name)) {
                     let issue = self.reopening.remove(at);
-                    if !self.data.issues.iter().any(|x| x.number == n && same_repo(&x.repo, &full_name)) {
-                        self.data.issues.insert(0, issue);
-                        if let Some(r) = self.data.repos.iter_mut().find(|r| r.full_name.eq_ignore_ascii_case(&full_name)) {
-                            r.issues += 1;
-                        }
-                        if let Some(t) = self.data.issues_total.as_mut() {
-                            *t += 1;
-                        }
-                    }
+                    self.changed(replay::Change::Reopened(issue), exact);
                 }
                 self.notify(format!("Reopened issue #{n}"));
             }
@@ -328,47 +347,11 @@ impl App {
                 thread::Verdict::Commented => format!("Review sent on pull request #{n}"),
             }),
             github::Done::Merged(n) => {
-                let mut changed = false;
-                for p in self.data.pulls.iter_mut().filter(|p| p.number == n && same_repo(&p.repo, &full_name)) {
-                    if matches!(p.state, PullState::Open | PullState::Draft) {
-                        changed = true;
-                    }
-                    p.state = PullState::Merged;
-                }
-                if changed {
-                    if let Some(t) = self.data.open_pulls_total.as_mut() {
-                        *t = t.saturating_sub(1);
-                    }
-                    if let Some(t) = self.data.closed_pulls_total.as_mut() {
-                        *t += 1;
-                    }
-                    if let Some(r) = self.data.repos.iter_mut().find(|r| r.full_name.eq_ignore_ascii_case(&full_name)) {
-                        r.issues = r.issues.saturating_sub(1);
-                    }
-                }
+                self.changed(replay::Change::Merged { repo: full_name.clone(), number: n }, exact);
                 self.notify(format!("Merged pull request #{n}"));
             }
             github::Done::PullOpen(n, open) => {
-                let mut changed = false;
-                for p in self.data.pulls.iter_mut().filter(|p| p.number == n && same_repo(&p.repo, &full_name)) {
-                    let was_open = matches!(p.state, PullState::Open | PullState::Draft);
-                    if was_open != open {
-                        changed = true;
-                        p.state = if open { PullState::Open } else { PullState::Closed };
-                    }
-                }
-                if changed {
-                    let (from, to) = if open { (&mut self.data.closed_pulls_total, &mut self.data.open_pulls_total) } else { (&mut self.data.open_pulls_total, &mut self.data.closed_pulls_total) };
-                    if let Some(t) = from.as_mut() {
-                        *t = t.saturating_sub(1);
-                    }
-                    if let Some(t) = to.as_mut() {
-                        *t += 1;
-                    }
-                    if let Some(r) = self.data.repos.iter_mut().find(|r| r.full_name.eq_ignore_ascii_case(&full_name)) {
-                        r.issues = if open { r.issues + 1 } else { r.issues.saturating_sub(1) };
-                    }
-                }
+                self.changed(replay::Change::PullOpen { repo: full_name.clone(), number: n, open }, exact);
                 if open {
                     self.notify(format!("Reopened pull request #{n}"));
                 } else {
@@ -376,12 +359,12 @@ impl App {
                 }
             }
             github::Done::Release(r) => self.release_done(&full_name, *r),
-            github::Done::Triaged { number, change, applied } => self.apply_triaged(&full_name, number, change, applied),
+            github::Done::Triaged { number, change, applied } => {
+                self.changed(replay::Change::Triaged { repo: full_name.clone(), number, applied: applied.clone() }, exact);
+                self.apply_triaged(&full_name, number, change, applied);
+            }
             github::Done::Reran { run_id, failed_only } => {
-                for r in self.data.runs.iter_mut().filter(|r| r.id == run_id && same_repo(&r.repo, &full_name)) {
-                    r.checks = model::Checks::Running;
-                    r.updated_at = self.now;
-                }
+                self.changed(replay::Change::Reran { repo: full_name.clone(), run_id, at: self.now }, exact);
                 let reload = if let Some(o) = self.open_run.as_mut().filter(|o| o.run_id == run_id && same_repo(&o.repo, &full_name)) {
                     o.checks = model::Checks::Running;
                     o.updated_at = self.now;

@@ -8,6 +8,14 @@ mod cache_tests;
 #[cfg(test)]
 pub(crate) mod load_gen_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
+mod followups_replay;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod followups_start;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod followups_discard;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod followups_small;
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod fix52_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod fix63_tests;

@@ -74,7 +74,12 @@ impl App {
     }
 
     /// Opens the conversation of issue or pull request `number` of `repo`, in place of the page.
+    /// What's typed in the one on screen isn't thrown away without asking.
     pub(crate) fn open_thread(&mut self, repo: &str, number: u32, pull: bool) {
+        let again = repo.to_owned();
+        if self.ask_before_leaving(move |s| s.open_thread(&again, number, pull)) {
+            return;
+        }
         self.close_pull_diff();
         self.confirm_merge = None;
         self.open_run = None;
@@ -93,6 +98,42 @@ impl App {
         };
         self.thread = Some(thread::Open { repo: repo.to_owned(), number, pull, load, reply: TextEdit::new(""), sending: false, epoch: self.thread_epoch, edit: Default::default() });
         self.load_thread();
+    }
+
+    /// What was opened before the app's handle existed (`-- thread 14`, `-- diff 14` on the
+    /// command line) and couldn't be read then: read now, in the background.
+    pub(crate) fn read_opened(&mut self) {
+        if self.data.sample {
+            return;
+        }
+        if self.thread.as_ref().is_some_and(|t| !matches!(t.load, Load::Ready(_))) {
+            self.load_thread();
+        }
+        if let Some((full, number)) = self.pull_diff_of.clone()
+            && matches!(self.pull_diff_load, Some(Load::Failed(_)))
+        {
+            self.open_pull_diff(full, number);
+        }
+    }
+
+    /// For headless stills (`REPOHUB_BLOCKING=1`): the conversation and the diff opened from the
+    /// command line are read before the first frame.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn read_opened_now(&mut self) {
+        if self.data.sample {
+            return;
+        }
+        if let Some(t) = self.thread.as_mut() {
+            let full = self.data.repos.iter().find(|r| same_repo(&r.full_name, &t.repo)).map(|r| r.full_name.clone()).unwrap_or_else(|| t.repo.clone());
+            t.load = pollster::block_on(github::load_thread(&self.cfg, &full, t.number)).into();
+        }
+        if let Some((full, number)) = self.pull_diff_of.clone() {
+            let files = pollster::block_on(github::load_pull_files(&self.cfg, &full, number));
+            let asked = self.pull_review.as_ref().map_or(0, |r| r.asked);
+            self.apply_pull_diff(self.load_gen, (full.clone(), number), files);
+            let comments = pollster::block_on(github::load_line_comments(&self.cfg, &full, number));
+            self.apply_line_comments(self.load_gen, (full, number), asked, comments);
+        }
     }
 
     /// Reads the open conversation from GitHub (again). What's on screen stays until the answer.
@@ -178,6 +219,10 @@ impl App {
 
     /// Opens workflow run `r` in the in-app detail view (jobs, steps, and job logs).
     pub(crate) fn open_run(&mut self, r: &model::Run) {
+        let again = r.clone();
+        if self.ask_before_leaving(move |s| s.open_run(&again)) {
+            return;
+        }
         self.close_pull_diff();
         self.confirm_merge = None;
         self.thread = None;
@@ -345,8 +390,13 @@ impl App {
         }
     }
 
-    /// Shows pull request `number` of `full`'s files as a diff.
+    /// Shows pull request `number` of `full`'s files as a diff (a comment being written on the
+    /// one on screen isn't thrown away without asking).
     pub(crate) fn open_pull_diff(&mut self, full: String, number: u32) {
+        let again = full.clone();
+        if self.ask_first(&[state::Draft::LineComment], move |s| s.open_pull_diff(again, number)) {
+            return;
+        }
         let key = (full.clone(), number);
         // A merge confirmation belongs to the diff it was asked from.
         self.confirm_merge = None;
@@ -381,30 +431,40 @@ impl App {
         self.pull_diff.set_files(Vec::new());
     }
 
-    /// Reads the comments on the open diff's lines (again), with the commit it shows.
-    pub(super) fn load_line_comments(&mut self) {
+    /// Reads the comments on the open diff's lines (again), with the commit it shows. Each read
+    /// has its own number (`line_epoch`): only the last one asked is shown.
+    pub(crate) fn load_line_comments(&mut self) {
         let Some((full, number)) = self.pull_diff_of.clone() else { return };
+        self.line_epoch = self.line_epoch.wrapping_add(1);
+        let asked = self.line_epoch;
+        if let Some(r) = self.pull_review.as_mut() {
+            r.asked = asked;
+        }
         let Some(h) = self.handle.clone() else { return };
         let cfg = self.cfg.clone();
         let epoch = self.load_gen;
         let key = (full.clone(), number);
-        net::spawn(h, move || async move { github::load_line_comments(&cfg, &full, number).await }, move |s: &mut App, r| {
-            // Another account or another diff since: not for this one.
-            if s.load_gen != epoch || s.pull_diff_of.as_ref() != Some(&key) {
-                return;
-            }
-            match r {
-                Ok((head, comments)) => {
-                    if let Some(rv) = s.pull_review.as_mut() {
-                        rv.head = head;
-                        rv.comments = comments;
-                    }
-                    s.place_line_comments();
+        net::spawn(h, move || async move { github::load_line_comments(&cfg, &full, number).await }, move |s: &mut App, r| s.apply_line_comments(epoch, key, asked, r));
+    }
+
+    /// The answer to read `asked` of a diff's line comments. Another account, another diff, or
+    /// a read asked since (an older answer arriving late): not for the diff on screen.
+    pub(crate) fn apply_line_comments(&mut self, epoch: u64, key: (String, u32), asked: u64, r: Result<github::LineComments, String>) {
+        if self.load_gen != epoch || self.pull_diff_of.as_ref() != Some(&key) || self.pull_review.as_ref().is_some_and(|rv| rv.asked != asked) {
+            return;
+        }
+        match r {
+            Ok(read) => {
+                if let Some(rv) = self.pull_review.as_mut() {
+                    rv.head = read.head;
+                    rv.comments = read.comments;
+                    rv.more = read.more;
                 }
-                // The diff still shows; only its comments are missing.
-                Err(e) => s.notify_problem(format!("The comments on this pull request's lines couldn't load: {e}")),
+                self.place_line_comments();
             }
-        });
+            // The diff still shows; only its comments are missing.
+            Err(e) => self.notify_problem(format!("The comments on this pull request's lines couldn't load: {e}")),
+        }
     }
 
     /// Puts the line comments and the one being written under their lines.
@@ -421,7 +481,14 @@ impl App {
         }
     }
 
+    /// **Cancel** on the comment being written on the diff's lines: asks first if it has text.
     pub(crate) fn cancel_line_comment(&mut self) {
+        if !self.ask_first(&[state::Draft::LineComment], |_| {}) {
+            self.close_line_draft();
+        }
+    }
+
+    pub(crate) fn close_line_draft(&mut self) {
         if let Some(r) = self.pull_review.as_mut() {
             r.draft = None;
         }

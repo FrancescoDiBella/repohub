@@ -142,7 +142,7 @@ pub fn form_panel(s: &App, k: &Kit, i: usize) -> El {
     let check = f.write();
     let blocked = blocked(s);
     let cancel = Button::new("Cancel").variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
-        .on_press(|s: &mut App| { s.form = None; s.picker = None; s.issue_picks = Default::default(); }).build(k).key("form-cancel");
+        .on_press(|s: &mut App| s.cancel_form()).build(k).key("form-cancel");
     let submit_label = match (f.kind, sending) {
         (_, true) => "Sending…",
         (Compose::Issue, _) => "Create issue",

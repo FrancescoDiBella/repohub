@@ -267,8 +267,12 @@ pub(crate) fn view(s: &App, cx: &mut Cx<App>) -> El {
         .child(backdrop)
         // The scroll bar shows where you are on a long page (as the system's "Show scroll bars" says).
         .child(rune_kit::ScrollBar::scroll_bar(col().key("page").w_full().h_full().shrink().scroll(ScrollSpec { stick_bottom: false }).child(page), &k));
+    // "Discard what you typed?" floats over the page, at the bottom, until it's answered (in
+    // place of the toast).
+    if let Some(ask) = discard::question(s, &k) {
+        main = main.child(row().pin(Some(16.0), None, Some(16.0), Some(20.0)).center().child(ask));
+    } else if let Some(toast) = &s.toast {
     // The toast floats over the page, at the bottom; it leaves by itself or with its button.
-    if let Some(toast) = &s.toast {
         let (icon, tint) = match toast.kind {
             ToastKind::Done => (&icons::CHECK, k.c.success.icon),
             ToastKind::Problem => (&icons::CROSS, k.c.danger.icon),
