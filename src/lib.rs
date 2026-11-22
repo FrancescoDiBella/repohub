@@ -2129,23 +2129,30 @@ impl App {
         let Some(h) = self.handle.clone() else { return };
         let cfg = self.cfg.clone();
         let epoch = self.load_gen;
-        net::spawn(h, move || async move { github::run(&cfg, &repo, w).await }, move |s: &mut App, r| {
-            if s.load_gen != epoch {
-                return;
-            }
-            match r {
-                Ok(done) => {
-                    s.form = None;
-                    s.picker = None;
-                    s.apply_done(&repo_cb, done);
+        net::spawn(h, move || async move { github::run(&cfg, &repo, w).await }, move |s: &mut App, r| s.form_sent(epoch, &repo_cb, r));
+    }
+
+    /// The form's write finished: the form closes, or stays with what was typed and GitHub's
+    /// reason. A form opened since (or none, after Cancel) is left as it is, and a failure is
+    /// then said in a toast.
+    fn form_sent(&mut self, epoch: u64, repo: &str, r: Result<github::Done, String>) {
+        if self.load_gen != epoch {
+            return;
+        }
+        let ours = self.form.as_ref().is_some_and(|f| f.repo.eq_ignore_ascii_case(repo) && f.submit.is_sending());
+        match r {
+            Ok(done) => {
+                if ours {
+                    self.form = None;
+                    self.picker = None;
                 }
-                Err(e) => {
-                    if let Some(f) = s.form.as_mut() {
-                        f.submit = Submit::Failed(e);
-                    }
-                }
+                self.apply_done(repo, done);
             }
-        });
+            Err(e) => match self.form.as_mut().filter(|_| ours) {
+                Some(f) => f.submit = Submit::Failed(e),
+                None => self.notify_problem(e),
+            },
+        }
     }
 
     /// Runs a row's write (close an issue, merge a pull request, re-run a workflow) on repository `repo`.
@@ -5459,6 +5466,42 @@ mod fix66_tests {
         assert!(s.toast.as_ref().is_some_and(|t| t.text.contains("no local copy")), "it doesn't return silently");
         assert!(s.git_job.is_none());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// GitHub's answer to a New issue form belongs to that form: a form opened since keeps
+    /// what's typed in it, and a failure after the form was closed is still said.
+    #[test]
+    fn a_forms_answer_reaches_that_form_or_a_toast() {
+        use crate::state::{Compose, Submit};
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = app();
+        let (a, b) = (s.data.repos[0].full_name.clone(), s.data.repos[1].full_name.clone());
+        let epoch = s.load_gen;
+        let typed = |s: &mut App, i: usize, title: &str| {
+            s.open_form(i, Compose::Issue);
+            s.form.as_mut().unwrap().title = rune::TextEdit::new(title);
+        };
+        // Sent, then Cancel: GitHub refuses. Nothing on screen would say it otherwise.
+        typed(&mut s, 0, "First");
+        s.form.as_mut().unwrap().submit = Submit::Sending;
+        s.form = None;
+        s.toast = None;
+        s.form_sent(epoch, &a, Err("GitHub refused: Issues are disabled".into()));
+        assert!(s.toast.as_ref().is_some_and(|t| t.text.contains("Issues are disabled")), "the failure is said");
+        // Sent, then another form opened and typed in: the first's answer leaves it alone.
+        typed(&mut s, 0, "Second");
+        s.form.as_mut().unwrap().submit = Submit::Sending;
+        typed(&mut s, 1, "Half-written");
+        s.form_sent(epoch, &a, Err("GitHub refused".into()));
+        let f = s.form.as_ref().expect("the open form stays");
+        assert_eq!((f.repo.as_str(), f.title.text.as_str(), f.submit.is_sending() || matches!(f.submit, Submit::Failed(_))), (b.as_str(), "Half-written", false));
+        s.form_sent(epoch, &a, Ok(github::Done::Issue(github::Created { number: 99, url: String::new() })));
+        assert_eq!(s.form.as_ref().map(|f| f.title.text.as_str()), Some("Half-written"), "still open after the other one's success");
+        assert!(s.data.issues.iter().any(|x| x.number == 99), "and the new issue is listed");
+        // Its own answer closes it.
+        s.form.as_mut().unwrap().submit = Submit::Sending;
+        s.form_sent(epoch, &b, Ok(github::Done::Issue(github::Created { number: 100, url: String::new() })));
+        assert!(s.form.is_none());
     }
 }
 
