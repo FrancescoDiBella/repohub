@@ -7,3 +7,8 @@ web/*
 !web/index.html
 !web/manifest.webmanifest
 !web/icon.svg
+# Build outputs that the image makes itself
+dist/
+_site/
+android/app/build/
+android/app/src/main/assets/web/

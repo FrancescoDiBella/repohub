@@ -1,6 +1,7 @@
 //! repohub-server: serves the RepoHub web build and proxies the GitHub API for it.
 //!
-//! - `GET /` and static files from `WEB_DIR`.
+//! - `GET /` and static files from `WEB_DIR`, brotli or gzip when precompressed copies are there
+//!   (`files.rs`).
 //! - `GET /config.json`: the non-secret settings (user, title, theme, pinned…) and `hasToken`.
 //! - `/gh/<path>`: forwarded to `GITHUB_API_URL/<path>` with the token added, so the token stays
 //!   in this process and never reaches the browser. Only the exact endpoints RepoHub uses are
@@ -16,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 use tiny_http::{Header, Method, Request, Response, Server};
 
+mod files;
 mod notes;
 #[cfg(test)]
 mod allowlist_cases;
@@ -736,17 +738,8 @@ fn serve_static(cfg: &Cfg, req: Request) {
         let _ = req.respond(text(404, "Not found"));
         return;
     }
-    match std::fs::read(&canon_file) {
-        Ok(bytes) => {
-            let resp = Response::from_data(bytes)
-                .with_header(h("Content-Type", mime(&canon_file)))
-                .with_header(h("Cache-Control", "no-cache"));
-            let _ = req.respond(resp);
-        }
-        Err(_) => {
-            let _ = req.respond(text(404, "Not found"));
-        }
-    }
+    // A precompressed copy when the browser takes one, and the caching headers (files.rs).
+    files::respond(req, &canon_file, &canon_web, mime(&canon_file));
 }
 
 /// The `If-None-Match` of a GET forwarded to GitHub: entity tags only (`"…"` or `W/"…"`,

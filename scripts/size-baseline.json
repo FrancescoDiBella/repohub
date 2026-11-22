@@ -1,0 +1,15 @@
+{
+  "commit": "v0.1.0-21-gc6dcf8f",
+  "rustc": "1.99.1",
+  "program": 26011768,
+  "program_gz": 11696991,
+  "wasm_cargo": 11094125,
+  "wasm_bindgen": 9553571,
+  "wasm": 9260782,
+  "wasm_gz": 3564835,
+  "wasm_br": 2448243,
+  "js_br": 26837,
+  "download_gz": 3596540,
+  "download_br": 2475080,
+  "platform": "Linux-x86_64"
+}

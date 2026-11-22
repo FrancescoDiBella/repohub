@@ -32,8 +32,44 @@ jobs:
         run: cargo test --release
       - name: Server tests
         run: cargo test --release --manifest-path server/Cargo.toml
-      - name: Web build compiles
-        run: cargo build --release --lib --target wasm32-unknown-unknown
+      # The web build is built, optimized and measured by the size job.
+
+  # What we ship, measured: the desktop program as releases build it and the web build as the
+  # browser downloads it (scripts/size.sh). The numbers go to the job summary, and a warning (not
+  # a failure) says when the program, the .wasm or the download grows by more than 3% against
+  # scripts/size-baseline.json, which changes only on purpose (CONTRIBUTING, "Size").
+  size:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # See the test job.
+      - name: xkbcommon for the linker
+        run: |
+          lib=/usr/lib/x86_64-linux-gnu
+          if [ -e "$lib/libxkbcommon.so" ]; then exit 0; fi
+          if [ -e "$lib/libxkbcommon.so.0" ]; then sudo ln -s libxkbcommon.so.0 "$lib/libxkbcommon.so"
+          else echo 'void repohub_xkbcommon_stub(void) {}' | sudo cc -shared -x c - -o "$lib/libxkbcommon.so"; fi
+      - name: Toolchain
+        run: rustup show active-toolchain && rustup target add wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: size
+      - name: wasm-bindgen, wasm-opt and brotli
+        run: |
+          cargo install wasm-bindgen-cli --version 0.2.129 --locked
+          scripts/install-wasm-opt.sh "$HOME/.local/bin" && echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          command -v brotli || { sudo apt-get update -qq && sudo apt-get install -y -qq brotli; }
+      - name: Desktop program
+        run: cargo build --profile dist --bin repohub
+      - name: Web build
+        run: scripts/web-build.sh dist/web
+      - name: Sizes
+        run: scripts/size.sh --compare scripts/size-baseline.json --json size.json
+      # The numbers as JSON: to accept a change in size, this file becomes scripts/size-baseline.json.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: size
+          path: size.json
 
   # A reminder, not a gate: a pull request that changes the app should say so in CHANGELOG.md,
   # whose Unreleased section becomes the next release's notes.
