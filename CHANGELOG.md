@@ -36,6 +36,11 @@ The sections are **Added**, **Changed** and **Fixed**.
   panels.
 
 ### Changed
+- **Smaller downloads.** The desktop app is about a fifth smaller (on Linux the program went
+  from 32.8 to 25.5 MB) and no slower. In Docker, the server now sends the web app compressed:
+  the first visit downloads 2.4 MB (brotli) or 3.5 MB (gzip) instead of 16.8 MB, and the browser
+  keeps the files until the next version instead of downloading them again on every visit. The
+  Android app's APK is several megabytes smaller: its page is now compressed inside it.
 - A deleted drawing goes to a trash folder next to the drawings and stays there 30 days.
 - Drawing on a board saved from excalidraw.com keeps the elements RepoHub doesn't draw (images,
   frames) in the file.

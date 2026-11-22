@@ -221,6 +221,7 @@ installed automatically.
 ```sh
 cp .env.example .env                  # optional: set GITHUB_USER and/or GITHUB_TOKEN, or connect in Settings
 cargo run --release                   # the first build takes a few minutes
+cargo build --profile dist --bin repohub   # the smaller program the releases ship (target/dist/repohub), slower to build
 packaging/macos/bundle.sh 0.1.0       # macOS: builds dist/RepoHub.app and the .dmg
 ```
 
