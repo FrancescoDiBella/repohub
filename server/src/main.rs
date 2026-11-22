@@ -492,6 +492,25 @@ fn check_origin_and_preflight(req: &Request, host_header: &str) -> Result<(), (u
 /// Which proxied API calls are allowed: the exact read endpoints RepoHub uses, starring, and the few
 /// writes the app makes (create an issue, a branch or a pull request, close an issue, merge a
 /// pull request). Nothing that deletes, rewrites, or exposes administrative repository data.
+/// A branch name GitHub takes (the app's `github::valid_branch`): no spaces, no `..`, no
+/// leading `-`, `/` or `.`, none of `~^:?*[\`.
+fn branch_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 200
+        && !name.starts_with(['-', '/', '.'])
+        && !name.ends_with(['/', '.'])
+        && !name.ends_with(".lock")
+        && !name.contains("..")
+        && !name.contains("//")
+        && !name.contains("@{")
+        && !name.chars().any(|c| c.is_whitespace() || c.is_control() || "~^:?*[\\".contains(c))
+}
+
+/// `base...head` of a comparison: two branch names around the three dots.
+fn compare_spec(spec: &str) -> bool {
+    spec.split_once("...").is_some_and(|(base, head)| branch_name(base) && branch_name(head))
+}
+
 fn allowed(method: &Method, path: &str) -> bool {
     let p = path.split('?').next().unwrap_or("");
     let seg: Vec<&str> = p.trim_start_matches('/').split('/').collect();
@@ -541,6 +560,14 @@ fn allowed(method: &Method, path: &str) -> bool {
                 }
                 // The checks on a pull request's last commit (a hex commit id).
                 if rest.len() == 3 && rest[0] == "commits" && sha(rest[1]) && rest[2] == "check-runs" {
+                    return true;
+                }
+                // One commit with its files, by its id only.
+                if rest.len() == 2 && rest[0] == "commits" && sha(rest[1]) {
+                    return true;
+                }
+                // Two branches compared: `base...head`, each a branch name (which may hold `/`).
+                if rest.len() >= 2 && rest[0] == "compare" && compare_spec(&rest[1..].join("/")) {
                     return true;
                 }
             }
@@ -937,6 +964,35 @@ mod tests {
         assert!(!allowed(&Method::Get, "/repos/owner/repo/commits/main/check-runs"));
         assert!(!allowed(&Method::Get, "/repos/owner/repo/commits/0123abc/statuses"));
         assert!(!allowed(&Method::Post, "/repos/owner/repo/commits/0123abc/check-runs"));
+        // One commit, by a hex id of 7 to 64 digits, and nothing under it.
+        assert!(allowed(&Method::Get, "/repos/owner/repo/commits/0123abc"));
+        assert!(allowed(&Method::Get, "/repos/owner/repo/commits/0123abcdef0123abcdef0123abcdef0123abcdef"));
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/commits/0123ab"));
+        assert!(!allowed(&Method::Get, &format!("/repos/owner/repo/commits/{}", "a".repeat(65))));
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/commits/main"));
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/commits/0123abc/comments"));
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/commits/0123abc/pulls"));
+        assert!(!allowed(&Method::Post, "/repos/owner/repo/commits/0123abc"));
+        // Two branches compared: valid names around `...`, with `/` inside a name.
+        assert!(allowed(&Method::Get, "/repos/owner/repo/compare/main...feature"));
+        assert!(allowed(&Method::Get, "/repos/owner/repo/compare/main...feature/login?per_page=100"));
+        assert!(allowed(&Method::Get, "/repos/owner/repo/compare/release/1.2...fix/x-y_z"));
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/compare"));
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/compare/main"));
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/compare/main..feature"), "two dots isn't a comparison the app makes");
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/compare/main....feature"));
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/compare/...feature"));
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/compare/main..."));
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/compare/-main...feature"), "a leading - could pass for an option");
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/compare/main...a..b"));
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/compare/main...fea ture"));
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/compare/main...HEAD~1"));
+        assert!(!allowed(&Method::Get, "/repos/owner/repo/compare/main...x:y"));
+        assert!(!allowed(&Method::Post, "/repos/owner/repo/compare/main...feature"));
+        // Encoded dots and slashes never reach the allowlist.
+        assert!(validate_and_decode_path("/repos/owner/repo/compare/main%2e%2e%2efeature").is_none());
+        assert!(validate_and_decode_path("/repos/owner/repo/compare/main...feature%2fx").is_none());
+        assert!(validate_and_decode_path("/repos/owner/repo/compare/main...fix%2Bx").is_some_and(|p| allowed(&Method::Get, &p)));
     }
 
     #[test]
