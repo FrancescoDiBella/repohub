@@ -1,4 +1,6 @@
-//! The app: its state (`App`, `Page`), `init`, and the `impl App` blocks.
+//! The app's state: `App`, `Page`, the small types `App`'s fields use, and `init`. The `impl App`
+//! blocks are in the files below, grouped by what they are about; each starts with
+//! `use super::*`, so the imports here are theirs too.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -27,18 +29,18 @@ mod settings;
 mod updates;
 mod writes;
 
-pub(crate) use chrome::view;
-#[cfg(test)]
-pub(crate) use chrome::banner;
-pub(crate) use keys::on_key;
-#[cfg(test)]
-pub(crate) use keys::shortcuts;
 pub use frame::start;
 #[cfg(target_arch = "wasm32")]
 pub use frame::repohub_back;
+pub(crate) use chrome::view;
+pub(crate) use keys::on_key;
+pub(crate) use repos::{orgs, pinned};
+#[cfg(test)]
+pub(crate) use chrome::banner;
 #[cfg(test)]
 pub(crate) use frame::poll;
-pub(crate) use repos::{orgs, pinned};
+#[cfg(test)]
+pub(crate) use keys::shortcuts;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Page {

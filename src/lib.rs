@@ -74,7 +74,7 @@ mod test_env;
 #[cfg(test)]
 pub(crate) static ENV_LOCK: test_env::Lock = test_env::Lock::new();
 
-// What the rest of the crate names as `crate::…`: the app lives in `app`.
+// The app lives in `app`: these keep the `crate::…` paths the rest of the crate and the tests name.
 pub use app::{App, LookEditor, Page, start};
 #[cfg(target_arch = "wasm32")]
 pub use app::repohub_back;
