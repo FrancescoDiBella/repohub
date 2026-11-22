@@ -355,8 +355,10 @@ works too (without its first-frame time). Times include the headless renderer's 
 
 1. In `CHANGELOG.md`, rename `## Unreleased` to `## 0.2.0`, then start a new, empty
    `## Unreleased` above it. Set `version = "0.2.0"` in `Cargo.toml`.
-2. Merge that, then tag it: `git tag v0.2.0 && git push origin v0.2.0`.
-   The release workflow stops if the tag isn't the version in `Cargo.toml`.
+2. Merge that, then tag it: `git tag v0.2.0 && git push origin v0.2.0`. Or, without a
+   terminal: **Actions → Desktop → Run workflow** on `main`, with `v0.2.0` in **release**; the
+   workflow creates the tag on main's newest commit. It refuses a tag that already exists.
+   Either way the release workflow stops if the tag isn't the version in `Cargo.toml`.
 3. The Desktop workflow builds the three packages and publishes the release. Its notes are the
    `0.2.0` section (`scripts/release-notes.sh 0.2.0` prints it), followed by GitHub's list of
    pull requests.
