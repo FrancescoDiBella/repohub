@@ -263,6 +263,12 @@ pub struct SyncState {
     pub timer: u64,
     /// Another run was asked for while one ran.
     pub again: bool,
+    /// A run (or forgetting an index) is under way: its answer hasn't come back, even if it's no
+    /// longer the one on screen. Only one goes at a time, so two never write the same files.
+    pub busy: bool,
+    /// **Stop syncing** was pressed while a run went: its index is forgotten once it's done
+    /// (it saves it at its end).
+    pub forget_after: Option<String>,
     /// Boards with changes not sent yet.
     pub to_send: BTreeSet<Key>,
     /// Boards saved while the running sync ran (they wait for the next).
@@ -335,7 +341,8 @@ impl App {
             return;
         }
         let Some(repo) = self.sync.repo.clone() else { return };
-        if self.sync.status == BoardSync::Running {
+        // One at a time, even when the one going belongs to an account or a choice left since.
+        if self.sync.status == BoardSync::Running || self.sync.busy {
             self.sync.again = true;
             return;
         }
@@ -343,9 +350,11 @@ impl App {
         self.sync.run += 1;
         let (run, epoch) = (self.sync.run, self.load_gen);
         self.sync.status = BoardSync::Running;
+        self.sync.busy = true;
         self.sync.saved_during.clear();
         let cfg = self.cfg.clone();
-        net::spawn(h, move || async move { run_owned(cfg, repo).await }, move |s: &mut App, r| s.apply_sync(epoch, run, r));
+        let asked = repo.clone();
+        net::spawn(h, move || async move { run_owned(cfg, repo).await }, move |s: &mut App, r| s.apply_sync(epoch, run, &asked, r));
     }
 
     /// A drawing was written or deleted here: it waits to be sent, and sync runs a few seconds
@@ -380,12 +389,23 @@ impl App {
         });
     }
 
-    fn apply_sync(&mut self, epoch: u64, run: u64, (report, private): (Report, Option<bool>)) {
-        if run != self.sync.run {
+    pub(crate) fn apply_sync(&mut self, epoch: u64, run: u64, repo: &str, (report, private): (Report, Option<bool>)) {
+        self.sync.busy = false;
+        // Stop syncing was pressed while this run went: what it just remembered is forgotten,
+        // before any next run starts.
+        if self.sync.forget_after.as_deref() == Some(repo) {
+            self.sync.forget_after = None;
+            self.forget_index(repo.to_owned());
             return;
         }
-        if epoch != self.load_gen || self.sync.repo.is_none() {
-            self.sync.status = if self.sync.repo.is_some() { BoardSync::Ready } else { BoardSync::Off };
+        if run != self.sync.run || epoch != self.load_gen || self.sync.repo.is_none() {
+            if run == self.sync.run {
+                self.sync.status = if self.sync.repo.is_some() { BoardSync::Ready } else { BoardSync::Off };
+            }
+            // A run asked for while this one went (another account's, another repository).
+            if std::mem::take(&mut self.sync.again) {
+                self.sync_now();
+            }
             return;
         }
         if let Some(p) = private {
@@ -517,11 +537,30 @@ impl App {
         self.sync.to_send.clear();
         self.sync.synced.clear();
         self.sync.again = false;
-        if let Some(h) = self.handle.clone() {
-            let r = repo.clone();
-            net::spawn(h, move || async move { notes::save_index(&r, "").await }, |_: &mut App, _| {});
+        // A run going now saves its index when it ends: forget it after that one.
+        if self.sync.busy {
+            self.sync.forget_after = Some(repo.clone());
+        } else {
+            self.forget_index(repo.clone());
         }
         self.notify(format!("Boards don't sync any more. They stay here and in {repo}."));
+    }
+
+    /// Forgets what was last synced with `repo` (its index); no run starts meanwhile.
+    fn forget_index(&mut self, repo: String) {
+        let Some(h) = self.handle.clone() else {
+            // Tests and headless stills, where nothing runs in the background.
+            #[cfg(not(target_arch = "wasm32"))]
+            let _ = pollster::block_on(notes::save_index(&repo, ""));
+            return;
+        };
+        self.sync.busy = true;
+        net::spawn(h, move || async move { notes::save_index(&repo, "").await }, |s: &mut App, _| {
+            s.sync.busy = false;
+            if std::mem::take(&mut s.sync.again) {
+                s.sync_now();
+            }
+        });
     }
 }
 
@@ -794,6 +833,49 @@ mod tests {
             assert_eq!((r.uploaded, r.downloaded, r.merged, r.deleted_local, r.deleted_remote), (0, 0, 0, 0, 0), "{name}");
         }
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// **Stop syncing** while a run goes: that run saves its index when it ends, so the index is
+    /// forgotten after it, not before (otherwise a board deleted here while sync was off would
+    /// later be deleted from the repository too). And a run never starts while another goes.
+    #[test]
+    fn stop_during_a_run_forgets_its_index_after_it_and_runs_never_overlap() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _dir = crate::load_gen_tests::TempDataDir::new("sync-stop");
+        let mut s = crate::init();
+        s.data = crate::model::Data::sample();
+        s.data.sample = false;
+        s.data_changed();
+        let mut cfg = (*s.cfg).clone();
+        cfg.token = Some("t".into());
+        cfg.allow_writes = true;
+        cfg.notes = true;
+        s.cfg = std::sync::Arc::new(cfg);
+        assert_eq!(s.sync_blocked(), None);
+        let repo = format!("{}/repohub-notes", s.data.profile.login);
+        s.sync.account = Some(s.data.profile.login.clone());
+        s.sync.repo = Some(repo.clone());
+        // A run is going: started earlier, its answer not back yet.
+        (s.sync.status, s.sync.busy, s.sync.run) = (BoardSync::Running, true, 7);
+        let epoch = s.load_gen;
+        s.stop_syncing();
+        // It ends: it saves what it synced, then its answer arrives.
+        let index = format!(r#"{{"version":1,"repo":"{repo}","boards":{{"boards/o/r/main/Plan.excalidraw":{{"local":"{0}","remote":"{0}"}}}}}}"#, "a".repeat(40));
+        pollster::block_on(notes::save_index(&repo, &index)).unwrap();
+        s.apply_sync(epoch, 7, &repo, (Report::default(), Some(true)));
+        assert_eq!(pollster::block_on(notes::load_index(&repo)).unwrap(), "", "what that run synced is forgotten too");
+        assert!(!s.sync.busy && s.sync.status == BoardSync::Off);
+
+        // Another account's data arrives while a run goes: its run waits for that one.
+        save_choice("someone-else", Some("someone-else/notes"));
+        s.sync.repo = Some(repo.clone());
+        (s.sync.status, s.sync.busy, s.sync.again) = (BoardSync::Running, true, false);
+        let run = s.sync.run;
+        s.data.profile.login = "someone-else".into();
+        s.sync_after_load();
+        assert_eq!(s.sync.repo.as_deref(), Some("someone-else/notes"));
+        assert!(s.sync.again, "the next run waits for the one going");
+        assert_eq!(s.sync.run, run + 1, "the run going is now an old one; no other started");
     }
 
     #[test]
