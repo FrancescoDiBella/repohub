@@ -9,6 +9,22 @@ The sections are **Added**, **Changed** and **Fixed**.
 
 ## Unreleased
 
+### Added
+- **Boards on every device:** choose a private repository of yours in Settings → Account →
+  Boards (for example `repohub-notes`), and boards sync through it: draw on the phone, open the
+  computer, and the board is there. Changes made on two devices are merged, so both sets of
+  strokes stay; if two copies can't be merged, both are kept and a toast says so. Deleting a
+  board deletes it on the other devices, unless one changed it since. The Notes tab says when it
+  last synced and what waits to be sent, and marks each board. RepoHub warns before using a
+  public repository and never creates one; **Stop syncing** leaves everything in place.
+- **Export…** and **Import…** of a board as an `.excalidraw` file (a save dialog on the desktop,
+  a download in the browser, the phone's pickers on Android). They need no account.
+
+### Changed
+- A deleted drawing goes to a trash folder next to the drawings and stays there 30 days.
+- Drawing on a board saved from excalidraw.com keeps the elements RepoHub doesn't draw (images,
+  frames) in the file.
+
 ## 0.1.0 — 2026-11-18
 
 The first numbered release.
