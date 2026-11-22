@@ -19,6 +19,7 @@
 | `src/sync.rs` | Boards on every device, the engine (pure, tested): git blob ids and base64, notes-repository paths, the index, the decision table (`decide`, `plan`), merging two boards (`merge`), and the run over the `Remote` and `Local` traits, with fakes in its tests |
 | `src/sync_io.rs`, `src/sync_page.rs` | Board sync wired up: GitHub as the notes repository (`GhRemote`), the notes storage (`NotesLocal`), checking and choosing the repository, when sync runs, the app's sync state; the Notes header, the board marks and Settings → Account → Boards |
 | `src/board_file.rs` | **Export…** and **Import…** of one board: Rune's file dialogs on the desktop, a download and the file picker on the web, the `RepoHubNative` pickers on Android |
+| `src/triage.rs`, `src/triage_page.rs` | Triage: a repository's labels, assignable people and milestones (kept per repository), the picker (filter, ticks, what changed), each change's request and GitHub's answer, applying it to the conversation and the rows; the details block, the pickers, title and description editing, the New issue form's labels and assignees, the Overview's **Waiting for your review** |
 | `src/palette.rs` | The command palette (⌘K): the commands for the current state, the fuzzy ranking (both tested), the modal layer |
 | `src/update.rs` | In-app updates: the build's commit (`REPOHUB_BUILD`, set by the Desktop workflow), the Latest build's package for this platform, the SHA256SUMS check, install and restart |
 | `src/themes.rs`, `src/themes_page.rs` | Themes: the ready-made looks, yours (`Looks`, saved in the preferences), the `Kit` built from a look, background patterns and pictures; the gallery and editor in Settings |
@@ -67,7 +68,10 @@ REPOHUB_BLOCKING=1 target/release/repohub --snap out.png --size 1180x760 -- page
 `REPOHUB_BLOCKING=1` loads the data before the first frame, so the snapshot shows it.
 Add `tab notes` (a section's name) after `page repo`, and `REPOHUB_TRACE=1` to print every state change.
 `REPOHUB_COMPACT=1` with `--size 390x844` starts in the phone layout.
-`thread 14` after `page pulls` (or `page issues`) opens that conversation.
+`thread 14` after `page pulls` (or `page issues`) opens that conversation; `picker labels` (or
+`assignees`, `milestone`, `reviewers`) then opens that picker in its details, and `edit title` (or
+`body`) the title's or the description's editor. After `page repo tab issues`, `picker labels` (or
+`assignees`) opens the New issue form with that picker.
 `diff 14` also opens that pull request's diff, and `section appearance` picks the Settings section.
 `tab commits` reads the history before the first frame; `commit 0123abc` (or `commit 2`, the
 second in the list) opens a commit, and `compare main...feature/x` compares two branches.
@@ -146,10 +150,12 @@ the same; the clients bypass HTTP proxies for `localhost` and `NO_PROXY` hosts.
 - Never commit `.env` or anything that contains a token.
 - Keep the proxy allowlist (`server/src/main.rs`, `allowed`) as narrow as the app needs. Add an
   endpoint there only together with the feature that uses it.
-- RepoHub creates (issues, branches, pull requests), closes issues and merges pull requests, and,
-  in the notes repository the user chose for board sync, writes and deletes board files under
-  `boards/` (one commit each), and nothing more: deleting repositories or branches and rewriting
-  history stay on GitHub. A new write goes through `github::Write` (board sync through
+- RepoHub creates (issues, branches, pull requests), closes issues, merges pull requests, edits
+  an issue's or pull request's labels, assignees, milestone, title and description and who is
+  asked to review, and, in the notes repository the user chose for board sync, writes and deletes
+  board files under `boards/` (one commit each), and nothing more: deleting repositories or
+  branches and rewriting history stay on GitHub. The only other `DELETE` in a repository takes
+  back a review request. A new write goes through `github::Write` (board sync through
   `sync_io::GhRemote` on the same transport), the proxy allowlist (`server/src/main.rs`) and its
   test. The board paths are checked on the raw address (`board_contents_path`), as narrowly as
   the app writes them.

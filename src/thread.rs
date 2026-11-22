@@ -1,7 +1,8 @@
 //! An issue's or a pull request's conversation: its description, comments and reviews.
 //!
 //! GitHub keeps both under `/issues/{n}` (a pull request is an issue with code), reviews under
-//! `/pulls/{n}/reviews`. The page is `thread_page`; the requests are in `github`.
+//! `/pulls/{n}/reviews`. The page is `thread_page`; the requests are in `github`; labels,
+//! assignees, milestone, reviewers and editing are `triage`.
 use rune::TextEdit;
 
 use crate::state::Load;
@@ -121,6 +122,14 @@ pub struct Thread {
     pub url: String,
     /// Label names and hues.
     pub labels: Vec<(String, f32)>,
+    /// Who it's assigned to (logins).
+    pub assignees: Vec<String>,
+    /// Its milestone: number and title.
+    pub milestone: Option<(u32, String)>,
+    /// A pull request's reviewers who are asked and haven't answered yet (logins).
+    pub requested: Vec<String>,
+    /// A pull request's reviewers who answered, each with their latest verdict.
+    pub reviewed: Vec<(String, Verdict)>,
     /// A pull request's branch and the one it goes into.
     pub branches: Option<(String, String)>,
     /// The description first, then comments and reviews, oldest first.
@@ -143,6 +152,8 @@ pub struct Open {
     pub sending: bool,
     /// Counts loads, so a late answer for an earlier one is dropped.
     pub epoch: u64,
+    /// Triage: the open picker, the title or description being edited, GitHub's refusal.
+    pub edit: crate::triage::Edits,
 }
 
 impl Open {
@@ -182,7 +193,11 @@ pub fn sample(title: &str, author: &str, pull: bool, standing: Standing, now: i6
         author: author.to_owned(),
         standing,
         url: String::new(),
-        labels: if pull { Vec::new() } else { vec![("bug".into(), 20.0)] },
+        labels: if pull { vec![("enhancement".into(), 200.0)] } else { vec![("bug".into(), 20.0)] },
+        assignees: vec![author.to_owned()],
+        milestone: Some((3, "v0.3 · Mixed reality".to_owned())),
+        requested: if pull { vec!["hubot".to_owned()] } else { Vec::new() },
+        reviewed: if pull { vec![("octocat".to_owned(), Verdict::Commented)] } else { Vec::new() },
         branches: pull.then(|| ("feature/chunked-loading".to_owned(), "main".to_owned())),
         entries,
         more: false,

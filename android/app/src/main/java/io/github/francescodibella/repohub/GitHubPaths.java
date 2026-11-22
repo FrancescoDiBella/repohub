@@ -163,6 +163,10 @@ final class GitHubPaths {
                     if (rest.length == 1 && java.util.Arrays.asList("contents", "readme", "languages", "commits", "branches", "issues").contains(rest[0])) {
                         return true;
                     }
+                    // A repository's labels, assignable people and milestones (triage pickers).
+                    if (rest.length == 1 && (rest[0].equals("labels") || rest[0].equals("assignees") || rest[0].equals("milestones"))) {
+                        return true;
+                    }
                     if (rest.length >= 4 && rest[0].equals("git") && rest[1].equals("ref") && rest[2].equals("heads")) {
                         for (int i = 3; i < rest.length; i++) {
                             if (rest[i].isEmpty()) {
@@ -208,15 +212,19 @@ final class GitHubPaths {
                 // Board sync writes one board, under boards/ and ending in .excalidraw, nothing else.
                 return (repo && boardFile(rest)) || starred(seg);
             case "DELETE":
-                return (repo && boardFile(rest)) || starred(seg);
+                // Taking back a review request and deleting a board file are the only DELETEs in a repository.
+                return requestedReviewers(repo, rest) || (repo && boardFile(rest)) || starred(seg);
             case "POST":
-                // Creating an issue, a pull request or a branch; commenting; reviewing a pull request; re-running a workflow.
+                // Creating an issue, a pull request or a branch; commenting; reviewing a pull request;
+                // asking for a review; re-running a workflow.
                 return repo && ((rest.length == 1 && (rest[0].equals("issues") || rest[0].equals("pulls")))
+                    || requestedReviewers(repo, rest)
                     || (rest.length == 2 && rest[0].equals("git") && rest[1].equals("refs"))
                     || (rest.length == 3 && number(rest[1]) && ((rest[0].equals("issues") && rest[2].equals("comments")) || (rest[0].equals("pulls") && (rest[2].equals("reviews") || rest[2].equals("comments")))))
                     || (rest.length == 4 && rest[0].equals("actions") && rest[1].equals("runs") && number(rest[2]) && (rest[3].equals("rerun") || rest[3].equals("rerun-failed-jobs"))));
             case "PATCH":
-                // Closing or reopening an issue; marking one notification as read.
+                // Closing or reopening an issue, and editing its labels, assignees, milestone, title and
+                // description (pull requests too); marking one notification as read.
                 return (repo && rest.length == 2 && rest[0].equals("issues") && number(rest[1]))
                     || (seg.length == 3 && seg[0].equals("notifications") && seg[1].equals("threads") && number(seg[2]));
             default:
@@ -248,5 +256,10 @@ final class GitHubPaths {
 
     private static boolean starred(String[] seg) {
         return seg.length == 4 && seg[0].equals("user") && seg[1].equals("starred") && !seg[2].isEmpty() && !seg[3].isEmpty();
+    }
+
+    /** `/repos/{o}/{r}/pulls/{digits}/requested_reviewers`, nothing under it. */
+    private static boolean requestedReviewers(boolean repo, String[] rest) {
+        return repo && rest.length == 3 && rest[0].equals("pulls") && number(rest[1]) && rest[2].equals("requested_reviewers");
     }
 }

@@ -173,6 +173,7 @@ stateDiagram-v2
 | `PullState` | `Open`, `Draft`, `Merged`, `Closed` | also the Pull requests page's filter |
 | `Account` | `Locked`, `SignedOut`, `SignedIn` | `App::account()`; drives the form in Settings |
 | `Toast` | none → shown (`Done` / `Problem`) → none | its timer hides only its own message |
+| `Facet` | `Labels`, `Assignees`, `Milestone`, `Reviewers` | the open triage picker (one at a time, or none); Apply sends one `triage::Change` |
 | `markdown::Block` | `Text`, `Fence`, `Comment` | the README pass, line by line |
 
 ## For agents and scripts

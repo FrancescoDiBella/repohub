@@ -141,6 +141,45 @@ public class BackendTest {
     }
 
     @Test
+    public void triagePathsMatchTheServers() {
+        for (String p : new String[] {"/repos/o/r/labels", "/repos/o/r/labels?per_page=100", "/repos/o/r/assignees?per_page=100",
+            "/repos/o/r/milestones?state=open&per_page=100"}) {
+            assertTrue(p, GitHubPaths.allowed("GET", p));
+        }
+        for (String p : new String[] {"/repos/o/r/labels/bug", "/repos/o/r/assignees/alice", "/repos/o/r/milestones/3", "/repos/o/r/collaborators",
+            "/repos/o/r/issues/7/labels", "/labels"}) {
+            assertFalse(p, GitHubPaths.allowed("GET", p));
+        }
+        // "/repos/o/labels" is the repository named "labels" (read for board sync), not a list.
+        assertTrue(GitHubPaths.allowed("GET", "/repos/o/labels"));
+        assertFalse(GitHubPaths.allowed("GET", "/repos/o/labels/labels/bug"));
+        for (String m : new String[] {"POST", "PUT", "PATCH", "DELETE"}) {
+            assertFalse(m, GitHubPaths.allowed(m, "/repos/o/r/labels"));
+            assertFalse(m, GitHubPaths.allowed(m, "/repos/o/r/milestones"));
+        }
+        assertTrue(GitHubPaths.allowed("PATCH", "/repos/o/r/issues/7"));
+        assertFalse(GitHubPaths.allowed("PATCH", "/repos/o/r/pulls/7"));
+        assertFalse(GitHubPaths.allowed("POST", "/repos/o/r/issues/7/labels"));
+        assertFalse(GitHubPaths.allowed("DELETE", "/repos/o/r/issues/7/labels/bug"));
+        assertTrue(GitHubPaths.allowed("POST", "/repos/o/r/pulls/7/requested_reviewers"));
+        assertTrue(GitHubPaths.allowed("DELETE", "/repos/o/r/pulls/7/requested_reviewers"));
+        for (String p : new String[] {"/repos/o/r/pulls/x/requested_reviewers", "/repos/o/r/pulls/7a/requested_reviewers", "/repos/o/r/pulls//requested_reviewers",
+            "/repos/o/r/pulls/7/requested_reviewers/alice", "/repos/o/r/pulls/7/requested_reviewer", "/repos/o/r/issues/7/requested_reviewers",
+            "/repos/o/r/requested_reviewers", "/repos/o/r/pulls/requested_reviewers"}) {
+            assertFalse(p, GitHubPaths.allowed("POST", p));
+            assertFalse(p, GitHubPaths.allowed("DELETE", p));
+        }
+        assertFalse(GitHubPaths.allowed("PUT", "/repos/o/r/pulls/7/requested_reviewers"));
+        assertFalse(GitHubPaths.allowed("PATCH", "/repos/o/r/pulls/7/requested_reviewers"));
+        // DELETE anywhere else in a repository stays refused.
+        for (String p : new String[] {"/repos/o/r", "/repos/o/r/pulls/7", "/repos/o/r/issues/7", "/repos/o/r/pulls/7/reviews/1", "/repos/o/r/pulls/7/merge",
+            "/repos/o/r/issues/7/comments", "/repos/o/r/labels", "/repos/o/r/git/refs/heads/main"}) {
+            assertFalse(p, GitHubPaths.allowed("DELETE", p));
+        }
+        assertNull(GitHubPaths.decode("/repos/o/r/pulls/7%2frequested_reviewers"));
+    }
+
+    @Test
     public void boardSyncPathsAreAsNarrowAsTheServers() {
         String board = "/repos/me/repohub-notes/contents/boards/octo/app/feature%2Fx%20y/Plan%20%28v2%29.excalidraw";
         for (String m : new String[] {"GET", "PUT", "DELETE"}) {

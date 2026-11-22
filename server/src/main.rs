@@ -602,7 +602,11 @@ fn allowed(method: &Method, path: &str) -> bool {
                     | ["languages"]
                     | ["commits"]
                     | ["branches"]
-                    | ["issues"] => return true,
+                    | ["issues"]
+                    // A repository's labels, assignable people and milestones (triage pickers).
+                    | ["labels"]
+                    | ["assignees"]
+                    | ["milestones"] => return true,
                     _ => {}
                 }
                 if rest.len() >= 4 && rest[0] == "git" && rest[1] == "ref" && rest[2] == "heads" && rest[3..].iter().all(|s| !s.is_empty()) {
@@ -640,14 +644,20 @@ fn allowed(method: &Method, path: &str) -> bool {
             false
         }
         Method::Put if repo && rest.len() == 3 && rest[0] == "pulls" && number(rest[1]) && rest[2] == "merge" => true,
+        // Triage also edits an issue's labels, assignees, milestone, title and description (the
+        // PATCH below) and asks for reviews (POST). Taking back a review request on one pull
+        // request is the only DELETE in a repository.
+        Method::Delete if repo && rest.len() == 3 && rest[0] == "pulls" && number(rest[1]) && rest[2] == "requested_reviewers" => true,
         // Board sync writes one board, under boards/ and ending in .excalidraw, nothing else.
         Method::Put | Method::Delete if repo && board_file(rest) => true,
         Method::Put | Method::Delete => seg.len() == 4 && seg[0] == "user" && seg[1] == "starred" && !seg[2].is_empty() && !seg[3].is_empty(),
-        // Creating an issue, a pull request or a branch; commenting; reviewing a pull request; re-running a workflow.
+        // Creating an issue, a pull request or a branch; commenting; reviewing a pull request; asking
+        // for a review; re-running a workflow.
         Method::Post => repo && (matches!(rest, ["issues"] | ["pulls"] | ["git", "refs"])
-            || (rest.len() == 3 && number(rest[1]) && matches!((rest[0], rest[2]), ("issues", "comments") | ("pulls", "reviews") | ("pulls", "comments")))
+            || (rest.len() == 3 && number(rest[1]) && matches!((rest[0], rest[2]), ("issues", "comments") | ("pulls", "reviews") | ("pulls", "comments") | ("pulls", "requested_reviewers")))
             || (rest.len() == 4 && rest[0] == "actions" && rest[1] == "runs" && number(rest[2]) && matches!(rest[3], "rerun" | "rerun-failed-jobs"))),
-        // Closing or reopening an issue; marking one notification as read.
+        // Closing or reopening an issue, and editing its labels, assignees, milestone, title and
+        // description (pull requests too); marking one notification as read.
         Method::Patch => (repo && rest.len() == 2 && rest[0] == "issues" && number(rest[1]))
             || (seg.len() == 3 && seg[0] == "notifications" && seg[1] == "threads" && number(seg[2])),
         _ => false,
@@ -1118,6 +1128,55 @@ mod tests {
         assert!(!allowed(&Method::Post, "/repos/owner/repo/actions/runs/bad/rerun"));
         assert!(!allowed(&Method::Post, "/repos/owner/repo/actions/runs/42/cancel"));
         assert!(!allowed(&Method::Delete, "/repos/owner/repo/actions/runs/42/logs"));
+    }
+
+    #[test]
+    fn proxy_triage_allowlist() {
+        // The pickers' choices: exactly these three lists, nothing under them, and only read.
+        for p in ["/repos/owner/repo/labels", "/repos/owner/repo/labels?per_page=100", "/repos/owner/repo/assignees?per_page=100",
+            "/repos/owner/repo/milestones?state=open&per_page=100"] {
+            assert!(allowed(&Method::Get, p), "{p}");
+        }
+        for p in ["/repos/owner/repo/labels/bug", "/repos/owner/repo/assignees/alice", "/repos/owner/repo/milestones/3",
+            "/repos/owner/repo/milestones/3/labels", "/repos/owner/repo/collaborators", "/repos/owner/repo/issues/7/labels", "/labels"] {
+            assert!(!allowed(&Method::Get, p), "{p}");
+        }
+        // `/repos/owner/labels` is the repository named "labels" (read for board sync), not a list.
+        assert!(allowed(&Method::Get, "/repos/owner/labels"));
+        assert!(!allowed(&Method::Get, "/repos/owner/labels/labels/bug"));
+        for m in [Method::Post, Method::Put, Method::Patch, Method::Delete] {
+            assert!(!allowed(&m, "/repos/owner/repo/labels"), "{m:?} labels: creating labels is out of scope");
+            assert!(!allowed(&m, "/repos/owner/repo/milestones"), "{m:?} milestones");
+            assert!(!allowed(&m, "/repos/owner/repo/labels/bug"), "{m:?} one label");
+        }
+        // Labels, assignees, milestone, title and description: one PATCH on the issue.
+        assert!(allowed(&Method::Patch, "/repos/owner/repo/issues/7"));
+        assert!(!allowed(&Method::Patch, "/repos/owner/repo/pulls/7"), "a pull request's own fields aren't edited");
+        assert!(!allowed(&Method::Post, "/repos/owner/repo/issues/7/labels"));
+        assert!(!allowed(&Method::Delete, "/repos/owner/repo/issues/7/labels/bug"));
+        assert!(!allowed(&Method::Post, "/repos/owner/repo/issues/7/assignees"));
+        assert!(!allowed(&Method::Delete, "/repos/owner/repo/issues/7/assignees"));
+        // Asking for a review and taking the request back: digits for the number, nothing next to it.
+        assert!(allowed(&Method::Post, "/repos/owner/repo/pulls/7/requested_reviewers"));
+        assert!(allowed(&Method::Delete, "/repos/owner/repo/pulls/7/requested_reviewers"));
+        assert!(allowed(&Method::Get, "/repos/owner/repo/pulls/7"), "read with the conversation");
+        for p in ["/repos/owner/repo/pulls/x/requested_reviewers", "/repos/owner/repo/pulls/7a/requested_reviewers", "/repos/owner/repo/pulls//requested_reviewers",
+            "/repos/owner/repo/pulls/7/requested_reviewers/alice", "/repos/owner/repo/pulls/7/requested_reviewer", "/repos/owner/repo/issues/7/requested_reviewers",
+            "/repos/owner/repo/requested_reviewers", "/repos/owner/repo/pulls/requested_reviewers"] {
+            assert!(!allowed(&Method::Post, p), "POST {p}");
+            assert!(!allowed(&Method::Delete, p), "DELETE {p}");
+        }
+        assert!(!allowed(&Method::Put, "/repos/owner/repo/pulls/7/requested_reviewers"));
+        assert!(!allowed(&Method::Patch, "/repos/owner/repo/pulls/7/requested_reviewers"));
+        // DELETE anywhere else in a repository stays refused.
+        for p in ["/repos/owner/repo", "/repos/owner/repo/pulls/7", "/repos/owner/repo/issues/7", "/repos/owner/repo/pulls/7/reviews/1",
+            "/repos/owner/repo/pulls/7/merge", "/repos/owner/repo/issues/7/comments", "/repos/owner/repo/labels", "/repos/owner/repo/milestones/3",
+            "/repos/owner/repo/git/refs/heads/main", "/repos/owner/repo/branches/main"] {
+            assert!(!allowed(&Method::Delete, p), "DELETE {p}");
+        }
+        // Encoded slashes or dots never reach the allowlist.
+        assert!(validate_and_decode_path("/repos/owner/repo/pulls/7%2frequested_reviewers").is_none());
+        assert!(validate_and_decode_path("/repos/owner/repo/pulls/7/%2e%2e/requested_reviewers").is_none());
     }
 
     #[test]
