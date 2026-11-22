@@ -353,9 +353,13 @@ pub fn decide(local: Side, remote: Side, same: bool) -> Action {
         (Unchanged, Changed) => Action::Download,
         (Changed, Unchanged) => Action::Upload,
         (Changed | New, Changed | New) | (Unchanged, New) | (New, Unchanged) => Action::Merge,
-        (Unchanged, Deleted | Absent) => Action::DeleteLocal,
+        // Only a side that was **known and is gone** deletes the other. A side that was never
+        // known (a half-written or hand-edited index) is copied to, never deleted for.
+        (Unchanged, Deleted) => Action::DeleteLocal,
+        (Unchanged, Absent) => Action::Upload,
         (Changed | New, Deleted | Absent) => Action::Upload,
-        (Deleted | Absent, Unchanged) => Action::DeleteRemote,
+        (Deleted, Unchanged) => Action::DeleteRemote,
+        (Absent, Unchanged) => Action::Download,
         (Deleted | Absent, Changed | New) => Action::Download,
         (Deleted | Absent, Deleted | Absent) => Action::Forget,
     }
@@ -991,6 +995,26 @@ pub(crate) mod tests {
         assert_eq!(Index::from_json("not json"), Index::default());
         let odd = Index::from_json(r#"{"repo":"a/b","boards":{"p":{"local":"../x","remote":7}}}"#);
         assert_eq!(odd.boards["p"], Entry::default());
+    }
+
+    /// An index entry that knows only one side (cut short while being written, or edited by
+    /// hand) never deletes the board on the side that has it.
+    #[test]
+    fn a_half_known_board_is_copied_never_deleted() {
+        use Side::*;
+        assert_eq!(decide(Unchanged, Absent, false), Action::Upload);
+        assert_eq!(decide(Absent, Unchanged, false), Action::Download);
+        for (l, r) in [(Unchanged, Absent), (Changed, Absent), (New, Absent), (Absent, Unchanged), (Absent, Changed), (Absent, New)] {
+            assert!(!matches!(decide(l, r, false), Action::DeleteLocal | Action::DeleteRemote | Action::Forget), "{l:?} / {r:?}");
+        }
+        // Through the plan: the index knows the local file only, GitHub doesn't have it.
+        let path = "boards/o/r/main/x.excalidraw".to_owned();
+        let mut index = Index { repo: "me/notes".into(), boards: BTreeMap::new() };
+        index.boards.insert(path.clone(), Entry { local: Some("a".repeat(40)), remote: None });
+        let local = BTreeMap::from([(path.clone(), "a".repeat(40))]);
+        let steps = plan(&index, &local, &BTreeMap::new(), true);
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].action, Action::Upload);
     }
 
     #[test]
