@@ -72,12 +72,15 @@ mod themes_page;
 mod tray;
 mod ui;
 mod update;
+#[cfg(test)]
+mod test_env;
 
 use config::Config;
 
-/// Tests that change process environment variables hold this, so they don't race.
+/// Tests that change process environment variables hold this, so they don't race; taking it
+/// also clears any account the machine has (see `test_env`).
 #[cfg(test)]
-pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static ENV_LOCK: test_env::Lock = test_env::Lock::new();
 use model::{Data, Detail, PullState, same_repo};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -8051,6 +8054,9 @@ mod fix67_tests {
     fn actions_filters_and_run_detail_view_jobs_steps_and_logs() {
         let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut s = crate::init();
+        // The sample runs, whatever account the machine has.
+        s.data = crate::model::Data::sample();
+        s.data_changed();
         s.pending_place = None;
         s.toast = None;
         s.page = Page::Actions;
