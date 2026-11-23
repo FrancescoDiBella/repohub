@@ -335,7 +335,13 @@ works too (without its first-frame time). Times include the headless renderer's 
   a `%` in a branch name arrives as `%25`, and decoded once a `%` may not start an escape (`%`
   and two hex digits), so nothing reading the path again can turn it into a dot, a slash or
   anything else; an encoded dot, slash, backslash or NUL is refused anywhere.
-- Text in the UI is plain and specific: say what happened and how to fix it.
+- Text in the UI is plain and specific: say what happened and how to fix it. One word for each
+  thing, as in the glossary below.
+- An empty list says what is empty and what to do about it (`ui::empty`): "No open issues in
+  rune" and "New issue starts one", never just "Nothing to show here".
+- One look for one thing: Public or Private is `ui::visibility`, a selected chip is
+  `ButtonVariant::Contrast`, a question before something that can't be undone is
+  `confirm::Confirm`, a pin is filled while pinned (`icons::PIN_ON`), pushing has `icons::PUSH`.
 - Every action gives feedback when it finishes or fails: a toast (`notify`, `notify_problem`) or
   a message where it happened. Nothing returns silently.
 - An action that throws away typed text (Esc, **Cancel**, another form, leaving a conversation
@@ -376,6 +382,21 @@ works too (without its first-frame time). Times include the headless renderer's 
 - A pull request that changes the app adds a line to [`CHANGELOG.md`](CHANGELOG.md) under
   **Unreleased** (Added, Changed or Fixed), written for the people who use RepoHub. CI warns
   when it's missing.
+
+### Glossary
+
+The words the UI uses, one per thing:
+
+| Say | For | Not |
+| --- | --- | --- |
+| repository | a GitHub repository (the page, a card, a row) | repo, Repos |
+| pull request | a GitHub pull request | PR, Pulls |
+| page | what the sidebar (on a phone, the tab bar) opens: Overview, Repositories, Pull requests, Issues, Actions, Notifications, Settings | tab, view |
+| section | a part of a repository's page (Code, Commits, … Settings) or of Settings (Account, Appearance, …), picked in its section bar | tab |
+| mode | Light, Dark or System: which of your two themes is on screen (Settings → Appearance → Mode; the sun and moon in the toolbar switch it) | theme, appearance |
+| theme | colours, background, glow and corners, ready-made or yours, picked for light mode and for dark mode. The code calls it a `Look` (`themes::Looks`) | look, skin |
+| Appearance | the Settings section with the mode and the themes | Theme |
+| Open on GitHub | a button that opens what's on screen on GitHub. A link to another page there names it: All checks on GitHub, Full log on GitHub, Settings on GitHub, All on GitHub (a list RepoHub shows part of) | GitHub, View on GitHub |
 
 ## Releasing a version
 

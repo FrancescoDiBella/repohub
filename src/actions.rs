@@ -118,7 +118,7 @@ pub fn branch_panel(s: &App, k: &Kit, i: usize, slot: BranchSlot, current: &str)
                         .role("link").label(format!("Showing 30 of {} branches. View all on GitHub", matching.len())).key("branches-more")
                         .on_press_tx(move |_: &mut App, tx| { let _ = tx.open_url(&branches_url); })
                         .child(text(format!("Showing 30 of {} matching branches", matching.len())).font(k.ty.small).color(k.c.text_muted))
-                        .child(row().gap(4.0).center_y().child(text("GitHub").font(k.ty.small).color(k.c.text_accent)).child(ui::ico(&icons::EXTERNAL, 12.0, k.c.text_accent))),
+                        .child(row().gap(4.0).center_y().child(text("All on GitHub").font(k.ty.small).color(k.c.text_accent)).child(ui::ico(&icons::EXTERNAL, 12.0, k.c.text_accent))),
                 );
             }
         }

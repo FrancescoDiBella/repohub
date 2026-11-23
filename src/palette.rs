@@ -182,7 +182,7 @@ pub fn entries(s: &App) -> Vec<Entry> {
     }
     for t in &s.looks.all {
         if s.looks.light != t.id && s.looks.dark != t.id {
-            out.push(Entry { detail: "theme look colours".into(), ..entry(format!("Theme: {}", t.name), "Appearance", if t.dark { &icons::MOON } else { &icons::SUN }, Command::Look(t.id.clone())) });
+            out.push(Entry { detail: "theme colours".into(), ..entry(format!("Theme: {}", t.name), "Appearance", if t.dark { &icons::MOON } else { &icons::SUN }, Command::Look(t.id.clone())) });
         }
     }
     for (o, n) in crate::orgs(s) {

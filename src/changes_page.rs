@@ -333,7 +333,7 @@ pub fn pull_panel_for(s: &App, k: &Kit, repo_filter: Option<&str>) -> Option<El>
     let more = s.pull_review.as_ref().filter(|r| r.more).map(|r| {
         row().w_full().px(16.0).py(8.0).gap(8.0).center_y().flex_wrap().key("pull-comments-more")
             .child(text(format!("Showing the first {} comments on lines; the rest are on GitHub.", r.comments.len())).font(k.ty.small).color(k.c.text_muted).wrap().shrink())
-            .child(crate::pages::open_button(k, "All comments", &files_url, "pull-comments-all"))
+            .child(crate::pages::open_button(k, "All comments on GitHub", &files_url, "pull-comments-all"))
     });
     let mut out = panel(k).key("pull-diff").clip_rounded(k.radius.lg)
         .child(row().w_full().px(16.0).py(10.0).gap(12.0).center_y().flex_wrap()

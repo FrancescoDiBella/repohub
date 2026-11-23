@@ -1,5 +1,5 @@
-"""The theme switch in the toolbar: from the dark look to the light one. The whole window changes
-(the shell's background is light), the button now offers the dark theme, and the choice is saved
+"""The mode switch in the toolbar: from dark mode to light. The whole window changes (the shell's
+background is light), the button now offers dark mode, and the choice is saved
 in the preferences for the next start."""
 import json
 import os
@@ -30,16 +30,16 @@ def check(run, tree):
 
 FLOW = Flow(
     "theme",
-    "Switch to the light theme: the window, the button, the saved preference",
+    "Switch to light mode: the window, the button, the saved preference",
     account="sample",
     args=["page", "settings", "section", "appearance"],
     script=[tap("theme", at=0.3)],
     at=1.5,
     expect=[
-        has(key="theme", label="Switch to the dark theme"),
+        has(key="theme", label="Switch to dark mode"),
         has(key="appearance"), has(key="theme-pick"),
         has(key="look-classic-light", label="Use the theme Classic Light"),
     ],
-    absent=[has(key="theme", label="Switch to the light theme")],
+    absent=[has(key="theme", label="Switch to light mode")],
     check=check,
 )

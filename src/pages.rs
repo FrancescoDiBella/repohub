@@ -114,8 +114,7 @@ pub fn overview(s: &App, k: &Kit) -> El {
     let recent = if empty_loading {
         ui::skeleton_rows_in_panel(k, recent_head.key("skeleton-recent").role("status").label("Loading recent repositories…"), 4, false)
     } else if d.repos.is_empty() {
-        recent_head.child(rule(k)).child(col().w_full().padding(24.0).items_center()
-            .child(text("No repositories to show").font(k.ty.ui).color(k.c.text_muted)))
+        recent_head.child(rule(k)).child(ui::empty(k, "No repositories to show", "Your repositories show here once there are any: New repository on the Repositories page creates one on GitHub."))
     } else {
         d.repos.iter().enumerate().take(4).fold(
             recent_head,
@@ -127,8 +126,7 @@ pub fn overview(s: &App, k: &Kit) -> El {
     let review = if lists_loading {
         ui::skeleton_rows_in_panel(k, review_head.key("skeleton-pulls").role("status").label("Loading open pull requests…"), 4, true)
     } else if open_list.is_empty() {
-        review_head.child(rule(k)).child(col().w_full().padding(24.0).items_center()
-            .child(text("No open pull requests").font(k.ty.ui).color(k.c.text_muted)))
+        review_head.child(rule(k)).child(ui::empty(k, "No open pull requests", "Pull requests you open or are asked to review show here. New pull request is on a repository's page."))
     } else {
         open_list.into_iter().fold(
             review_head,
@@ -260,10 +258,14 @@ pub fn repos(s: &App, k: &Kit) -> El {
                 list = list.child(ui::error_panel(k, e, "retry-repos", |s: &mut App| s.refresh()));
             }
         } else {
-            let msg = if all.is_empty() { "No repositories to show" } else { "No repositories match your search" };
-            list = list.child(panel(k).padding(32.0).items_center().gap(6.0)
-                .child(ui::ico(&icons::REPO, 24.0, k.c.icon_faint))
-                .child(text(msg).font(k.ty.ui).color(k.c.text_muted)));
+            let (msg, todo) = if all.is_empty() {
+                ("No repositories to show", "New repository creates one on GitHub; it shows here after the next refresh.")
+            } else {
+                ("No repositories match your search", "Change or clear the search, or pick All and every owner above.")
+            };
+            list = list.child(panel(k).padding(4.0).items_center().gap(0.0)
+                .child(ui::ico(&icons::REPO, 24.0, k.c.icon_faint).mt(24.0))
+                .child(ui::empty(k, msg, todo).pt(8.0)));
         }
     }
     let sub = if s.data.is_empty() && s.status.is_busy() {
@@ -325,7 +327,7 @@ fn star_button(k: &Kit, i: usize, r: &Repo, with_count: bool, key: String) -> El
 
 /// A repository in the list; `show_owner` prefixes the name with its organization.
 fn repo_card(k: &Kit, i: usize, r: &Repo, show_owner: bool, pinned: bool, now: i64) -> El {
-    let vis = if r.private { Badge::new("Private").variant(BadgeVariant::Subtle).build(k) } else { Badge::new("Public").build(k) };
+    let vis = ui::visibility(k, r.private);
     let mut title = row().gap(8.0).center_y().flex_wrap();
     if show_owner {
         title = title.child(text(format!("{} /", r.owner)).font(k.ty.body).color(k.c.text_muted));
@@ -370,7 +372,7 @@ pub fn repo_detail(s: &App, k: &Kit, i: usize, plugin: Option<El>) -> El {
     let r = &s.data.repos[i];
     let back = Button::new("Repositories").icon(&icons::BACK).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
         .on_press(|s: &mut App| s.go(Page::Repos)).build(k).key("back").self_start();
-    let vis = if r.private { ui::pill(k, "Private", k.c.warning.icon) } else { ui::pill(k, "Public", k.c.text_muted) };
+    let vis = ui::visibility(k, r.private);
     // The name, Public or Private, and the latest release's tag (it opens Releases).
     let header = row().w_full().center_y().justify_between().gap(12.0).flex_wrap()
         .child(row().gap(10.0).center_y().shrink().min_w(0.0)
@@ -434,12 +436,15 @@ pub fn repo_detail(s: &App, k: &Kit, i: usize, plugin: Option<El>) -> El {
         RepoTab::Commits => crate::commits_page::commits_tab(s, k, i),
         RepoTab::Changes => crate::changes_page::changes_tab(s, k, i),
         RepoTab::Issues => list_of(s, k, "Open issues", Some(actions::open_form_button(k, i, Compose::Issue)),
-            s.data.issues.iter().filter(|x| in_repo(&x.repo)).map(|x| actions::issue_line(s, k, x)).collect()),
+            s.data.issues.iter().filter(|x| in_repo(&x.repo)).map(|x| actions::issue_line(s, k, x)).collect(),
+            (&format!("No open issues in {}", r.name), "New issue starts one (or press i).")),
         RepoTab::Pulls => col().w_full().gap(16.0)
             .children(crate::changes_page::pull_panel_for(s, k, Some(&r.full_name)))
             .child(list_of(s, k, "Pull requests", Some(actions::open_form_button(k, i, Compose::Pull)),
-                s.data.pulls.iter().filter(|x| in_repo(&x.repo)).map(|x| actions::pull_line(s, k, x, s.compact)).collect())),
-        RepoTab::Actions => list_of(s, k, "Workflow runs", None, s.data.runs.iter().filter(|x| in_repo(&x.repo)).map(|x| crate::runs_page::run_line(s, k, x, s.compact)).collect()),
+                s.data.pulls.iter().filter(|x| in_repo(&x.repo)).map(|x| actions::pull_line(s, k, x, s.compact)).collect(),
+                (&format!("No pull requests involving you in {}", r.name), "New pull request opens one from a branch (or press p)."))),
+        RepoTab::Actions => list_of(s, k, "Workflow runs", None, s.data.runs.iter().filter(|x| in_repo(&x.repo)).map(|x| crate::runs_page::run_line(s, k, x, s.compact)).collect(),
+            (&format!("No recent workflow runs in {}", r.name), "Runs show here once a workflow in .github/workflows runs on GitHub.")),
         RepoTab::Releases => crate::releases_page::releases_tab(s, k, i),
         RepoTab::Notes => crate::notes_page::notes_tab(s, k, i),
         RepoTab::Claude => crate::claude_page::claude_tab(s, k, i),
@@ -517,19 +522,19 @@ fn local_or_github(s: &App, k: &Kit, i: usize, r: &Repo, has_local: bool, github
     }
 }
 
-fn list_of(s: &App, k: &Kit, title: &str, action: Option<El>, rows: Vec<El>) -> El {
-    let empty = rows.is_empty();
+/// A repository section's list; `empty` says what's empty and what to do when it is.
+fn list_of(s: &App, k: &Kit, title: &str, action: Option<El>, rows: Vec<El>, empty: (&str, &str)) -> El {
+    let none = rows.is_empty();
     let mut p = panel(k).child(panel_head(k, title, action));
     for r in rows {
         p = p.child(rule(k)).child(r);
     }
     // Only the repositories are in yet: the list is on its way, not empty.
-    if empty && s.lists_loading() {
+    if none && s.lists_loading() {
         p = p.child(rule(k)).child(col().w_full().padding(28.0).items_center().role("status").key("repo-list-loading")
             .child(text("Loading…").font(k.ty.ui).color(k.c.text_muted)));
-    } else if empty {
-        p = p.child(rule(k)).child(col().w_full().padding(28.0).items_center()
-            .child(text("Nothing to show here").font(k.ty.ui).color(k.c.text_muted)));
+    } else if none {
+        p = p.child(rule(k)).child(ui::empty(k, empty.0, empty.1).key("repo-list-empty"));
     }
     p
 }
@@ -615,8 +620,7 @@ fn code_tab(s: &App, k: &Kit, i: usize, r: &Repo) -> El {
                 if d.commit.is_some() {
                     files = files.child(rule(k));
                 }
-                files = files.child(col().w_full().padding(24.0).items_center()
-                    .child(text("No files in this branch").font(k.ty.ui).color(k.c.text_muted)));
+                files = files.child(ui::empty(k, "No files in this branch", "Push a commit to it, or pick another branch above."));
             }
             if d.files.len() > 40 {
                 let tree_url = format!("{}/tree/{}", r.url, at);
@@ -625,7 +629,7 @@ fn code_tab(s: &App, k: &Kit, i: usize, r: &Repo) -> El {
                         .role("link").label(format!("Showing 40 of {} files. Open all on GitHub", d.files.len())).key("files-more")
                         .on_press_tx(move |_: &mut App, tx| { let _ = tx.open_url(&tree_url); })
                         .child(text(format!("Showing 40 of {} files", d.files.len())).font(k.ty.small).color(k.c.text_muted))
-                        .child(row().gap(6.0).center_y().child(text("Open on GitHub").font(k.ty.small).color(k.c.text_accent)).child(ui::ico(&icons::EXTERNAL, 13.0, k.c.text_accent))),
+                        .child(row().gap(6.0).center_y().child(text("All on GitHub").font(k.ty.small).color(k.c.text_accent)).child(ui::ico(&icons::EXTERNAL, 13.0, k.c.text_accent))),
                 );
             }
         }

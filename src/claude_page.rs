@@ -19,7 +19,7 @@ fn web_only(k: &Kit) -> El {
     panel(k).padding(24.0).gap(10.0)
         .child(row().gap(10.0).center_y().child(ui::ico(&icons::SPARK, 18.0, k.c.icon_muted))
             .child(text("Claude needs the desktop app").font(k.ty.body_medium).color(k.c.text_strong)))
-        .child(text("The Claude tab runs your own Claude Code in the repository's folder on your computer, which a web page can't do. Open RepoHub as the desktop app.")
+        .child(text("The Claude section runs your own Claude Code in the repository's folder on your computer, which a web page can't do. Open RepoHub as the desktop app.")
             .font(k.ty.ui).color(k.c.text_muted).wrap())
 }
 
@@ -158,7 +158,7 @@ fn item_view(k: &Kit, n: usize, item: &Item) -> El {
             }
             if !denied.is_empty() {
                 c = c.child(col().w_full().gap(4.0).px(10.0).py(8.0).radius(k.radius.md).border(1.0, k.c.warning.icon.alpha(0.5))
-                    .child(text("Not allowed in this mode (switch to Edit files, or run it in the Terminal tab):").font(k.ty.small_medium).color(k.c.text_base).wrap())
+                    .child(text("Not allowed in this mode (switch to Edit files, or run it in the Terminal section):").font(k.ty.small_medium).color(k.c.text_base).wrap())
                     .children(denied.iter().map(|d| text(d.clone()).font(k.ty.mono).color(k.c.text_muted).wrap())));
             }
             c.child(text(format!("{:.1} s · ${cost:.2} · {turns} {}", seconds, if *turns == 1 { "turn" } else { "turns" })).font(k.ty.text_small).color(k.c.text_faint))

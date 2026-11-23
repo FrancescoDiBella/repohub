@@ -59,3 +59,29 @@ fn each_settings_section_fits_a_screen() {
         assert!(bottom <= 760.0, "{section:?} ends at {bottom}, past the window's 760 points");
     }
 }
+
+/// One mark for Public / Private (the cards and the repository's page), and empty sections that
+/// say what's empty and what to do.
+#[test]
+fn one_visibility_mark_and_empty_sections_that_say_what_to_do() {
+    let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut s = crate::init();
+    s.data = crate::model::Data::sample();
+    s.data_changed();
+    s.pending_place = None;
+    s.page = Page::Repos;
+    let quiet = s.data.repos.iter().position(|r| !s.data.issues.iter().any(|x| x.repo.eq_ignore_ascii_case(&r.name) || x.repo.eq_ignore_ascii_case(&r.full_name))).expect("a repository without issues");
+    let name = s.data.repos[quiet].name.clone();
+    let private = s.data.repos[quiet].private;
+    let mut rt = rune::Runtime::new(s, crate::view, (1180.0, 4000.0), rune::Env::new(true, 1.0));
+    rt.frame(0.0);
+    let marks = |rt: &rune::Runtime<App>| rt.elements().iter().filter(|e| matches!(e.label.as_deref(), Some("Public repository" | "Private repository"))).count();
+    assert!(marks(&rt) >= rt.state.data.repos.len().min(3), "every card has the mark");
+    rt.update(move |s, _| { s.open(quiet); s.set_tab(quiet, crate::state::RepoTab::Issues); });
+    rt.frame(0.5);
+    let want = if private { "Private repository" } else { "Public repository" };
+    assert!(rt.elements().iter().any(|e| e.label.as_deref() == Some(want)), "the repository's page has the same mark");
+    let texts: Vec<String> = rt.elements().iter().filter_map(|e| e.text.clone()).collect();
+    assert!(texts.contains(&format!("No open issues in {name}")) && texts.iter().any(|t| t.starts_with("New issue starts one")), "{texts:?}");
+    assert!(!texts.iter().any(|t| t == "Nothing to show here"));
+}

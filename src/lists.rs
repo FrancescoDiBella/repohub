@@ -116,7 +116,8 @@ pub fn run_row(k: &Kit, r: &Run, now: i64, compact: bool) -> El {
     }
 }
 
-fn listing(s: &App, k: &Kit, rows: Vec<El>, empty: &str, retry_key: &str) -> El {
+/// A page's list; `empty` says what's empty and what to do when it is.
+fn listing(s: &App, k: &Kit, rows: Vec<El>, empty: (&str, &str), retry_key: &str) -> El {
     if rows.is_empty() {
         // Only the repositories are in yet: this list is still on its way.
         if s.lists_loading() {
@@ -130,7 +131,7 @@ fn listing(s: &App, k: &Kit, rows: Vec<El>, empty: &str, retry_key: &str) -> El 
                 return ui::error_panel(k, e, retry_key, |s: &mut App| s.refresh());
             }
         }
-        return panel(k).padding(28.0).items_center().child(text(empty.to_owned()).font(k.ty.ui).color(k.c.text_muted));
+        return panel(k).child(ui::empty(k, empty.0, empty.1));
     }
     rows.into_iter().enumerate().fold(panel(k), |p, (i, r)| if i == 0 { p.child(r) } else { p.child(rule(k)).child(r) })
 }
@@ -144,7 +145,11 @@ pub fn pulls(s: &App, k: &Kit) -> El {
     let in_state: Vec<&Pull> = s.data.pulls.iter().filter(|p| p.state == s.pr_filter).collect();
     let (filter_repos, filter_labels) = crate::filters::pull_choices(in_state.iter().copied());
     let rows: Vec<El> = in_state.iter().filter(|p| s.pull_filter.pull(p, me)).map(|p| crate::actions::pull_line(s, k, p, s.compact)).collect();
-    let empty = if s.pull_filter.is_empty() || in_state.is_empty() { "No pull requests in this state" } else { "No pull requests match these filters" };
+    let empty = if s.pull_filter.is_empty() || in_state.is_empty() {
+        ("No pull requests in this state", if s.pr_filter == PullState::Open { "Pull requests you open, review or are mentioned in show here; Drafts, Merged and Closed have the others." } else { "Open, Drafts, Merged and Closed above have the others." })
+    } else {
+        ("No pull requests match these filters", "Clear shows them all again.")
+    };
     let is_open_group = matches!(s.pr_filter, PullState::Open | PullState::Draft);
     let (group_loaded, group_total) = if is_open_group {
         let count = s.data.pulls.iter().filter(|p| matches!(p.state, PullState::Open | PullState::Draft)).count();
@@ -203,7 +208,11 @@ pub fn issues(s: &App, k: &Kit) -> El {
     let me = s.data.profile.login.as_str();
     let (filter_repos, filter_labels) = crate::filters::issue_choices(s.data.issues.iter());
     let rows: Vec<El> = s.data.issues.iter().filter(|x| s.issue_filter.issue(x, me)).map(|i| crate::actions::issue_line(s, k, i)).collect();
-    let empty = if s.issue_filter.is_empty() || s.data.issues.is_empty() { "No open issues" } else { "No issues match these filters" };
+    let empty = if s.issue_filter.is_empty() || s.data.issues.is_empty() {
+        ("No open issues", "Open issues in your repositories show here; New issue is on a repository's page.")
+    } else {
+        ("No issues match these filters", "Clear shows them all again.")
+    };
     let loaded = s.data.issues.len();
     let can_load_more = !s.data.sample && s.data.issues_total.is_some_and(|tot| loaded < tot && loaded < 1000);
     let is_capped = can_load_more || s.data.issues_capped();
@@ -254,9 +263,9 @@ pub fn actions(s: &App, k: &Kit) -> El {
         .map(|r| crate::runs_page::run_line(s, k, r, s.compact))
         .collect();
     let empty = if s.runs_filter.is_empty() || s.data.runs.is_empty() {
-        "No recent runs"
+        ("No recent runs", "Workflow runs in your most recently pushed repositories show here.")
     } else {
-        "No workflow runs match these filters"
+        ("No workflow runs match these filters", "Clear shows them all again.")
     };
     let action = if !s.data.sample && s.data.runs_total > s.data.runs.len() {
         let me = &s.data.profile.login;
@@ -390,7 +399,7 @@ pub fn settings(s: &App, k: &Kit) -> El {
         Section::Account => ("Your profile, the GitHub account, the connection and where boards sync.", vec![row().w_full().gap(16.0).items_start().flex_wrap()
             .child(col().w(0.0).grow(1.0).min_w(360.0).gap(16.0).child(profile).child(account))
             .child(col().w(0.0).grow(1.0).min_w(360.0).gap(16.0).child(conn).child(crate::sync_page::settings_block(s, k)))]),
-        Section::Appearance => ("Light, dark or the system's, and the themes.", vec![appearance]),
+        Section::Appearance => ("The mode (light, dark or the system's) and the theme each mode uses.", vec![appearance]),
         Section::Assistants => ("Claude and the other coding assistants the Terminal starts.", vec![assistants]),
         Section::Plugins => ("Sections and pages others wrote for RepoHub.", vec![plugins]),
         Section::Keyboard => ("Every shortcut. The ones of one key work while no text field, the terminal or a drawing has the keyboard.", vec![crate::keyboard::panel(s, k)]),

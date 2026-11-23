@@ -326,8 +326,8 @@ pub fn view(s: &App, k: &Kit, o: &OpenRun) -> El {
         }
         Load::Ready(jobs) if jobs.is_empty() => {
             return page.child(
-                panel(k).padding(28.0).items_center().key("run-jobs-empty")
-                    .child(text("No jobs recorded for this workflow run.").font(k.ty.ui).color(k.c.text_muted)),
+                panel(k).key("run-jobs-empty")
+                    .child(ui::empty(k, "No jobs recorded for this workflow run.", "GitHub may still be starting it: Refresh asks again, Open on GitHub shows it there.")),
             );
         }
         Load::Ready(jobs) => jobs,

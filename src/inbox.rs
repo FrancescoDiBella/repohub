@@ -110,7 +110,7 @@ pub fn page(s: &App, k: &Kit) -> El {
             panel(k).padding(28.0).items_center().gap(10.0).role("alert").key("inbox-failed")
                 .child(text(e.clone()).font(k.ty.small).color(k.c.text_base).wrap())
                 .child(Button::new("Retry").icon(&icons::REFRESH).control_size(ControlSize::Small).on_press(|s: &mut App| s.load_inbox()).build(k).key("inbox-retry"))),
-        Some(Load::Ready(list)) if list.is_empty() => ("Nothing unread.".to_owned(), note("You're all caught up.".into(), "inbox-empty")),
+        Some(Load::Ready(list)) if list.is_empty() => ("Nothing unread.".to_owned(), panel(k).key("inbox-empty").child(ui::empty(k, "No unread notifications", "You're all caught up: new ones show here, and Refresh asks GitHub now."))),
         Some(Load::Ready(list)) => {
             // Grouped by repository, in the order the newest notification puts them.
             let mut repos: Vec<&str> = Vec::new();

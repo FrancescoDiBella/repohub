@@ -14,11 +14,6 @@ fn plural(n: usize, one: &str) -> String {
     if n == 1 { format!("1 {one}") } else { format!("{n} {one}s") }
 }
 
-fn empty(k: &Kit, msg: &str, key: &str) -> El {
-    col().w_full().padding(24.0).items_center().key(key.to_owned())
-        .child(text(msg.to_owned()).font(k.ty.ui).color(k.c.text_muted).wrap())
-}
-
 /// A note in a panel, with an icon.
 fn note(k: &Kit, msg: String, key: String) -> El {
     row().w_full().px(16.0).py(9.0).gap(8.0).center_y().flex_wrap().key(key)
@@ -88,7 +83,7 @@ fn list_panel(s: &App, k: &Kit, i: usize, list: Option<&List>) -> El {
     let count = if l.more { format!("{n}+ releases") } else { plural(n, "release") };
     let mut p = panel(k).key("releases-list").child(head(Some(count)));
     if listing.releases.is_empty() {
-        p = p.child(rule(k)).child(empty(k, "No releases yet.", "releases-empty"));
+        p = p.child(rule(k)).child(ui::empty(k, "No releases yet.", "New release drafts the first one, with notes GitHub can write.").key("releases-empty"));
     }
     let latest = s.releases.latest_id(&r.full_name);
     for rel in &listing.releases {

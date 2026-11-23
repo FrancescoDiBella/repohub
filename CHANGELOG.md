@@ -28,6 +28,14 @@ The sections are **Added**, **Changed** and **Fixed**.
   100 read, with a link to the rest.
 
 ### Changed
+- One word for each thing: "mode" is Light, Dark or System and "theme" the colours each mode
+  uses (the toolbar's button says "Switch to light mode"), a repository's parts are sections,
+  and links to GitHub say what they open ("All comments on GitHub", "Details on GitHub", "All on
+  GitHub").
+- Every empty list says what's empty and what to do, e.g. "No open issues in rune" with "New
+  issue starts one" (no more "Nothing to show here").
+- Public and Private look the same on the repository cards and on a repository's page, Private
+  with a lock.
 - Each Settings section fits on one screen: the account in two columns, five themes to a row,
   the keyboard shortcuts in a section of their own, and the kind of token to make behind
   **Which token?** (which also says that only a classic token reads your notifications).

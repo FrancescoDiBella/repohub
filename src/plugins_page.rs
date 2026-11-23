@@ -22,7 +22,7 @@ pub fn plugins_panel(s: &App, k: &Kit) -> El {
         .child(text("A plugin can read what RepoHub shows (your repositories, issues and pull requests, private ones too) and show notifications. To open a link or copy text it has to ask you each time: a link could carry what it read. Install only plugins you trust.")
             .font(k.ty.text_small).color(k.c.text_muted).wrap());
     if s.plugins.list.is_empty() {
-        body = body.child(text("No plugins yet.").font(k.ty.small).color(k.c.text_faint));
+        body = body.child(ui::empty(k, "No plugins yet", "Install one below from its folder or Git address, or start from the example plugin.").key("plugins-empty"));
     }
     for p in &s.plugins.list {
         body = body.child(plugin_row(s, k, p));

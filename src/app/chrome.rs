@@ -298,7 +298,7 @@ pub(crate) fn view(s: &App, cx: &mut Cx<App>) -> El {
                     .on_press(|s: &mut App| s.undo()).build(&k).key("toast-undo")))
                 .child(close)));
     }
-    let (theme_icon, theme_help) = if dark { (&icons::SUN, "Switch to the light theme") } else { (&icons::MOON, "Switch to the dark theme") };
+    let (theme_icon, theme_help) = if dark { (&icons::SUN, "Switch to light mode") } else { (&icons::MOON, "Switch to dark mode") };
     let theme = IconButton::new(theme_icon).variant(IconButtonVariant::GhostMuted).label(theme_help)
         .help(theme_help).on_press(move |s: &mut App| s.set_theme(s.theme.toggled(system_dark))).build(&k).key("theme");
     let mut trailing = row().gap(4.0).center_y();
