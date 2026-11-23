@@ -89,7 +89,7 @@ fn editor(s: &App, k: &Kit, shown_dark: bool) -> El {
     let id = t.id.clone();
     let (dup, del) = (id.clone(), id.clone());
     let head = row().w_full().gap(8.0).center_y().justify_between().flex_wrap()
-        .child(text(format!("Editing {}", t.name)).font(k.ty.ui_medium).color(k.c.text_base).grow(1.0).shrink())
+        .child(text(format!("Editing {}", t.name)).font(k.ty.ui_medium).color(k.c.text_base).wrap().grow(1.0).shrink().min_w(160.0))
         .child(row().gap(6.0)
             .child(Button::new("Duplicate").variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
                 .on_press(move |s: &mut App| s.duplicate_look(&dup, shown_dark)).build(k).key("look-copy"))
@@ -97,9 +97,12 @@ fn editor(s: &App, k: &Kit, shown_dark: bool) -> El {
                 .on_press(move |s: &mut App| s.delete_look(&del)).build(k).key("look-delete"))
             .child(Button::new("Done").control_size(ControlSize::Small)
                 .on_press(|s: &mut App| s.look_edit = crate::LookEditor::default()).build(k).key("look-done")));
-    // On a phone the label takes less, and a row that still doesn't fit wraps.
-    let label_w = if s.compact { 120.0 } else { 190.0 };
-    let label = |t: &str| text(t.to_owned()).font(k.ty.small).color(k.c.text_muted).w(label_w).shrink();
+    // On a phone the label goes above what it names (the rows wrap), on a wider window beside it.
+    let label = |t: &str| if s.compact {
+        text(t.to_owned()).font(k.ty.small).color(k.c.text_muted).wrap().w_full()
+    } else {
+        text(t.to_owned()).font(k.ty.small).color(k.c.text_muted).w(190.0).shrink()
+    };
     let name = row().w_full().gap(12.0).center_y().flex_wrap().child(label("Name"))
         .child(TextInput::new(&s.look_edit.name).label("Theme name").on_edit(|s: &mut App| &mut s.look_edit.name)
             .on_change(|s: &mut App, _| s.look_typed()).build(k).key("look-name").grow(1.0).min_w(180.0));

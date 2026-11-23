@@ -230,5 +230,5 @@ fn view(s: &App, k: &Kit, i: usize, t: &terminal::Term, dark: bool) -> El {
     }
     col().w_full().gap(6.0)
         .child(area)
-        .child(text("Click the terminal to type. Paste with Ctrl/⌘+V; Ctrl+C stops the running command; Copy screen copies what is shown. Ctrl+Shift+Tab leaves the terminal; ⌘/Ctrl+K and the page shortcuts work here too.").font(k.ty.text_small).color(k.c.text_faint))
+        .child(text("Click the terminal to type. Paste with Ctrl/⌘+V; Ctrl+C stops the running command; Copy screen copies what is shown. Ctrl+Shift+Tab leaves the terminal; ⌘/Ctrl+K and the page shortcuts work here too.").font(k.ty.text_small).color(k.c.text_faint).wrap())
 }

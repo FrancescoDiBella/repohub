@@ -10,6 +10,8 @@ The sections are **Added**, **Changed** and **Fixed**.
 ## Unreleased
 
 ### Added
+- **Settings → Plugins** has an **Open** button for each plugin's page, also where a phone (which
+  has no sidebar) finds it.
 - The Pull requests and Issues pages have **Created by me** and **Assigned to me** on both, and
   chips for who opened them (**Author**), next to the repository and label chips.
 - More of RepoHub works from the keyboard: `/` searches the page (Repositories, Pull requests,
@@ -54,6 +56,8 @@ The sections are **Added**, **Changed** and **Fixed**.
   picker, questions and forms first.
 
 ### Fixed
+- On a phone the theme editor puts each label above its field and its title above its buttons,
+  so nothing overlaps, and the Terminal's hint wraps instead of running past the window.
 - The repository's section bar: when the sections don't fit, its edges fade and an arrow at each
   end scrolls to the hidden ones, and the section on screen is always scrolled into view (a
   plugin's section opened from the palette too).

@@ -59,6 +59,11 @@ fn plugin_row(s: &App, k: &Kit, p: &crate::plugins::Plugin) -> El {
     {
         let (on, reload, remove) = (id.clone(), id.clone(), id.clone());
         let folder = format!("file://{}", p.dir.display().to_string().replace('%', "%25").replace(' ', "%20").replace('\\', "/"));
+        // Its page, also where a phone (no sidebar) finds it.
+        if let Some((pid, label)) = s.plugins.pages().into_iter().find(|(pid, _)| *pid == id) {
+            actions = actions.child(Button::new(format!("Open {label}")).icon(&icons::SPARK).control_size(ControlSize::Small)
+                .on_press(move |s: &mut App| s.go(crate::Page::Plugin(pid.clone()))).build(k).key(format!("plugin-open-{id}")));
+        }
         actions = actions
             .child(Button::new("Reload").variant(ButtonVariant::Ghost).control_size(ControlSize::Small).disabled(!p.enabled)
                 .on_press(move |s: &mut App| if let Some(h) = s.handle.clone() { s.plugins.reload(&reload, &h) }).build(k).key(format!("plugin-reload-{id}")))
