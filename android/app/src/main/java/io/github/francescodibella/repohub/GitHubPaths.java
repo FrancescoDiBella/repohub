@@ -9,7 +9,7 @@ import java.util.Locale;
 
 /**
  * Which GitHub API paths the app may call with the saved token. The same rules as
- * repohub-server's proxy (server/src/main.rs): keep the two in step.
+ * repohub-server's proxy (server/src/allowlist.rs): keep the two in step.
  */
 final class GitHubPaths {
     private GitHubPaths() {}
