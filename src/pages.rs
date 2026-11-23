@@ -402,9 +402,31 @@ pub fn repo_detail(s: &App, k: &Kit, i: usize, plugin: Option<El>) -> El {
             }
         }).build(k).key("tabs");
     // Eleven sections and the plugins' don't always fit (a phone, a narrow window): the strip
-    // scrolls sideways rather than squeezing the labels, and `reveal_tab` keeps the one on screen
-    // in view.
-    let tabs = row().w_full().scroll_x().child(tabs);
+    // scrolls sideways rather than squeezing the labels. Where sections are hidden its edge
+    // fades and an arrow scrolls to them; `reveal_tab` keeps the one on screen in view.
+    let bar = s.section_bar;
+    let tabs = tabs.on_layout_tx(|s: &mut App, [x, _, w, _], _| s.section_bar.content = [x, w]);
+    let strip = row().key("tabs-strip").grow(1.0).shrink().min_w(0.0).scroll_x().scroll_edge_fade(24.0).scroll_margin(28.0).child(tabs)
+        .on_layout_tx(|s: &mut App, [x, _, w, _], _| {
+            // A new width (the arrows came, the window changed): the section on screen stays in view.
+            if (s.section_bar.view[1] - w).abs() > 1.0 {
+                s.reveal_tab = true;
+            }
+            s.section_bar.view = [x, w];
+        });
+    // While sections don't fit, an arrow at each end (dimmed at the end it can't go past).
+    let arrow = |icon: &'static rune::Icon, label: &str, key: &str, dir: f32, on: bool| {
+        rune_kit::IconButton::new(icon).variant(rune_kit::IconButtonVariant::GhostMuted).label(label.to_owned()).help(label.to_owned()).disabled(!on)
+            .on_press_tx(move |s: &mut App, tx| tx.scroll_to_x("tabs-strip", s.section_bar.scrolled_by(dir))).build(k).key(key.to_owned())
+    };
+    let tabs = if bar.overflows() {
+        row().w_full().gap(4.0).center_y()
+            .child(arrow(&icons::BACK, "Show the sections before", "tabs-before", -1.0, bar.hidden_before()))
+            .child(strip)
+            .child(arrow(&icons::NEXT, "Show more sections", "tabs-after", 1.0, bar.hidden_after()))
+    } else {
+        row().w_full().child(strip)
+    };
     let in_repo = |name: &str| name.eq_ignore_ascii_case(&r.full_name) || name.eq_ignore_ascii_case(&r.name);
     let body = if let Some(p) = plugin.filter(|_| s.plugin_tab.is_some()) { p } else { match s.tab {
         RepoTab::Code => code_tab(s, k, i, r),
@@ -432,11 +454,52 @@ pub fn repo_detail(s: &App, k: &Kit, i: usize, plugin: Option<El>) -> El {
 /// elsewhere (the header, the palette, the place saved last time, a start-up argument). It runs
 /// on the frame after `App::set_tab` (see `poll`).
 pub fn reveal_tab(s: &App, tx: &mut rune::Tx) {
-    if !matches!(s.page, Page::Repo(_)) || s.plugin_tab.is_some() {
+    if !matches!(s.page, Page::Repo(_)) {
         return;
     }
-    if let Some(n) = s.tabs().iter().position(|t| *t == s.tab) {
+    let shown = s.tabs();
+    // A plugin's section comes after the app's.
+    let at = match &s.plugin_tab {
+        Some(p) => s.plugins.repo_tabs().iter().position(|(id, _)| id == p).map(|n| shown.len() + n),
+        None => shown.iter().position(|t| *t == s.tab),
+    };
+    if let Some(n) = at {
         tx.scroll_into_view(format!("tabs/segment{n}"));
+    }
+}
+
+/// Where the repository's section bar is scrolled: the strip's and its sections' left edge
+/// and width on screen (see `repo_detail`), for its arrows.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SectionBar {
+    pub view: [f32; 2],
+    pub content: [f32; 2],
+}
+
+impl SectionBar {
+    /// How far the strip is scrolled.
+    fn scrolled(&self) -> f32 {
+        (self.view[0] - self.content[0]).max(0.0)
+    }
+
+    /// The sections don't all fit.
+    pub fn overflows(&self) -> bool {
+        self.content[1] > self.view[1] + 1.0
+    }
+
+    /// Sections are hidden past the strip's left edge.
+    pub fn hidden_before(&self) -> bool {
+        self.overflows() && self.scrolled() > 1.0
+    }
+
+    /// Sections are hidden past its right edge.
+    pub fn hidden_after(&self) -> bool {
+        self.overflows() && self.content[0] + self.content[1] > self.view[0] + self.view[1] + 1.0
+    }
+
+    /// Where an arrow scrolls to: most of the strip's width back (`dir` -1) or on (1).
+    fn scrolled_by(&self, dir: f32) -> f32 {
+        (self.scrolled() + dir * self.view[1] * 0.75).max(0.0)
     }
 }
 

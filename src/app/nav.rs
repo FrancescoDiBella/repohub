@@ -224,6 +224,7 @@ impl App {
         }
         self.leave_tab();
         self.plugin_tab = Some(p);
+        self.reveal_tab = true;
     }
 
     /// Esc: closes what's open on top of the page, the most recent first (a question, a picker,

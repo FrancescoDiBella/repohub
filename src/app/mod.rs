@@ -193,6 +193,8 @@ pub struct App {
     pub(crate) releases: releases::Releases,
     /// The section bar scrolls the section on screen into view on the next frame (`poll`).
     pub(crate) reveal_tab: bool,
+    /// Where the section bar is scrolled, for its arrows (see `pages::SectionBar`).
+    pub(crate) section_bar: pages::SectionBar,
     /// The issue or pull request whose conversation is on screen, in place of the page.
     pub(crate) thread: Option<thread::Open>,
     /// Counts conversation loads (see [`thread::Open::epoch`]).
@@ -440,6 +442,7 @@ pub(crate) fn init() -> App {
         commits: commits::Commits::default(),
         releases: releases::Releases::default(),
         reveal_tab: false,
+        section_bar: pages::SectionBar::default(),
         thread: None,
         thread_epoch: 0,
         choices: triage::Cache::default(),
@@ -549,6 +552,7 @@ pub(crate) fn init() -> App {
     // `-- tab notes` (a name or a number) picks the repository page's section.
     if let Some(t) = arg("tab").and_then(|t| RepoTab::parse(&t)) {
         s.tab = t;
+        s.reveal_tab = true;
     }
     // For headless stills the clone's changes are read before the first frame (the background
     // read would land after the picture is taken).
@@ -562,6 +566,8 @@ pub(crate) fn init() -> App {
         s.diff.set_files(diffs::local_files(&c));
         s.changes = Some(c);
         s.diff_load = Some(Load::Ready(()));
+        // The clone's files too: the section bar offers Changes only with them.
+        s.local.insert(full.clone(), local::scan(&root).into());
     }
     // `-- thread 14` opens the conversation of that pull request or issue (for headless stills).
     if let Some(number) = arg("thread").and_then(|n| n.parse::<u32>().ok()) {

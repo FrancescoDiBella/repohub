@@ -35,6 +35,13 @@ The sections are **Added**, **Changed** and **Fixed**.
   picker, questions and forms first.
 
 ### Fixed
+- The repository's section bar: when the sections don't fit, its edges fade and an arrow at each
+  end scrolls to the hidden ones, and the section on screen is always scrolled into view (a
+  plugin's section opened from the palette too).
+- The example plugin's Checklists page opens the repository's checklist, as it says; plugins
+  can open their own section with `repohub.openRepo(fullName, true)`.
+- On a phone, the Terminal section's **Clone** button no longer runs past the screen when the
+  folder's path is long.
 - Closing an issue, merging, a new issue or a star made while a refresh (or the first load) runs
   is no longer undone when it lands, and isn't counted twice when GitHub already shows it.
 - Branch names with `%` work in the web app and on Android (creating a branch from one,

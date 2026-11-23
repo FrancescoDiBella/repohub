@@ -14,7 +14,8 @@
 //!   in place, never crashing the app.
 //! - `@repohub` gives it what's on screen (`context()`: the repository, its issues and pull
 //!   requests, your repositories and profile, the theme) and a few actions: `open(url)`,
-//!   `notify(text)`, `copy(text)`, `openRepo(fullName)`. `changed` fires when the context changes.
+//!   `notify(text)`, `copy(text)`, `openRepo(fullName, own)` (`own`: the plugin's section there).
+//!   `changed` fires when the context changes.
 //! - `open` and `copy` reach outside the app (a link can carry what the plugin read; copied
 //!   text gets pasted somewhere), so they only ask: the app shows the request ([`Ask`]) and the
 //!   user allows it or not.
@@ -265,10 +266,16 @@ impl Plugins {
                     Ok(())
                 })?)?;
                 let hh = h.clone();
-                api.set("openRepo", lua.create_function(move |_, full: String| {
+                let own = id.clone();
+                // `openRepo(fullName, true)` opens the plugin's own section there.
+                api.set("openRepo", lua.create_function(move |_, (full, section): (String, Option<bool>)| {
+                    let own = own.clone();
                     hh.update(move |s: &mut App, _| {
                         if let Some(i) = s.data.repos.iter().position(|r| r.full_name.eq_ignore_ascii_case(&full)) {
                             s.open(i);
+                            if section == Some(true) && s.plugins.repo_tabs().iter().any(|(p, _)| *p == own) {
+                                s.open_plugin_tab(i, Some(own));
+                            }
                         }
                     });
                     Ok(())
