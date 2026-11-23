@@ -215,3 +215,31 @@ fn reopening_and_starring_offer_undo() {
     s.undo();
     assert!(!s.data.repos[i].starred, "Undo takes it back");
 }
+
+#[test]
+fn deleting_a_drawing_and_clearing_the_saved_data_ask_first() {
+    let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _tmp = crate::load_gen_tests::TempDataDir::new("confirm-drawing");
+    let mut rt = app(Page::Repos, false);
+    let mut t = 0.1;
+    rt.update(|s, _| {
+        let (full, branch) = (s.data.repos[0].full_name.clone(), s.data.repos[0].branch.clone());
+        s.page = Page::Repo(full.clone());
+        s.tab = RepoTab::Notes;
+        s.notes.insert((full, branch), crate::notes::NotesView { items: vec![crate::notes::Note { name: "Sketch".into(), updated_at: s.now, size: 120 }], state: crate::state::Refresh::Fresh });
+    });
+    t += 0.1;
+    rt.frame(t);
+    press(&mut rt, "delete-note-Sketch", &mut t);
+    assert_eq!(rt.state.asking.as_deref(), Some("ask-delete-note-Sketch"));
+    assert!(shows(&rt, "Delete the drawing Sketch?") && rt.find("delete-note-Sketch").is_none(), "in place of the row's buttons");
+    press(&mut rt, "ask-delete-note-Sketch-no", &mut t);
+    assert!(rt.state.asking.is_none() && rt.find("delete-note-Sketch").is_some());
+    // Settings → About → Clear saved data asks too.
+    rt.update(|s, _| { s.go(Page::Settings); s.settings_section = crate::state::SettingsSection::About; s.ask("ask-clear-saved-data"); });
+    t += 0.1;
+    rt.frame(t);
+    assert!(shows(&rt, "Clear the saved data?") && rt.find("ask-clear-saved-data-yes").is_some());
+    esc(&mut rt, &mut t);
+    assert!(rt.state.asking.is_none());
+}
