@@ -489,7 +489,7 @@ mod tests {
         assert!(rt.find("commits-load-more").is_some(), "the list says GitHub has more");
         // The newest commit's day: "Today", or "Yesterday" in the first hours after midnight.
         let day = crate::commits::day_label(rows[0].at, rt.state.now, &crate::commits::local_clock);
-        assert!(texts(&rt).iter().any(|t| *t == day), "grouped by day");
+        assert!(texts(&rt).contains(&day), "grouped by day");
         // The filter narrows what's loaded, as you type.
         rt.update(|s, _| s.commits.filter = rune::TextEdit::new("poncho"));
         rt.frame(0.1);
