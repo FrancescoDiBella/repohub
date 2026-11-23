@@ -123,7 +123,7 @@ thread_local! {
 pub fn repohub_back() {
     BACK.with(|b| {
         if let Some(h) = b.borrow().as_ref() {
-            h.update(|s: &mut App, _| s.back());
+            h.update(|s: &mut App, tx| s.back(tx));
         }
     });
 }
@@ -152,6 +152,8 @@ pub fn start() {
         if !s.data.repos.is_empty() {
             s.restore_place();
         }
+        // A conversation or a diff opened before the window (`-- thread 14`) is read now.
+        s.read_opened();
         s.start_tray();
         #[cfg(not(target_arch = "wasm32"))]
         s.plugins.start(&h2);

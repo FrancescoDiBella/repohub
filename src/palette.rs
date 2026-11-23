@@ -9,7 +9,7 @@
 use rune::{El, Icon, TextEdit, Tx, col, el, row, text};
 use rune_kit::{Keybind, KeybindVariant, Kit, TextInput};
 
-use crate::state::{Compose, RepoTab, Theme};
+use crate::state::{Compose, Draft, RepoTab, Theme};
 use crate::{App, Page, icons, ui};
 
 /// The open palette.
@@ -321,26 +321,36 @@ pub fn results(s: &App) -> Vec<Entry> {
 
 /// Runs a command (the palette is already closed).
 pub fn run(s: &mut App, cmd: Command, tx: &mut Tx) {
-    let show = |s: &mut App, i: usize| {
+    fn show(s: &mut App, i: usize) {
         if s.repo_index().is_none_or(|curr| curr != i) {
             s.open(i);
+        }
+    }
+    // A command made of steps asks once, before the first, about everything typed it throws
+    // away (the comment on screen, the form it replaces), and runs whole on Discard.
+    let asks = |s: &mut App, extra: Option<Draft>, then: fn(&mut App, usize, Command), i: usize, cmd: Command| {
+        let mut lost = s.typed_in_place();
+        lost.extend(extra);
+        let again = cmd.clone();
+        if !s.ask_first(&lost, move |s| then(s, i, again)) {
+            then(s, i, cmd);
         }
     };
     match cmd {
         Command::Go(p) => s.go(p),
         Command::OpenRepo(i) => s.open(i),
-        Command::Tab(i, t) => {
+        Command::Tab(i, _) => asks(s, None, |s, i, c| if let Command::Tab(_, t) = c {
             show(s, i);
             s.set_tab(i, t);
-        }
-        Command::Compose(i, k) => {
+        }, i, cmd),
+        Command::Compose(i, _) => asks(s, Some(Draft::Form), |s, i, c| if let Command::Compose(_, k) = c {
             show(s, i);
             s.open_form(i, k);
-        }
-        Command::NewRelease(i) => {
+        }, i, cmd),
+        Command::NewRelease(i) => asks(s, Some(Draft::Release), |s, i, _| {
             show(s, i);
             s.open_release_form(i, None);
-        }
+        }, i, cmd),
         Command::Refresh => s.refresh(),
         Command::Theme(t) => s.set_theme(t),
         Command::Harness(i, h) => s.run_harness(i, h),

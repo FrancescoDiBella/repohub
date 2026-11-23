@@ -487,7 +487,9 @@ mod tests {
         let rows: Vec<Row> = rt.state.commits.history.as_ref().and_then(|h| h.load.ready()).cloned().expect("the sample history is here");
         assert_eq!(rows.len(), crate::commits::PAGE, "a page at a time");
         assert!(rt.find("commits-load-more").is_some(), "the list says GitHub has more");
-        assert!(texts(&rt).iter().any(|t| t == "Today"), "grouped by day");
+        // The newest commit's day: "Today", or "Yesterday" in the first hours after midnight.
+        let day = crate::commits::day_label(rows[0].at, rt.state.now, &crate::commits::local_clock);
+        assert!(texts(&rt).contains(&day), "grouped by day");
         // The filter narrows what's loaded, as you type.
         rt.update(|s, _| s.commits.filter = rune::TextEdit::new("poncho"));
         rt.frame(0.1);
@@ -618,7 +620,7 @@ mod tests {
         // Once it's opened, the result shows it instead of offering another.
         rt.update(|s, _| {
             let full = s.data.repos[0].full_name.clone();
-            s.apply_done(&full, crate::github::Done::Pull(crate::github::Created { number: 99, url: "https://github.com/x/y/pull/99".into() }));
+            s.apply_done(&full, crate::github::Done::Pull(crate::github::Created { number: 99, url: "https://github.com/x/y/pull/99".into(), ..Default::default() }));
         });
         rt.frame(0.1);
         assert!(rt.find("compare-new-pull").is_none() && rt.find("compare-open-pull").is_some());

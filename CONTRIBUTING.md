@@ -7,9 +7,9 @@
 | `src/lib.rs` | The crate root: the `mod` lines, `ENV_LOCK`, and the re-exports that keep the paths the crate names (`crate::App`, `crate::Page`, `crate::view`, `crate::init`, …) |
 | `src/app/mod.rs` | The app's state: `App` and its fields, `Page`, the small types the fields use, and `init` (with the `-- page …` start-up arguments). The `impl App` blocks are in the files below, which share its imports |
 | `src/app/frame.rs` | Start-up and the frame loop: `start`, the fonts, `poll`, the 30-second `tick`, closing the window, the Android back button |
-| `src/app/nav.rs` | Moving between places: `go`, `open`, `set_tab` and `leave_tab`, the place saved for the next start, what Esc (`escape`) and the back button close |
-| `src/app/loading.rs` | Loading from GitHub: `refresh` and `apply`, a repository's details and branches, the branch picked, loading more pull requests and issues |
-| `src/app/writes.rs` | Writes and their feedback: the toasts (`notify`, `notify_undo`, `undo`), the forms, `write` and `apply_done` |
+| `src/app/nav.rs` | Moving between places: `go`, `open`, `set_tab` and `leave_tab` (each asks before throwing away typed text), the place saved for the next start, what Esc (`escape`) and the back button (`back_step`, the same order) close |
+| `src/app/loading.rs` | Loading from GitHub: `refresh` and `apply` (which puts back what writes changed meanwhile), a repository's details and branches, the branch picked, loading more pull requests and issues (a page asked before a refresh landed is dropped) |
+| `src/app/writes.rs` | Writes and their feedback: the toasts (`notify`, `notify_undo`, `undo`), the forms, `write` and `apply_done` (each write's `replay::Change`, kept while a load runs) |
 | `src/app/conversations.rs` | What opens in place of the page: notifications, a conversation, a workflow run, a pull request's diff and its line comments |
 | `src/app/git.rs` | The local clone (finding it, its files), git (changes, commit, merge), the terminal, Claude, running a coding assistant |
 | `src/app/drawings.rs` | Notes: the drawings list, the board editor, one write or delete at a time per drawing |
@@ -17,7 +17,9 @@
 | `src/app/updates.rs` | Updating RepoHub itself, and the status-bar widget's menu |
 | `src/app/settings.rs` | What Settings changes: the account and signing out, the theme and looks, plugins, coding assistants |
 | `src/app/chrome.rs`, `src/app/keys.rs` | The window around the pages (`view`: sidebar, toolbar, banners, the toast) and the keyboard shortcuts |
-| `src/tests/` | Tests that build the whole app and drive it headless, one module per file (`fix58_tests`, …; `load_gen_tests` has `TempDataDir`); `every_page` draws every page and section on a computer and a phone |
+| `src/tests/` | Tests that build the whole app and drive it headless, one module per file (`fix58_tests`, …; `load_gen_tests` has `TempDataDir`); `every_page` draws every page and section on a computer and a phone; `followups_*` the follow-ups of the bug hunt (#138) |
+| `src/replay.rs` | What a finished write changed in the lists (`Change`), applied again, exactly, on what a load that ran meanwhile brings |
+| `src/discard.rs` | "Discard what you typed?": which drafts hold typed text (`state::Draft`), `ask_first` before an action that throws them away, the question floating over the page |
 | `src/pages.rs`, `src/lists.rs` | Pages: overview, repositories, repository detail, pull requests, issues, Actions, settings |
 | `src/mobile.rs` | The phone layout (top bar and bottom tab bar) used below `mobile::BREAKPOINT`; pages read `App::compact` |
 | `src/ui.rs`, `src/icons.rs` | Small building blocks and the icon set |
@@ -26,7 +28,7 @@
 | `src/github.rs` | GitHub REST client: async, shared by the desktop and web builds. Every GET goes through `Gh::fetch` (conditional, see `etag`); `load_all_with` runs the parts of a load side by side and reports the profile and repositories early |
 | `src/net.rs` | Transport: blocking `ureq` on the desktop, `fetch` to the `/gh` proxy on the web, both sending `If-None-Match` and reading `ETag`; `spawn` runs work in the background and reports to the UI; `join`/`join_all` (scoped threads on the desktop, polled futures on the web), `Gate` (at most N requests at once), `Mailbox` (the first load, started before the window) |
 | `src/etag.rs` | Conditional requests: each GET's ETag with its answer, shared by the process, cleared on sign-out; searches left out |
-| `src/cache.rs`, `src/cache_page.rs` | The saved copy of the last load: its format (versioned), where it lives, the size cap, writing it in the background and removing it; showing it at start, the first part of a load, what's kept to show at once (`Fresh`); Settings → About → Saved data |
+| `src/cache.rs`, `src/cache_page.rs` | The saved copy of the last load: its format (versioned), where it lives, the size cap, writing it in the background and removing it; showing it at start (with only a token, once `/user` said whose it is: `profile_known`), the first part of a load, what's kept to show at once (`Fresh`); Settings → About → Saved data |
 | `src/load_tests.rs` | A mock GitHub on localhost: the parallel load equals the sequential one, 304s reuse kept answers, at most four at once; the saved copy in the app |
 | `src/config.rs` | `.env` parsing (desktop: the project file and the app's own settings file, where Settings saves the account) and `config.json` (web) |
 | `src/board.rs` | The Notes whiteboard: model, hand-drawn rendering, gestures, undo/redo, `.excalidraw` read/write |
@@ -105,6 +107,9 @@ Add `tab notes` (a section's name) after `page repo`, and `REPOHUB_TRACE=1` to p
 `body`) the title's or the description's editor. After `page repo tab issues`, `picker labels` (or
 `assignees`) opens the New issue form with that picker.
 `diff 14` also opens that pull request's diff, and `section appearance` picks the Settings section.
+With an account and `REPOHUB_BLOCKING=1`, the conversation and the diff are read before the first frame.
+`discard form` (after `page repo tab issues`) types a title in the New issue form and asks
+"Discard what you typed?"; `discard reply` (after `thread 14`) does the same with a comment.
 `tab commits` reads the history before the first frame; `commit 0123abc` (or `commit 2`, the
 second in the list) opens a commit, and `compare main...feature/x` compares two branches.
 `tab releases` reads the releases before the first frame; `release new` opens the New release
@@ -321,10 +326,19 @@ works too (without its first-frame time). Times include the headless renderer's 
   test. Every new request, read or write, is added to `server/allowlist.txt` (with its refused
   neighbours as `deny` lines): the app's test fails until it's there, and the proxy's and the
   Android app's tests until both allowlists take it. The board paths are checked on the raw address (`board_contents_path`), as narrowly as
-  the app writes them.
+  the app writes them, and so are paths naming branches (`branch_path`, `GitHubPaths.branchPath`):
+  a `%` in a branch name arrives as `%25`, and decoded once a `%` may not start an escape (`%`
+  and two hex digits), so nothing reading the path again can turn it into a dot, a slash or
+  anything else; an encoded dot, slash, backslash or NUL is refused anywhere.
 - Text in the UI is plain and specific: say what happened and how to fix it.
 - Every action gives feedback when it finishes or fails: a toast (`notify`, `notify_problem`) or
   a message where it happened. Nothing returns silently.
+- An action that throws away typed text (Esc, **Cancel**, another form, leaving a conversation
+  or a diff) calls `App::ask_first` with the `state::Draft`s it loses and itself as what runs on
+  **Discard**; a new form or editor adds its `Draft`. An empty one closes at once.
+- A finished write changes the lists through `App::changed` with a `replay::Change`, so a load
+  running meanwhile doesn't undo it: make a new `Change` exact (applying it to lists that
+  already show it changes nothing).
 - An action that changes something on GitHub or deletes local data either asks first (merging,
   publishing a release, removing a plugin, deleting a drawing) or offers **Undo** in its toast (`notify_undo`, with a
   `state::Undo` that knows how to put it back: closing an issue, deleting a theme).

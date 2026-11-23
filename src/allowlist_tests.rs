@@ -148,6 +148,9 @@ fn every_request_the_app_makes_is_on_the_shared_allowlist() {
         let _ = github::load_commits(&cfg, full, "feature/x", 1).await;
         let _ = github::load_commit(&cfg, full, "0123abcd").await;
         let _ = github::load_compare(&cfg, full, "main", "feature/x").await;
+        // A branch name with `%`, which the proxies take as `%25`.
+        let _ = github::load_compare(&cfg, full, "main", "50%-off").await;
+        let _ = github::run(&cfg, full, Write::Branch { name: "x".into(), from: "50%-off".into() }).await;
         let _ = github::load_release_listing(&cfg, full).await;
         let _ = github::load_releases(&cfg, full, 2).await;
         let _ = github::generate_release_notes(&cfg, full, "v1.0.0", "main", Some("v0.9.0")).await;

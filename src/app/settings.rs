@@ -58,8 +58,8 @@ impl App {
         self.notes.clear();
         self.note_name.clear();
         self.form = None;
-        self.form_title = None;
-        self.pull_meta = None;
+        self.discard = None;
+        self.replays.clear();
         self.busy.clear();
         self.diff.set_files(Vec::new());
         self.diff_of = None;

@@ -9,6 +9,34 @@ The sections are **Added**, **Changed** and **Fixed**.
 
 ## Unreleased
 
+### Added
+- Esc, **Cancel**, opening another form or leaving a conversation asks "Discard what you typed?"
+  (**Discard** or **Keep editing**) when a New issue, branch or pull request form, the release
+  form, an edited title or description, or a comment you're writing holds text not sent yet. A
+  form open for another repository is no longer replaced without asking. An empty one still
+  closes at once.
+- A pull request's checks and the comments on its lines say when GitHub has more than the first
+  100 read, with a link to the rest.
+
+### Changed
+- With only a token and no user name, the lists of last time show once GitHub has said whose
+  the token is (one request), so a token changed outside the app never shows the previous
+  account's lists.
+- The Android back button closes things in the order Esc does: pickers, editors, the branch
+  picker, questions and forms first.
+
+### Fixed
+- Closing an issue, merging, a new issue or a star made while a refresh (or the first load) runs
+  is no longer undone when it lands, and isn't counted twice when GitHub already shows it.
+- Branch names with `%` work in the web app and on Android (creating a branch from one,
+  comparing).
+- **Load more** pressed just before a refresh no longer adds an old page to the new list.
+- Two forms sent one after the other each get their own title in the list.
+- The comments on a diff's lines no longer go back to an older answer that came late.
+- Starring on the sample data says that nothing was sent to GitHub.
+- Lists read across several pages follow GitHub's `Link` header exactly, also when an address
+  holds a comma.
+
 ## 0.2.0 — 2026-11-22
 
 Four new features (Commits, Releases, triage in conversations, boards on every device), a faster

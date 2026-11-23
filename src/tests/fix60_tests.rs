@@ -154,13 +154,11 @@ fn locally_created_items_store_timestamps_that_advance_with_now() {
     let mut s = crate::init();
     s.now = 1_700_000_000;
     s.data = crate::model::Data::sample_at(s.now);
-    s.form_title = Some("New bug".into());
-    s.apply_done_inner(&s.data.repos[0].full_name.clone(), crate::github::Done::Issue(crate::github::Created { number: 999, url: "https://example.invalid/999".into() }));
+    s.apply_done_inner(&s.data.repos[0].full_name.clone(), crate::github::Done::Issue(crate::github::Created { number: 999, url: "https://example.invalid/999".into(), title: "New bug".into(), ..Default::default() }));
     assert_eq!(s.data.issues[0].created_at, 1_700_000_000);
     assert_eq!(s.data.issues[0].age_ago(1_700_000_300), "5 minutes ago");
 
-    s.pull_meta = Some(("New PR".into(), false));
-    s.apply_done_inner(&s.data.repos[0].full_name.clone(), crate::github::Done::Pull(crate::github::Created { number: 1000, url: "https://example.invalid/1000".into() }));
+    s.apply_done_inner(&s.data.repos[0].full_name.clone(), crate::github::Done::Pull(crate::github::Created { number: 1000, url: "https://example.invalid/1000".into(), title: "New PR".into(), ..Default::default() }));
     assert_eq!(s.data.pulls[0].updated_at, 1_700_000_000);
     assert_eq!(s.data.pulls[0].age_ago(1_700_007_200), "2 hours ago");
 }
@@ -244,8 +242,7 @@ fn apply_done_updates_intended_repository_after_reordering() {
     assert_eq!(s.branch_of.get(&repo_1).map(|b| b.as_str()), Some("feature/reorder"));
 
     // A Done::Issue for repo_1 arrives
-    s.form_title = Some("New reordered issue".into());
-    s.apply_done(&repo_1, crate::github::Done::Issue(crate::github::Created { number: 888, url: "https://example.invalid/888".into() }));
+    s.apply_done(&repo_1, crate::github::Done::Issue(crate::github::Created { number: 888, url: "https://example.invalid/888".into(), title: "New reordered issue".into(), ..Default::default() }));
     assert_eq!(s.data.issues[0].number, 888);
     assert_eq!(s.data.issues[0].repo, repo_1);
     let repo_1_entry = s.data.repos.iter().find(|r| r.full_name == repo_1).unwrap();

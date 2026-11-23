@@ -46,8 +46,7 @@ pub(crate) fn shortcuts(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
     // from a repository to the list.
     if ev.is_command('[') {
         if s.thread.is_some() {
-            s.close_pull_diff();
-            s.thread = None;
+            s.close_thread();
         } else if s.open_run.is_some() {
             s.open_run = None;
         } else if s.commits.open.is_some() {

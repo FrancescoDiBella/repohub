@@ -219,6 +219,9 @@ stateDiagram-v2
 | `markdown::Block` | `Text`, `Fence`, `Comment` | the README pass, line by line |
 | `releases::TagUse` | `Invalid`, `Taken`, `Existing`, `New` | what the form's tag does: refused, another release's, used as it is, or created from the target branch |
 | `releases::NotesJob` | `Idle`, `Asking`, `Failed` | Generate notes |
+| `discard::Ask` | none → asking (`state::Draft`s, what runs then) → none | "Discard what you typed?": **Discard** drops the drafts and runs the action, **Keep editing** (or Esc, or back) leaves all as it was; while it asks, actions that would throw text away wait |
+| `state::Draft` | `Form`, `Release`, `Title`, `Description`, `Reply`, `LineComment` | text typed and not sent that an action would lose (`App::typed`) |
+| `App::replays` | empty → the `replay::Change`s of writes that finished while a load runs → applied again when it lands, emptied | cleared when a load starts; a load that fails empties it (the screen already shows them) |
 
 ## For agents and scripts
 

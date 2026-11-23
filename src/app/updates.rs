@@ -187,6 +187,16 @@ impl App {
     /// A pick from the widget's menu (or a click on its icon: `open`).
     pub(crate) fn tray_action(&mut self, id: &str) {
         let Some(action) = tray::parse(id) else { return };
+        // One that moves elsewhere asks once, first, about what's typed (see `discard`).
+        let moves = matches!(action, tray::Action::MyFailingPulls | tray::Action::NewIssue(_));
+        if moves {
+            let mut lost = self.typed_in_place();
+            lost.push(state::Draft::Form);
+            let again = id.to_owned();
+            if self.ask_first(&lost, move |s| s.tray_action(&again)) {
+                return;
+            }
+        }
         let repo = |s: &App, full: &str| s.data.repos.iter().position(|r| r.full_name.eq_ignore_ascii_case(full));
         let show = !matches!(action, tray::Action::Refresh | tray::Action::Quit);
         match action {

@@ -189,6 +189,10 @@ impl App {
     /// The open pull requests that wait for your review (the status-bar line, the Overview's
     /// panel).
     pub(crate) fn show_review_requested(&mut self) {
+        // What's typed in a conversation on screen isn't thrown away without asking.
+        if self.ask_before_leaving(|s| s.show_review_requested()) {
+            return;
+        }
         self.go(crate::Page::Pulls);
         self.pr_filter = PullState::Open;
         self.pull_filter.clear();

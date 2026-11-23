@@ -264,6 +264,9 @@ impl App {
     /// Starts harness `n` in repository `i`'s Terminal: typed into the running shell, or as the
     /// first command of a new one in the known clone.
     pub(crate) fn run_harness(&mut self, i: usize, n: usize) {
+        if self.ask_before_leaving(move |s| s.run_harness(i, n)) {
+            return;
+        }
         let Some(h) = self.assist.harnesses.get(n).cloned() else { return };
         let Some(r) = self.data.repos.get(i) else { return };
         let full = r.full_name.clone();

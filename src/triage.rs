@@ -795,9 +795,8 @@ impl App {
         (labels, picks.assignees)
     }
 
-    /// A finished change: the conversation and the list rows show it, and a toast says it.
+    /// A finished change: the conversation shows it, and a toast says it.
     pub(crate) fn apply_triaged(&mut self, full: &str, number: u32, change: Change, applied: Applied) {
-        let me = self.data.profile.login.clone();
         if let Some(o) = self.thread.as_mut().filter(|o| o.is(full, number)) {
             o.edit.saving = None;
             o.edit.error = None;
@@ -821,35 +820,7 @@ impl App {
                 }
             }
         }
-        let here = |repo: &str, n: u32| n == number && same_repo(repo, full);
-        for x in self.data.issues.iter_mut().filter(|x| here(&x.repo, x.number)) {
-            match &applied {
-                Applied::Labels(l) => {
-                    x.labels = l.clone();
-                    x.label = l.first().cloned();
-                }
-                Applied::Assignees(a) => x.assignees = a.clone(),
-                Applied::Title(t) => x.title = t.clone(),
-                _ => {}
-            }
-        }
-        for p in self.data.pulls.iter_mut().filter(|p| here(&p.repo, p.number)) {
-            match &applied {
-                Applied::Labels(l) => p.labels = l.clone(),
-                Applied::Assignees(a) => p.assignees = a.clone(),
-                Applied::Title(t) => p.title = t.clone(),
-                Applied::Reviewers(r) => {
-                    let waits = r.iter().any(|x| x.eq_ignore_ascii_case(&me));
-                    if p.review_requested != waits {
-                        p.review_requested = waits;
-                        if let Some(n) = self.data.review_total.as_mut() {
-                            *n = if waits { *n + 1 } else { n.saturating_sub(1) };
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
+        // The list rows are changed by `apply_done` (`replay::Change::Triaged`).
         let msg = applied.toast(number, &change);
         self.notify(msg);
     }

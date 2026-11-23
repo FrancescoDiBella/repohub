@@ -144,14 +144,15 @@ public class BackendTest {
         assertFalse(GitHubPaths.allowed("PATCH", "/notifications/threads/abc"));
         assertFalse(GitHubPaths.allowed("PUT", "/notifications"));
         assertFalse(GitHubPaths.allowed("DELETE", "/notifications/threads/12"));
-        for (String p : new String[] {"/user", "/user/repos", "/user/starred", "/user/orgs", "/search/issues", "/users/octocat",
+        for (String p : new String[] {"/user", "/user/repos", "/user/starred", "/search/issues", "/users/octocat",
             "/users/octocat/repos", "/users/octocat/orgs", "/orgs/acme/repos", "/repos/o/r/actions/runs", "/repos/o/r/stats/participation",
             "/repos/o/r/contents", "/repos/o/r/readme", "/repos/o/r/languages", "/repos/o/r/commits", "/repos/o/r/branches", "/repos/o/r/issues",
             "/repos/o/r/git/ref/heads/feature/x", "/repos/o/r/pulls/12/files", "/repos/o/r/issues/7", "/repos/o/r/issues/7/comments",
             "/repos/o/r/pulls/12", "/repos/o/r/pulls/12/reviews", "/repos/o/r/actions/runs/42/jobs", "/repos/o/r/actions/jobs/99/logs"}) {
             assertTrue(p, GitHubPaths.allowed("GET", p));
         }
-        for (String p : new String[] {"/user/emails", "/user/keys", "/repos/o/r/hooks", "/repos/o/r/pulls/x/files", "/gists",
+        // The app never asks for /user/orgs (its organizations come from /users/{login}/orgs).
+        for (String p : new String[] {"/user/orgs", "/user/emails", "/user/keys", "/repos/o/r/hooks", "/repos/o/r/pulls/x/files", "/gists",
             "/repos/o/r/actions/secrets", "/orgs/acme/members", "/repos/o/r/git/ref/heads/", "/repos/o/r/issues/x", "/repos/o/r/issues/7/events",
             "/repos/o/r/pulls/12/commits", "/repos/o/r/pulls/12/reviews/3", "/repos/o/r/actions/runs/x/jobs", "/repos/o/r/actions/jobs/x/logs",
             "/repos/o/r/actions/runs/42/logs"}) {
@@ -329,6 +330,28 @@ public class BackendTest {
         assertEquals(400, backend.handle("GET", "api/notes/index?repo=..%2Fetc", "", "").status);
         assertEquals(204, backend.handle("DELETE", i, "", "").status);
         assertEquals(404, backend.handle("GET", i, "", "").status);
+    }
+
+    @Test
+    public void branchNamesWithAPercentSign() {
+        assertEquals("/repos/o/r/git/ref/heads/50%-off", GitHubPaths.branchPath("/repos/o/r/git/ref/heads/50%25-off"));
+        assertEquals("/repos/o/r/compare/main...feature/100%", GitHubPaths.branchPath("/repos/o/r/compare/main...feature/100%25"));
+        assertEquals("/repos/o/r/git/ref/heads/feature+x", GitHubPaths.branchPath("/repos/o/r/git/ref/heads/feature%2Bx"));
+        for (String bad : new String[] {"/repos/o/r/git/ref/heads/%2e%2e/%2e%2e/user/emails", "/repos/o/r/git/ref/heads/%252e%252e/%252e%252e/user/emails",
+            "/repos/o/r/git/ref/heads/a%2fb", "/repos/o/r/git/ref/heads/a%252fb", "/repos/o/r/git/ref/heads/a%00", "/repos/o/r/git/ref/heads/a%2500",
+            "/repos/o/r/git/ref/heads/a%5Cb", "/repos/o/r/git/ref/heads/a%255Cb", "/repos/o/r/git/ref/heads/a%2541", "/repos/o/r/git/ref/heads/a%252541",
+            "/repos/o/r/compare/main...a%252e%252e", "/repos/o/r/compare/a%2541...main", "/repos/o/r/git/ref/heads/a%2", "/repos/o/r/git/ref/heads/a%zz",
+            "/repos/o/r/git/ref/heads/a%25..b", "/repos/o/r/git/ref/heads/-x%25", "/repos/o/r/compare/main..a%25", "/repos/o%25/r/git/ref/heads/main",
+            "/repos/o/r/issues/14%25", "/repos/o/r/git/refs/heads/a%25"}) {
+            assertNull(bad, GitHubPaths.branchPath(bad));
+        }
+        // What the backend forwards: the address as the app sent it, `%25` and all.
+        account.token = "tok";
+        assertEquals(200, backend.handle("GET", "gh/repos/o/r/git/ref/heads/50%25-off", "", "").status);
+        assertTrue(http.sent.get(0), http.sent.get(0).startsWith("GET https://api.github.com/repos/o/r/git/ref/heads/50%25-off"));
+        assertEquals(403, backend.handle("GET", "gh/repos/o/r/git/ref/heads/a%252e%252e", "", "").status);
+        assertEquals(403, backend.handle("GET", "gh/repos/o/r/issues/14%25", "", "").status);
+        assertEquals(1, http.sent.size());
     }
 
     @Test

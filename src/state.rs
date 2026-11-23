@@ -447,6 +447,24 @@ pub enum Undo {
     ReopenPull { repo: String, number: u32 },
 }
 
+/// Text typed and not sent yet, which an action would throw away (see `discard`): it asks
+/// "Discard what you typed?" first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Draft {
+    /// The New issue, branch or pull request form.
+    Form,
+    /// The New release form, or a draft release being edited.
+    Release,
+    /// The conversation's title being edited.
+    Title,
+    /// The conversation's description being edited.
+    Description,
+    /// The comment being written in the conversation.
+    Reply,
+    /// The comment being written on the diff's lines.
+    LineComment,
+}
+
 /// A form that sends something to GitHub.
 ///
 /// ```text

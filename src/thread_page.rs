@@ -19,12 +19,21 @@ fn standing_pill(k: &Kit, st: Standing) -> El {
     ui::pill(k, st.label(), ink)
 }
 
-/// A pull request's checks on its last commit: a summary, then one row per check.
-fn checks(k: &Kit, list: &[Check]) -> El {
+/// A pull request's checks on its last commit: a summary, then one row per check, and when
+/// GitHub has more than were read, how many and where the rest are.
+fn checks(k: &Kit, list: &[Check], total: usize, url: &str) -> El {
     let mut p = panel(k).key("thread-checks")
-        .child(row().w_full().px(16.0).py(10.0).gap(10.0).center_y()
+        .child(row().w_full().px(16.0).py(10.0).gap(10.0).center_y().flex_wrap()
             .child(text("Checks").font(k.ty.small_medium).color(k.c.text_strong))
             .child(text(crate::thread::checks_summary(list)).font(k.ty.small).color(k.c.text_muted).key("thread-checks-summary")));
+    if total > list.len() {
+        let mut more = row().w_full().px(16.0).pb(10.0).gap(8.0).center_y().flex_wrap()
+            .child(text(format!("Showing the first {} of {total} checks; the summary counts those only.", list.len())).font(k.ty.small).color(k.c.text_muted).wrap().shrink().key("thread-checks-more"));
+        if !url.is_empty() {
+            more = more.child(pages::open_button(k, "All checks on GitHub", &format!("{url}/checks"), "thread-checks-all"));
+        }
+        p = p.child(more);
+    }
     for (n, c) in list.iter().enumerate() {
         let (icon, ink) = match c.state {
             CheckState::Passed => (&icons::CHECK, k.c.success.icon),
@@ -135,7 +144,7 @@ fn reply(s: &App, k: &Kit, o: &Open, t: &Thread) -> El {
 pub fn view(s: &App, k: &Kit, o: &Open) -> El {
     let what = if o.pull { "pull request" } else { "issue" };
     let back = Button::new("Back").icon(&icons::BACK).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
-        .on_press(|s: &mut App| { s.close_pull_diff(); s.thread = None; }).build(k).key("thread-back");
+        .on_press(|s: &mut App| s.close_thread()).build(k).key("thread-back");
     let mut top = row().w_full().gap(8.0).center_y().child(back).child(el().grow(1.0));
     let mut page = col().w_full().gap(16.0).key("thread");
     let t = match &o.load {
@@ -172,7 +181,7 @@ pub fn view(s: &App, k: &Kit, o: &Open) -> El {
             .child(meta));
     let mut body = col().gap(16.0);
     if let Some(list) = &t.checks {
-        body = body.child(checks(k, list));
+        body = body.child(checks(k, list, t.checks_total, &t.url));
     }
     // A pull request's changes: the diff panel the lists use, opened here.
     let mut diff_open = false;
@@ -182,7 +191,7 @@ pub fn view(s: &App, k: &Kit, o: &Open) -> El {
         let (repo, number) = (o.repo.clone(), o.number);
         let files = Button::new(if active { "Hide the changes" } else { "See the changes" }).icon(&icons::FILE)
             .variant(if active { ButtonVariant::Contrast } else { ButtonVariant::Ghost }).control_size(ControlSize::Small)
-            .on_press(move |s: &mut App| if active { s.close_pull_diff() } else { s.open_pull_diff(repo.clone(), number) })
+            .on_press(move |s: &mut App| if active { s.leave_pull_diff() } else { s.open_pull_diff(repo.clone(), number) })
             .build(k).key("thread-files");
         body = body.child(row().w_full().child(files));
         if active {

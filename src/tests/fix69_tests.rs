@@ -127,6 +127,9 @@ fn esc_closes_pickers_and_editors_first_and_never_a_form_out_of_sight() {
     rt.frame(t + 0.01);
     key(&mut rt, Key::Escape, Mods::default(), &mut t);
     assert!(rt.state.picker(Host::Form).is_none() && rt.state.form.is_some(), "the form's picker next");
+    // Then the form: it holds typed text, so Esc asks first (#138), and Discard closes it.
     key(&mut rt, Key::Escape, Mods::default(), &mut t);
+    assert!(rt.state.form.is_some() && rt.state.discard.is_some(), "then the form, asking first");
+    rt.update(|s, _| s.answer_discard(true));
     assert!(rt.state.form.is_none(), "then the form");
 }

@@ -356,6 +356,9 @@ pub struct Form {
     pub offered: Option<String>,
     /// The notes Generate notes last put in the field: replaced again without asking.
     pub generated: Option<String>,
+    /// The tag, title and notes the form opened with (a draft's, or a tag picked): what's
+    /// typed is what differs.
+    pub opened: [String; 3],
 }
 
 impl Form {
@@ -377,6 +380,7 @@ impl Form {
             notes_epoch: 0,
             offered: None,
             generated: None,
+            opened: Default::default(),
         }
     }
 
@@ -389,6 +393,7 @@ impl Form {
             title: TextEdit::new(r.name.clone()),
             notes: TextEdit::new(r.body.clone()),
             prerelease: r.prerelease,
+            opened: [r.tag.clone(), r.name.clone(), r.body.clone()],
             ..Form::new(repo, default_branch)
         }
     }
@@ -412,6 +417,15 @@ impl Form {
             draft: !publish,
             prerelease: self.prerelease,
         })
+    }
+
+    /// Whether the tag, the title or the notes hold something typed since the form opened
+    /// (notes Generate notes put there aren't typed): closing it then asks first.
+    pub fn typed(&self) -> bool {
+        let notes = self.notes.text.trim();
+        self.tag.text.trim() != self.opened[0].trim()
+            || self.title.text.trim() != self.opened[1].trim()
+            || (notes != self.opened[2].trim() && self.generated.as_deref().map(str::trim) != Some(notes))
     }
 
     /// Whether the notes field holds something you typed (not empty, and not what Generate
@@ -769,6 +783,11 @@ impl App {
     /// Opens the New release form of repository `i` on its Releases section; `tag`: for a tag
     /// that has no release yet.
     pub(crate) fn open_release_form(&mut self, i: usize, tag: Option<String>) {
+        // Another form with typed text isn't replaced without asking.
+        let again = tag.clone();
+        if self.ask_first(&[crate::state::Draft::Release], move |s| s.open_release_form(i, again)) {
+            return;
+        }
         let Some(r) = self.data.repos.get(i) else { return };
         let (repo, default) = (r.full_name.clone(), r.branch.clone());
         if self.tab != RepoTab::Releases {
@@ -777,6 +796,7 @@ impl App {
         self.load_branches(i, false);
         let mut f = Form::new(&repo, &default);
         if let Some(t) = tag {
+            f.opened[0] = t.clone();
             f.tag = TextEdit::new(t);
             f.tag.focused = false;
             f.title.focused = true;
@@ -788,6 +808,9 @@ impl App {
 
     /// Opens draft `id` of repository `i` in the form.
     pub(crate) fn edit_draft(&mut self, i: usize, id: u64) {
+        if self.ask_first(&[crate::state::Draft::Release], move |s| s.edit_draft(i, id)) {
+            return;
+        }
         let Some(r) = self.data.repos.get(i) else { return };
         let (repo, default) = (r.full_name.clone(), r.branch.clone());
         let Some(d) = self.releases.listing_of(&repo).and_then(|l| l.releases.iter().find(|x| x.id == id)).cloned() else { return };
@@ -1004,7 +1027,8 @@ impl App {
         if f.confirm {
             f.confirm = false;
         } else if f.offered.take().is_none() {
-            self.close_release_form();
+            // What's typed in it isn't thrown away without asking.
+            self.cancel_release_form();
         }
         true
     }

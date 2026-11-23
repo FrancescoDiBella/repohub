@@ -20,6 +20,8 @@ impl App {
         self.retry_after = None;
         self.last_load = Some(net::now());
         self.load_clock = Some(self.clock);
+        // Writes that finish from now on are put back on what this load brings.
+        self.replays.clear();
         self.set_status(Status::Loading);
         // Before the window exists, the first load reports to a mailbox (see `init`).
         let to = match (self.handle.clone(), &self.fresh.early) {
@@ -31,7 +33,11 @@ impl App {
         let epoch = self.load_gen;
         // The profile and the repositories show as soon as they're in (on a first start).
         let early = to.clone();
-        let work = move || async move { github::load_all_with(&cfg, move |d| early.post(move |s: &mut App| s.apply_early(epoch, d))).await };
+        // With only a token, whose it is: the saved copy shows once that's known (see `cache`).
+        let who = to.clone();
+        let work = move || async move {
+            github::load_all_reporting(&cfg, move |login| who.post(move |s: &mut App| s.profile_known(epoch, &login)), move |d| early.post(move |s: &mut App| s.apply_early(epoch, d))).await
+        };
         let done = move |s: &mut App, r| s.apply(epoch, r);
         #[cfg(not(target_arch = "wasm32"))]
         net::spawn_to(to, work, done);
@@ -54,7 +60,11 @@ impl App {
                 let kept = cache::keep_details(&self.data, &d, std::mem::take(&mut self.details), &mut self.fresh.stale);
                 self.fresh.from_copy = false;
                 self.fresh.partial = false;
+                self.fresh.held = None;
                 self.data = d;
+                // What was done while it loaded stays done.
+                self.replay_writes();
+                self.landed = self.landed.wrapping_add(1);
                 self.data_gen = self.data_gen.wrapping_add(1);
                 self.refresh_clone_cache();
                 self.details = kept;
@@ -106,6 +116,8 @@ impl App {
                 self.save_copy();
             }
             Err(e) => {
+                // The lists on screen already show what was done meanwhile.
+                self.replays.clear();
                 if let Some(ra) = e.retry_after {
                     self.retry_after = Some(ra);
                 }
@@ -144,6 +156,8 @@ impl App {
         let key = (full.clone(), self.branch(i));
         if self.data.sample {
             let d = model::sample_detail(r);
+            // Its branches too, as with an account (the Notes tab's picker reads them).
+            self.load_branches(i, false);
             self.load_local(i, false);
             self.details.insert(key, Load::Ready(d));
             return;
@@ -284,38 +298,42 @@ impl App {
         if login.is_empty() {
             return;
         }
-        let next_page = if open { self.open_pulls_page + 1 } else { self.closed_pulls_page + 1 };
+        let page = if open { self.open_pulls_page + 1 } else { self.closed_pulls_page + 1 };
         self.loading_more_pulls = true;
-        let epoch = self.load_gen;
+        let ask = More { epoch: self.load_gen, landed: self.landed, page };
         net::spawn(h, move || async move {
-            github::load_more_pulls(&cfg, &login, open, next_page).await
-        }, move |s: &mut App, r| {
-            if s.load_gen != epoch {
-                return;
-            }
-            s.loading_more_pulls = false;
-            match r {
-                Ok((items, total)) => {
-                    if open {
-                        s.open_pulls_page = next_page;
-                        s.data.open_pulls_total = Some(total);
-                    } else {
-                        s.closed_pulls_page = next_page;
-                        s.data.closed_pulls_total = Some(total);
-                    }
-                    for p in items {
-                        if !s.data.pulls.iter().any(|existing| existing.number == p.number && existing.repo.eq_ignore_ascii_case(&p.repo)) {
-                            s.data.pulls.push(p);
-                        }
-                    }
-                    s.data_gen = s.data_gen.wrapping_add(1);
-                    s.sync_tray();
+            github::load_more_pulls(&cfg, &login, open, page).await
+        }, move |s: &mut App, r| s.more_pulls_arrived(ask, open, r));
+    }
+
+    /// Page `ask.page` of the pull requests arrived. A load that landed since reset the list to
+    /// its first page: this page belongs to the list before it, and is dropped.
+    pub(crate) fn more_pulls_arrived(&mut self, ask: More, open: bool, r: Result<(Vec<model::Pull>, usize), String>) {
+        if self.load_gen != ask.epoch || self.landed != ask.landed {
+            return;
+        }
+        self.loading_more_pulls = false;
+        match r {
+            Ok((items, total)) => {
+                if open {
+                    self.open_pulls_page = ask.page;
+                    self.data.open_pulls_total = Some(total);
+                } else {
+                    self.closed_pulls_page = ask.page;
+                    self.data.closed_pulls_total = Some(total);
                 }
-                Err(e) => {
-                    s.notify_problem(format!("Could not load more pull requests: {e}"));
+                for p in items {
+                    if !self.data.pulls.iter().any(|existing| existing.number == p.number && existing.repo.eq_ignore_ascii_case(&p.repo)) {
+                        self.data.pulls.push(p);
+                    }
                 }
+                self.data_changed();
+                self.sync_tray();
             }
-        });
+            Err(e) => {
+                self.notify_problem(format!("Could not load more pull requests: {e}"));
+            }
+        }
     }
 
     pub fn load_more_issues(&mut self) {
@@ -331,33 +349,45 @@ impl App {
         let mut orgs: Vec<String> = self.data.repos.iter().map(|r| r.owner.clone()).filter(|o| !o.eq_ignore_ascii_case(&login)).collect();
         orgs.sort_by_key(|o| o.to_lowercase());
         orgs.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
-        let next_page = self.issues_page + 1;
+        let page = self.issues_page + 1;
         self.loading_more_issues = true;
-        let epoch = self.load_gen;
+        let ask = More { epoch: self.load_gen, landed: self.landed, page };
         net::spawn(h, move || async move {
-            github::load_more_issues(&cfg, &login, &orgs, next_page).await
-        }, move |s: &mut App, r| {
-            if s.load_gen != epoch {
-                return;
-            }
-            s.loading_more_issues = false;
-            match r {
-                Ok((items, total)) => {
-                    s.issues_page = next_page;
-                    s.data.issues_total = Some(total);
-                    for issue in items {
-                        if !s.data.issues.iter().any(|existing| existing.number == issue.number && existing.repo.eq_ignore_ascii_case(&issue.repo)) {
-                            s.data.issues.push(issue);
-                        }
-                    }
-                    s.data.issues.sort_by_key(|i| std::cmp::Reverse(i.created_at));
-                    s.data_gen = s.data_gen.wrapping_add(1);
-                    s.sync_tray();
-                }
-                Err(e) => {
-                    s.notify_problem(format!("Could not load more issues: {e}"));
-                }
-            }
-        });
+            github::load_more_issues(&cfg, &login, &orgs, page).await
+        }, move |s: &mut App, r| s.more_issues_arrived(ask, r));
     }
+
+    /// Page `ask.page` of the issues arrived; dropped when a load landed since (as above).
+    pub(crate) fn more_issues_arrived(&mut self, ask: More, r: Result<(Vec<model::Issue>, usize), String>) {
+        if self.load_gen != ask.epoch || self.landed != ask.landed {
+            return;
+        }
+        self.loading_more_issues = false;
+        match r {
+            Ok((items, total)) => {
+                self.issues_page = ask.page;
+                self.data.issues_total = Some(total);
+                for issue in items {
+                    if !self.data.issues.iter().any(|existing| existing.number == issue.number && existing.repo.eq_ignore_ascii_case(&issue.repo)) {
+                        self.data.issues.push(issue);
+                    }
+                }
+                self.data.issues.sort_by_key(|i| std::cmp::Reverse(i.created_at));
+                self.data_changed();
+                self.sync_tray();
+            }
+            Err(e) => {
+                self.notify_problem(format!("Could not load more issues: {e}"));
+            }
+        }
+    }
+}
+
+/// A **Load more** request: for which account, which list (the loads landed when it was
+/// asked), and which page.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct More {
+    pub epoch: u64,
+    pub landed: u64,
+    pub page: usize,
 }

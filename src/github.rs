@@ -75,35 +75,101 @@ fn repo_from_url(url: &str) -> String {
     if parts.len() == 3 { format!("{}/{}", parts[1], parts[0]) } else { url.to_owned() }
 }
 
-/// Extracts the next page path from a GitHub Link header, relative to api_base.
-pub fn next_page_path(link: Option<&str>, api_base: &str) -> Option<String> {
-    let link = link?;
-    for part in link.split(',') {
-        let mut sections = part.split(';');
-        let url_part = sections.next()?.trim();
-        let is_next = sections.any(|s| {
-            let s = s.trim();
-            s.eq_ignore_ascii_case("rel=\"next\"")
-                || s.eq_ignore_ascii_case("rel='next'")
-                || s.eq_ignore_ascii_case("rel=next")
-        });
-        if is_next && url_part.starts_with('<') && url_part.ends_with('>') {
-            let full_url = &url_part[1..url_part.len() - 1];
-            if full_url.starts_with('/') {
-                return Some(full_url.to_owned());
+/// The links of a `Link` header (RFC 8288): each `<address>` with its parameters (names in
+/// lower case, values unquoted). The address ends at `>` and may hold commas and semicolons;
+/// a quoted value may too. Anything that doesn't read as a link is skipped up to the next one.
+pub fn parse_link_header(h: &str) -> Vec<(String, Vec<(String, String)>)> {
+    let b = h.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    let skip_ws = |i: &mut usize| while *i < b.len() && (b[*i] == b' ' || b[*i] == b'\t') { *i += 1 };
+    while i < b.len() {
+        while i < b.len() && (b[i] == b',' || b[i] == b' ' || b[i] == b'\t') {
+            i += 1;
+        }
+        if i >= b.len() {
+            break;
+        }
+        if b[i] != b'<' {
+            // Not a link: on to the next `<` after a comma.
+            while i < b.len() && !(b[i] == b',' && h[i + 1..].trim_start().starts_with('<')) {
+                i += 1;
             }
-            let base = api_base.trim_end_matches('/');
-            if let Some(rel) = full_url.strip_prefix(base) {
-                return Some(if rel.starts_with('/') { rel.to_owned() } else { format!("/{rel}") });
+            continue;
+        }
+        let Some(end) = h[i + 1..].find('>').map(|e| i + 1 + e) else { break };
+        let url = h[i + 1..end].trim().to_owned();
+        i = end + 1;
+        let mut params = Vec::new();
+        loop {
+            skip_ws(&mut i);
+            if i >= b.len() || b[i] == b',' {
+                break;
             }
-            if let Some(idx) = full_url.find("://")
-                && let Some(path_idx) = full_url[idx + 3..].find('/')
-            {
-                let path = &full_url[idx + 3 + path_idx..];
-                let path = path.strip_prefix("/api/v3").unwrap_or(path);
-                return Some(if path.starts_with('/') { path.to_owned() } else { format!("/{path}") });
+            if b[i] != b';' {
+                i += 1;
+                continue;
+            }
+            i += 1;
+            skip_ws(&mut i);
+            let start = i;
+            while i < b.len() && !matches!(b[i], b'=' | b';' | b',' | b' ' | b'\t') {
+                i += 1;
+            }
+            let name = h[start..i].to_ascii_lowercase();
+            skip_ws(&mut i);
+            let mut value = String::new();
+            if i < b.len() && b[i] == b'=' {
+                i += 1;
+                skip_ws(&mut i);
+                if i < b.len() && (b[i] == b'"' || b[i] == b'\'') {
+                    let q = b[i];
+                    i += 1;
+                    while i < b.len() && b[i] != q {
+                        if b[i] == b'\\' && i + 1 < b.len() {
+                            i += 1;
+                        }
+                        let ch = h[i..].chars().next().unwrap_or(' ');
+                        value.push(ch);
+                        i += ch.len_utf8();
+                    }
+                    i += 1;
+                } else {
+                    let start = i;
+                    while i < b.len() && !matches!(b[i], b';' | b',' | b' ' | b'\t') {
+                        i += 1;
+                    }
+                    value = h[start..i].to_owned();
+                }
+            }
+            if !name.is_empty() {
+                params.push((name, value));
             }
         }
+        out.push((url, params));
+    }
+    out
+}
+
+/// The next page's path from a GitHub `Link` header, relative to `api_base`: the link whose
+/// `rel` (one or more relation types) holds `next`.
+pub fn next_page_path(link: Option<&str>, api_base: &str) -> Option<String> {
+    let links = parse_link_header(link?);
+    let (full_url, _) = links.iter().find(|(_, params)| params.iter().any(|(k, v)| k == "rel" && v.split_ascii_whitespace().any(|r| r.eq_ignore_ascii_case("next"))))?;
+    let full_url = full_url.as_str();
+    if full_url.starts_with('/') {
+        return Some(full_url.to_owned());
+    }
+    let base = api_base.trim_end_matches('/');
+    if let Some(rel) = full_url.strip_prefix(base) {
+        return Some(if rel.starts_with('/') { rel.to_owned() } else { format!("/{rel}") });
+    }
+    if let Some(idx) = full_url.find("://")
+        && let Some(path_idx) = full_url[idx + 3..].find('/')
+    {
+        let path = &full_url[idx + 3 + path_idx..];
+        let path = path.strip_prefix("/api/v3").unwrap_or(path);
+        return Some(if path.starts_with('/') { path.to_owned() } else { format!("/{path}") });
     }
     None
 }
@@ -456,7 +522,14 @@ pub fn parse_thread(issue: &Value, comments: &Value, pull: Option<(&Value, &Valu
         entries,
         more,
         checks: None,
+        checks_total: 0,
     }
+}
+
+/// How many check runs GitHub has for the commit (its `total_count`), which may be more than
+/// the page read.
+pub fn check_runs_total(v: &Value) -> usize {
+    v.get("total_count").and_then(Value::as_u64).unwrap_or(0) as usize
 }
 
 /// The check runs in GitHub's answer for a commit's `check-runs`.
@@ -868,7 +941,7 @@ impl Gh {
 
     pub async fn create_issue(&self, full: &str, title: &str, body: &str, labels: &[String], assignees: &[String]) -> Result<Created, String> {
         let v = self.write("POST", &format!("/repos/{full}/issues"), issue_body(title, body, labels, assignees)).await?;
-        Ok(Created { number: n(&v, "number"), url: s(&v, "html_url") })
+        Ok(parse_created(&v, title, false))
     }
 
     /// Creates branch `name` at the tip of branch `from`.
@@ -885,7 +958,7 @@ impl Gh {
         let v = self.write("POST", &format!("/repos/{full}/pulls"), json!({
             "title": p.title, "body": p.body, "head": p.head, "base": p.base, "draft": p.draft,
         })).await?;
-        Ok(Created { number: n(&v, "number"), url: s(&v, "html_url") })
+        Ok(parse_created(&v, &p.title, p.draft))
     }
 
     /// The conversation of issue or pull request `number`: its description, comments and, for a
@@ -902,8 +975,12 @@ impl Gh {
         };
         let mut t = parse_thread(&issue, &comments, pull.as_ref().map(|(d, r)| (d, r)));
         // The checks are extra: a token that can't read them still shows the conversation.
-        if let Some(sha) = pull.as_ref().and_then(|(d, _)| d.get("head")).map(|h| s(h, "sha")).filter(|x| !x.is_empty()) {
-            t.checks = self.get(&format!("/repos/{full}/commits/{sha}/check-runs?per_page=100")).await.ok().map(|v| parse_check_runs(&v));
+        if let Some(sha) = pull.as_ref().and_then(|(d, _)| d.get("head")).map(|h| s(h, "sha")).filter(|x| !x.is_empty())
+            && let Ok(v) = self.get(&format!("/repos/{full}/commits/{sha}/check-runs?per_page=100")).await
+        {
+            let list = parse_check_runs(&v);
+            t.checks_total = check_runs_total(&v).max(list.len());
+            t.checks = Some(list);
         }
         Ok(t)
     }
@@ -924,11 +1001,11 @@ impl Gh {
 
     /// The commit pull request `number` shows, and the comments on lines of its diff (the
     /// first 100). A comment on a line that changed since (`line` is null) is left out.
-    pub async fn line_comments(&self, full: &str, number: u32) -> Result<(String, Vec<LineComment>), String> {
+    pub async fn line_comments(&self, full: &str, number: u32) -> Result<LineComments, String> {
         let detail = self.get(&format!("/repos/{full}/pulls/{number}")).await?;
         let head = detail.get("head").map(|h| s(h, "sha")).unwrap_or_default();
-        let list = self.get(&format!("/repos/{full}/pulls/{number}/comments?per_page=100")).await?;
-        Ok((head, list.as_array().into_iter().flatten().filter_map(parse_line_comment).collect()))
+        let (list, resp) = self.get_resp(&format!("/repos/{full}/pulls/{number}/comments?per_page=100")).await?;
+        Ok(parse_line_comments(head, &list, resp.link.as_deref(), &self.api_base))
     }
 
     /// Writes a comment on lines of a pull request's diff.
@@ -1170,13 +1247,22 @@ pub const AT_ONCE: usize = 4;
 ///          └─ pull requests ── waiting for your review (needs your account)
 /// ```
 pub async fn load_all_with(cfg: &Config, early: impl Fn(Data) + net::MaybeSend + net::MaybeSync) -> Result<Data, LoadError> {
+    load_all_reporting(cfg, |_: String| {}, early).await
+}
+
+/// [`load_all_with`], also calling `known` with the account's login as soon as GitHub has
+/// said it (the first request), before the repositories are read.
+pub async fn load_all_reporting(cfg: &Config, known: impl Fn(String) + net::MaybeSend + net::MaybeSync, early: impl Fn(Data) + net::MaybeSend + net::MaybeSync) -> Result<Data, LoadError> {
     let gh = Gh::new(cfg).limited(AT_ONCE);
     let gh = &gh;
     // With a user name and a token: whether the token is that user's, next to the profile.
     let ask_viewer = gh.t.has_token() && cfg.user.is_some();
-    let (profile, viewer) = net::join(gh.profile(cfg), async move { if ask_viewer { gh.viewer_login().await } else { None } }).await;
-    let profile = match profile {
-        Ok(p) => p,
+    let (read, viewer) = net::join(gh.profile(cfg), async move { if ask_viewer { gh.viewer_login().await } else { None } }).await;
+    let profile = match read {
+        Ok(p) => {
+            known(p.login.clone());
+            p
+        }
         Err(e) => return Err(LoadError::new(e, gh.retry_after())),
     };
     let own = gh.t.has_token() && match &cfg.user {
@@ -1511,7 +1597,27 @@ pub async fn mark_read(cfg: &Config, id: &str) -> Result<(), String> {
     Gh::new(cfg).mark_read(id).await
 }
 
-pub async fn load_line_comments(cfg: &Config, full: &str, number: u32) -> Result<(String, Vec<LineComment>), String> {
+/// A pull request's line comments as read: the commit its diff shows, the comments, and
+/// whether GitHub has more than the first page.
+#[derive(Clone, Debug, Default)]
+pub struct LineComments {
+    pub head: String,
+    pub comments: Vec<LineComment>,
+    pub more: bool,
+}
+
+/// GitHub's page of line comments: more when its `Link` header has a next page, or (without
+/// one) when the page is full.
+pub fn parse_line_comments(head: String, list: &Value, link: Option<&str>, api_base: &str) -> LineComments {
+    let items = list.as_array().map(Vec::as_slice).unwrap_or_default();
+    let more = match link {
+        Some(l) => next_page_path(Some(l), api_base).is_some(),
+        None => items.len() >= 100,
+    };
+    LineComments { head, comments: items.iter().filter_map(parse_line_comment).collect(), more }
+}
+
+pub async fn load_line_comments(cfg: &Config, full: &str, number: u32) -> Result<LineComments, String> {
     Gh::new(cfg).line_comments(full, number).await
 }
 
@@ -1595,11 +1701,32 @@ pub async fn load_job_log(cfg: &Config, full: &str, job_id: u64) -> Result<JobLo
     Gh::new(cfg).job_log(full, job_id).await
 }
 
-/// What GitHub created: its number and page.
-#[derive(Clone, Debug)]
+/// What GitHub created: its number and page, and what its row shows until the lists reload.
+/// Each write carries its own, so two forms sent at once each get their own row.
+#[derive(Clone, Debug, Default)]
 pub struct Created {
     pub number: u32,
     pub url: String,
+    pub title: String,
+    /// A draft pull request.
+    pub draft: bool,
+    /// The labels and assignees GitHub set; `None` when its answer doesn't say (the form's
+    /// picks are used then).
+    pub labels: Option<Vec<(String, f32)>>,
+    pub assignees: Option<Vec<String>>,
+}
+
+/// GitHub's answer to creating an issue or a pull request; what was sent where it doesn't say.
+pub fn parse_created(v: &Value, title: &str, draft: bool) -> Created {
+    let answered = s(v, "title");
+    Created {
+        number: n(v, "number"),
+        url: s(v, "html_url"),
+        title: if answered.is_empty() { title.to_owned() } else { answered },
+        draft: v.get("draft").and_then(Value::as_bool).unwrap_or(draft),
+        labels: v.get("labels").and_then(Value::as_array).map(|_| labels_of(v)),
+        assignees: v.get("assignees").and_then(Value::as_array).map(|_| logins_of(v, "assignees")),
+    }
 }
 
 /// A pull request to open.
@@ -1778,6 +1905,47 @@ mod tests {
         assert_eq!((c.path.as_str(), c.line, c.side, c.author.as_str()), ("src/a.rs", 7, rune_kit::diff::Side::Old, "bob"));
         let gone = serde_json::json!({"path": "src/a.rs", "line": null, "side": "RIGHT", "user": null, "body": ""});
         assert!(super::parse_line_comment(&gone).is_none(), "an outdated comment isn't on a line any more");
+    }
+
+    /// The `Link` header is read as links, not split on commas: an address or a quoted value
+    /// may hold one, and `rel` may name several relations.
+    #[test]
+    fn the_link_header_is_read_as_links() {
+        use super::{next_page_path, parse_link_header};
+        let api = "https://api.github.com";
+        let github = r#"<https://api.github.com/search/issues?q=a&page=2>; rel="next", <https://api.github.com/search/issues?q=a&page=5>; rel="last""#;
+        assert_eq!(next_page_path(Some(github), api).as_deref(), Some("/search/issues?q=a&page=2"));
+        // A comma (and a semicolon) in the address, unencoded.
+        let commas = r#"<https://api.github.com/search/issues?q=label:a,b;c&page=1>; rel="prev", <https://api.github.com/search/issues?q=label:a,b;c&page=3>; rel="next""#;
+        assert_eq!(next_page_path(Some(commas), api).as_deref(), Some("/search/issues?q=label:a,b;c&page=3"));
+        // A quoted parameter with a comma, `rel` with two relations, other spacing and case.
+        let odd = r#"<https://api.github.com/x?page=1>;title="a, b";rel="first",<https://api.github.com/x?page=2> ; REL = "prev NEXT""#;
+        assert_eq!(next_page_path(Some(odd), api).as_deref(), Some("/x?page=2"));
+        assert_eq!(parse_link_header(odd)[0].1, vec![("title".to_owned(), "a, b".to_owned()), ("rel".to_owned(), "first".to_owned())]);
+        // Unquoted, single-quoted, a relative address, GitHub Enterprise's /api/v3.
+        assert_eq!(next_page_path(Some("</repos/o/r/branches?page=2>; rel=next"), api).as_deref(), Some("/repos/o/r/branches?page=2"));
+        assert_eq!(next_page_path(Some("<https://ghe.example.com/api/v3/user/repos?page=2>; rel='next'"), "https://ghe.example.com/api/v3").as_deref(), Some("/user/repos?page=2"));
+        // No next page, nothing, or something that isn't a link.
+        assert_eq!(next_page_path(Some(r#"<https://api.github.com/x?page=1>; rel="prev""#), api), None);
+        assert_eq!(next_page_path(None, api), None);
+        assert_eq!(next_page_path(Some("garbage, more; rel=next"), api), None);
+        assert_eq!(next_page_path(Some(r#"junk, <https://api.github.com/x?page=4>; rel="next""#), api).as_deref(), Some("/x?page=4"));
+    }
+
+    #[test]
+    fn check_runs_and_line_comments_say_when_github_has_more() {
+        let v = serde_json::json!({"total_count": 130, "check_runs": [{"name": "a", "status": "completed", "conclusion": "success"}]});
+        assert_eq!((super::check_runs_total(&v), super::parse_check_runs(&v).len()), (130, 1));
+        assert_eq!(super::check_runs_total(&serde_json::json!({})), 0);
+        let one = serde_json::json!([{"path": "a", "line": 1, "side": "RIGHT", "user": {"login": "x"}, "body": "b"}]);
+        let full: Vec<serde_json::Value> = (0..100).map(|_| one[0].clone()).collect();
+        let api = "https://api.github.com";
+        let next = r#"<https://api.github.com/repos/o/r/pulls/1/comments?per_page=100&page=2>; rel="next""#;
+        assert!(super::parse_line_comments("h".into(), &one, Some(next), api).more, "a next page");
+        assert!(!super::parse_line_comments("h".into(), &one, None, api).more);
+        assert!(super::parse_line_comments("h".into(), &serde_json::Value::Array(full.clone()), None, api).more, "a full page and no Link header");
+        let last = r#"<https://api.github.com/repos/o/r/pulls/1/comments?per_page=100&page=1>; rel="prev""#;
+        assert!(!super::parse_line_comments("h".into(), &serde_json::Value::Array(full), Some(last), api).more, "the last page");
     }
 
     #[test]
