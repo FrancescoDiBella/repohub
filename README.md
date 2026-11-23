@@ -72,7 +72,7 @@ What this means for the token:
 - The token never leaves the container. The page never receives it: `config.json` only says
   whether a token is set.
 - The port is published on this computer only (`127.0.0.1:8080`).
-- The server forwards only the exact endpoints RepoHub uses (`allowed()` in `server/src/main.rs`):
+- The server forwards only the exact endpoints RepoHub uses (`allowed()` in `server/src/allowlist.rs`):
   reads, starring, creating issues, branches and pull requests, comments and reviews, closing and
   reopening issues and pull requests, merging pull requests, and marking notifications as read.
   Nothing that deletes or rewrites repositories. Paths are checked before they're decoded: no

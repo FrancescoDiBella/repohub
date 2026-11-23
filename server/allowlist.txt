@@ -2,7 +2,7 @@
 # `allow|deny METHOD /path` with the path as the app sends it (encoded, query left out).
 #
 # Three things read this list, so the three allowlists stay equal:
-# - repohub-server's proxy, `allowed()` in server/src/main.rs (test: server/src/allowlist_cases.rs);
+# - repohub-server's proxy, `allowed()` in server/src/allowlist.rs (test: server/src/allowlist_cases.rs);
 # - the Android app's GitHubPaths.java (BackendTest.sharedAllowlist);
 # - the app itself (src/allowlist_tests.rs): every request it makes must be an `allow` line.
 # A request added to the app, or a change to one allowlist, that isn't made everywhere fails a
