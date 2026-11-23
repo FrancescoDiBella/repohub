@@ -487,7 +487,9 @@ mod tests {
         let rows: Vec<Row> = rt.state.commits.history.as_ref().and_then(|h| h.load.ready()).cloned().expect("the sample history is here");
         assert_eq!(rows.len(), crate::commits::PAGE, "a page at a time");
         assert!(rt.find("commits-load-more").is_some(), "the list says GitHub has more");
-        assert!(texts(&rt).iter().any(|t| t == "Today"), "grouped by day");
+        // The newest commit's day: "Today", or "Yesterday" in the first hours after midnight.
+        let day = crate::commits::day_label(rows[0].at, rt.state.now, &crate::commits::local_clock);
+        assert!(texts(&rt).iter().any(|t| *t == day), "grouped by day");
         // The filter narrows what's loaded, as you type.
         rt.update(|s, _| s.commits.filter = rune::TextEdit::new("poncho"));
         rt.frame(0.1);
