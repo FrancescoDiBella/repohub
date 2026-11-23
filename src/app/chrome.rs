@@ -267,10 +267,19 @@ pub(crate) fn view(s: &App, cx: &mut Cx<App>) -> El {
         .child(backdrop)
         // The scroll bar shows where you are on a long page (as the system's "Show scroll bars" says).
         .child(rune_kit::ScrollBar::scroll_bar(col().key("page").w_full().h_full().shrink().scroll(ScrollSpec { stick_bottom: false }).child(page), &k));
+    // On a phone the question a page asks (`confirm`) is a sheet over the page; it's left in
+    // `sheet` while the page is drawn.
+    let sheet = s.sheet.borrow_mut().take();
     // "Discard what you typed?" floats over the page, at the bottom, until it's answered (in
-    // place of the toast).
+    // place of the toast); on a phone it's the sheet.
     if let Some(ask) = discard::question(s, &k) {
-        main = main.child(row().pin(Some(16.0), None, Some(16.0), Some(20.0)).center().child(ask));
+        if s.compact {
+            main = main.child(confirm::sheet(&k, ask, std::rc::Rc::new(|s: &mut App| s.answer_discard(false))));
+        } else {
+            main = main.child(row().pin(Some(16.0), None, Some(16.0), Some(20.0)).center().child(ask.max_w(560.0)));
+        }
+    } else if let Some(sheet) = sheet {
+        main = main.child(sheet);
     } else if let Some(toast) = &s.toast {
     // The toast floats over the page, at the bottom; it leaves by itself or with its button.
         let (icon, tint) = match toast.kind {

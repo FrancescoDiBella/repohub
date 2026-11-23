@@ -20,6 +20,7 @@
 | `src/tests/` | Tests that build the whole app and drive it headless, one module per file (`fix58_tests`, …; `load_gen_tests` has `TempDataDir`); `every_page` draws every page and section on a computer and a phone; `followups_*` the follow-ups of the bug hunt (#138) |
 | `src/replay.rs` | What a finished write changed in the lists (`Change`), applied again, exactly, on what a load that ran meanwhile brings |
 | `src/discard.rs` | "Discard what you typed?": which drafts hold typed text (`state::Draft`), `ask_first` before an action that throws them away, the question floating over the page |
+| `src/confirm.rs` | Asking first before what can't be undone: `Confirm` (one question: inline on a computer, a sheet on a phone), `App::ask` and `App::asking`, the look every question shares (`card`, also the discard question's) |
 | `src/pages.rs`, `src/lists.rs` | Pages: overview, repositories, repository detail, pull requests, issues, Actions, settings |
 | `src/mobile.rs` | The phone layout (top bar and bottom tab bar) used below `mobile::BREAKPOINT`; pages read `App::compact` |
 | `src/ui.rs`, `src/icons.rs` | Small building blocks and the icon set |
@@ -110,6 +111,9 @@ Add `tab notes` (a section's name) after `page repo`, and `REPOHUB_TRACE=1` to p
 With an account and `REPOHUB_BLOCKING=1`, the conversation and the diff are read before the first frame.
 `discard form` (after `page repo tab issues`) types a title in the New issue form and asks
 "Discard what you typed?"; `discard reply` (after `thread 14`) does the same with a comment.
+`ask merge` (after `page pulls`) asks to merge the first open pull request; `ask sign-out` (or
+`push-default`, `pull-over-changes`, `abort-merge`, `clear-saved-data`, `delete-note-Name`,
+`remove-plugin-id`) asks that question, on its page.
 `tab commits` reads the history before the first frame; `commit 0123abc` (or `commit 2`, the
 second in the list) opens a commit, and `compare main...feature/x` compares two branches.
 `tab releases` reads the releases before the first frame; `release new` opens the New release
@@ -339,9 +343,16 @@ works too (without its first-frame time). Times include the headless renderer's 
 - A finished write changes the lists through `App::changed` with a `replay::Change`, so a load
   running meanwhile doesn't undo it: make a new `Change` exact (applying it to lists that
   already show it changes nothing).
-- An action that changes something on GitHub or deletes local data either asks first (merging,
-  publishing a release, removing a plugin, deleting a drawing) or offers **Undo** in its toast (`notify_undo`, with a
-  `state::Undo` that knows how to put it back: closing an issue, deleting a theme).
+- An action that changes something on GitHub or deletes local data either asks first or offers
+  **Undo** in its toast. It asks with `confirm::Confirm` (one look: inline where the button was on
+  a computer, a sheet on a phone; Esc and the back button answer no) when it can't be put back:
+  merging, publishing a release, deleting a drawing, removing a plugin, aborting a merge, pulling
+  over uncommitted changes, pushing to the default branch, signing out, clearing the saved data.
+  It offers **Undo** (`notify_undo`, with a `state::Undo` that knows how to put it back) when it
+  can: closing an issue or a pull request, deleting a theme, unpinning, removing a coding
+  assistant. A form you fill in and send (a new issue, a comment, a triage change) is its own
+  question. Re-running a workflow and marking a notification as read do neither, as on GitHub
+  (GitHub has no way to mark one unread again).
 - The Android app forwards the same writes: add a new one to `android/.../GitHubPaths.java` too,
   with its test.
 - The repository lists, the pinned set and the palette's entries are cached between frames and

@@ -9,7 +9,7 @@ use rune::{AppHandle, Color, AppSpec, Cx, El, KeyEvent, ScrollSpec, TextEdit, Tx
 use rune_kit::shell::{self, PaneState, Sidebar, SidebarRow, SidebarSection, SidebarToggle, SplitView, Toolbar};
 use rune_kit::{ControlSize, IconButton, IconButtonVariant, Kit, PaletteSeed};
 
-use crate::{actions, board, cache, cache_page, claude, clones_shim, commits, diffs, discard, filters, github, harness, icons, inbox, lists, local, mobile, model, net, notes, notes_page, pages, palette, plugins, prefs, releases, replay, review, runs_page, state, sync_io, terminal, themes, thread, thread_page, tray, triage, ui, update};
+use crate::{actions, board, cache, cache_page, claude, clones_shim, commits, confirm, diffs, discard, filters, github, harness, icons, inbox, lists, local, mobile, model, net, notes, notes_page, pages, palette, plugins, prefs, releases, replay, review, runs_page, state, sync_io, terminal, themes, thread, thread_page, tray, triage, ui, update};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::config;
 use crate::config::Config;
@@ -95,8 +95,6 @@ pub struct App {
     pub(crate) plugin_installing: bool,
     /// What a plugin asks to do outside the app, waiting for the user's answer.
     pub(crate) plugin_ask: Option<plugins::Request>,
-    /// The plugin whose Remove was pressed once (press again to remove it).
-    pub(crate) plugin_confirm: Option<String>,
     /// What the plugins' context was last built from (`plugins::context_key`).
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     plugin_ctx_key: u64,
@@ -166,8 +164,11 @@ pub struct App {
     pub(crate) branch_filter: TextEdit,
     /// The open form (new issue, branch or pull request).
     pub(crate) form: Option<actions::Form>,
-    /// The pull request whose Merge is waiting for a yes (`owner/repo#12`).
-    pub(crate) confirm_merge: Option<String>,
+    /// The question waiting for a yes (see `confirm`): its key, e.g. `ask-merge-owner/repo#12`.
+    pub(crate) asking: Option<String>,
+    /// On a phone, the open question's sheet, left by the page that asks it for `view` to draw
+    /// over the page (see `confirm::Confirm::show`).
+    pub(crate) sheet: std::cell::RefCell<Option<El>>,
     /// Your unread notifications; `None` until they're first asked for.
     pub(crate) inbox: Option<Load<Vec<inbox::Notification>>>,
     /// The notifications being marked as read.
@@ -224,7 +225,6 @@ pub struct App {
     line_epoch: u64,
     pub(crate) notes: HashMap<(String, String), notes::NotesView>,
     pub(crate) note_name: TextEdit,
-    pub(crate) confirm_delete: Option<String>,
     /// Generation of the open board load request; incremented on board open so late load results
     /// from an earlier board or earlier load cannot overwrite the open board.
     pub(crate) board_load_gen: u64,
@@ -385,7 +385,6 @@ pub(crate) fn init() -> App {
         plugin_error: None,
         plugin_installing: false,
         plugin_ask: None,
-        plugin_confirm: None,
         plugin_ctx_key: 0,
         shown_dark: std::cell::Cell::new(false),
         assist: harness::Assistants::load(),
@@ -427,7 +426,8 @@ pub(crate) fn init() -> App {
         picker: None,
         branch_filter: TextEdit::new(""),
         form: None,
-        confirm_merge: None,
+        asking: None,
+        sheet: std::cell::RefCell::new(None),
         settings_section: state::SettingsSection::Account,
         connection_details: false,
         pull_review: None,
@@ -455,7 +455,6 @@ pub(crate) fn init() -> App {
         line_epoch: 0,
         notes: HashMap::new(),
         note_name: TextEdit::new(""),
-        confirm_delete: None,
         board_load_gen: 0,
         saving_notes: HashMap::new(),
         #[cfg(test)]
@@ -619,6 +618,9 @@ pub(crate) fn init() -> App {
     // `-- discard form` (or `reply`) types into the New issue form (or the conversation's
     // comment box) and asks "Discard what you typed?" (headless stills).
     s.discard_still(arg("discard"));
+    // `-- ask merge` (or `sign-out`, `push-default`, …) asks that question before something that
+    // can't be undone (headless stills).
+    confirm::still(&mut s, arg("ask"));
     // `-- board Name` opens a drawing of that section (for headless stills); `zoom 2` zooms it.
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(name) = arg("board")

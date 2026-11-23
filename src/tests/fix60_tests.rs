@@ -428,7 +428,7 @@ fn pull_panel_merge_requires_confirmation() {
     // sample PR 14 is open on francescodibella.github.io
     let pr = s.data.pulls.iter().find(|p| p.number == 14).expect("sample PR 14 exists");
     let repo = crate::changes_page::pull_repo(&pr.url).expect("repo parsed");
-    let key = crate::actions::busy_key(&repo, pr.number);
+    let key = crate::actions::merge_ask(&repo, pr.number);
 
     s.page = Page::Pulls;
     s.open_pull_diff(repo.clone(), pr.number);
@@ -449,7 +449,7 @@ fn pull_panel_merge_requires_confirmation() {
     rt.frame(0.1);
 
     // Confirmation must now be displayed
-    assert_eq!(rt.state.confirm_merge.as_deref(), Some(key.as_str()));
+    assert_eq!(rt.state.asking.as_deref(), Some(key.as_str()));
     assert!(rt.find("pull-merge-confirm").is_some(), "confirmation merge button shown");
     assert!(rt.find("pull-merge-cancel").is_some(), "cancel button shown");
     assert!(rt.find("pull-merge").is_none(), "initial merge button replaced by confirm");
@@ -461,7 +461,7 @@ fn pull_panel_merge_requires_confirmation() {
     rt.pointer_up(cx, cy);
     rt.frame(0.1);
 
-    assert_eq!(rt.state.confirm_merge, None);
+    assert_eq!(rt.state.asking, None);
     assert!(rt.find("pull-merge").is_some(), "initial merge button restored");
     assert!(rt.find("pull-merge-confirm").is_none());
 }

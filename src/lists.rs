@@ -488,8 +488,9 @@ fn account_panel(s: &App, k: &Kit) -> El {
             .on_press(|s: &mut App| s.save_account(false)).build(k).key("acct-save"));
     if account == Account::SignedIn {
         buttons = buttons.child(Button::new("Sign out").variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
-            .on_press(|s: &mut App| s.save_account(true)).build(k).key("acct-sign-out"));
+            .on_press(|s: &mut App| s.ask("ask-sign-out")).build(k).key("acct-sign-out"));
     }
+    let buttons = col().w_full().gap(12.0).child(buttons).children(crate::confirm::sign_out_question(s, k));
     let mut body = col().w_full().padding(16.0).gap(12.0)
         .child(row().w_full().gap(12.0).center_y().flex_wrap().child(label("User name")).child(user))
         .child(row().w_full().gap(12.0).center_y().flex_wrap().child(label("Token")).child(token))

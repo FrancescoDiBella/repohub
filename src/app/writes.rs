@@ -41,6 +41,14 @@ impl App {
                 self.write(&repo, github::Write::ReopenIssue(number));
             }
             state::Undo::ReopenPull { repo, number } => self.write(&repo, github::Write::SetPullOpen { number, open: true }),
+            state::Undo::Pin { repo, at } => self.repin(&repo, at),
+            state::Undo::Harness { harness, at } => {
+                let name = harness.name.clone();
+                let at = at.min(self.assist.harnesses.len());
+                self.assist.harnesses.insert(at, harness);
+                self.assist.save();
+                self.notify(format!("Restored {name}"));
+            }
         }
     }
 
@@ -173,7 +181,6 @@ impl App {
         if !self.busy.insert(key.clone()) {
             return;
         }
-        self.confirm_merge = None;
         let full_cb = full.clone();
         let Some(h) = self.handle.clone() else { return };
         let cfg = self.cfg.clone();

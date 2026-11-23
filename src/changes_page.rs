@@ -7,7 +7,8 @@ use rune_kit::{Button, ButtonVariant, ControlSize, Kit, SegmentedControl, TextIn
 use crate::diffs::{self, DiffOf};
 use crate::state::Load;
 use crate::ui::{self, panel, panel_head, rule};
-use crate::{App, github, icons};
+use crate::confirm::{Confirm, Tone};
+use crate::{App, icons};
 
 /// The diff's height: it scrolls inside, so a long diff never makes the page long.
 const DIFF_H: f32 = 620.0;
@@ -92,14 +93,17 @@ pub fn changes_tab(s: &App, k: &Kit, i: usize) -> El {
     if let Some(job) = s.git_job {
         status = status.child(text(job).font(k.ty.small).color(k.c.text_muted));
     }
+    // Pulling over uncommitted changes and pushing to the default branch ask first.
+    let dirty = c.is_some_and(|c| !c.is_empty());
+    let on_default = c.is_some_and(|c| s.data.repos.get(i).is_some_and(|r| !c.branch.is_empty() && c.branch == r.branch));
     status = status
         .child(Button::new("Refresh").icon(&icons::REFRESH).variant(ButtonVariant::Ghost).control_size(ControlSize::Small).disabled(busy)
             .on_press(move |s: &mut App| s.load_changes(i)).build(k).key("changes-refresh"))
         .child(Button::new("Pull").variant(ButtonVariant::Ghost).control_size(ControlSize::Small).disabled(busy || c.is_none_or(|c| c.upstream.is_none()))
             .help("git pull --ff-only: brings in the upstream's commits, never makes a merge")
-            .on_press(move |s: &mut App| s.git_run(i, "Pulling…", "Pulled", |root| crate::local::pull(root).map(|_| String::new()))).build(k).key("changes-pull"))
+            .on_press(move |s: &mut App| if dirty { s.ask(ASK_PULL) } else { pull(s, i) }).build(k).key("changes-pull"))
         .child(Button::new("Push").icon(&icons::PUSH).control_size(ControlSize::Small).disabled(busy || c.is_none_or(|c| c.ahead == 0 && c.upstream.is_some()))
-            .on_press(move |s: &mut App| s.git_run(i, "Pushing…", "Pushed", |root| crate::local::push(root).map(|_| String::new()))).build(k).key("changes-push"))
+            .on_press(move |s: &mut App| if on_default { s.ask(ASK_PUSH) } else { push(s, i) }).build(k).key("changes-push"))
         .child(Button::new("New pull request").icon(&icons::PULL).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
             .on_press(move |s: &mut App| s.open_form(i, crate::state::Compose::Pull)).build(k).key("changes-new-pull"));
     let nothing = c.is_none_or(|c| c.is_empty());
@@ -111,12 +115,16 @@ pub fn changes_tab(s: &App, k: &Kit, i: usize) -> El {
             .child(Button::new("Commit").control_size(ControlSize::Small).disabled(busy || nothing)
                 .on_press(move |s: &mut App| s.commit(i, false)).build(k).key("commit"))
             .child(Button::new("Commit and push").variant(ButtonVariant::Submit).control_size(ControlSize::Small).disabled(busy || nothing)
-                .on_press(move |s: &mut App| s.commit(i, true)).build(k).key("commit-push")))
+                .on_press(move |s: &mut App| if on_default { s.ask(ASK_COMMIT_PUSH) } else { s.commit(i, true) }).build(k).key("commit-push")))
         .child(text("Commits every change below (git add -A), new files included.").font(k.ty.text_small).color(k.c.text_muted).wrap());
     if let Some(e) = &s.git_error {
         commit = commit.child(text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap());
     }
-    let mut top = panel(k).key("changes-status").child(status).child(rule(k));
+    let mut top = panel(k).key("changes-status").child(status);
+    if let Some(q) = git_question(s, k, i) {
+        top = top.child(col().w_full().px(16.0).pb(12.0).child(q));
+    }
+    let mut top = top.child(rule(k));
     if let Some(m) = merge_section(s, k, i) {
         top = top.child(m).child(rule(k));
     }
@@ -135,6 +143,47 @@ pub fn changes_tab(s: &App, k: &Kit, i: usize) -> El {
         .child(rule(k))
         .child(diff_body(s, k, i, empty));
     col().w_full().gap(16.0).child(top).child(diff)
+}
+
+const ASK_ABORT: &str = "ask-abort-merge";
+const ASK_PULL: &str = "ask-pull-over-changes";
+const ASK_PUSH: &str = "ask-push-default";
+const ASK_COMMIT_PUSH: &str = "ask-commit-push-default";
+
+fn pull(s: &mut App, i: usize) {
+    s.git_run(i, "Pulling…", "Pulled", |root| crate::local::pull(root).map(|_| String::new()));
+}
+
+fn push(s: &mut App, i: usize) {
+    s.git_run(i, "Pushing…", "Pushed", |root| crate::local::push(root).map(|_| String::new()));
+}
+
+/// The Changes tab's questions (only one is open at a time): aborting a merge, pulling over
+/// uncommitted changes, pushing (or committing and pushing) straight to the default branch.
+fn git_question(s: &App, k: &Kit, i: usize) -> Option<El> {
+    let c = s.changes.as_ref()?;
+    let branch = c.branch.clone();
+    let upstream = c.upstream.clone().unwrap_or_else(|| format!("origin/{branch}"));
+    let commits = match c.ahead {
+        0 => "The branch".to_owned(),
+        1 => "Your commit".to_owned(),
+        n => format!("Your {n} commits"),
+    };
+    let asks = [
+        Confirm::new(ASK_ABORT, &icons::CROSS, "Abort the merge?")
+            .detail("Git puts the files back as they were before it (git merge --abort): conflicts you resolved and changes made since it began are lost.")
+            .yes("Abort merge", Tone::Danger, move |s: &mut App| s.git_run(i, "Aborting the merge…", "Merge aborted", |root| crate::local::abort_merge(root).map(|_| String::new()))),
+        Confirm::new(ASK_PULL, &icons::REFRESH, "Pull with uncommitted changes?")
+            .detail(format!("{upstream}'s commits come in under your changes (git pull --ff-only). If they touch the same files, git stops and changes nothing."))
+            .yes("Pull", Tone::Go, move |s: &mut App| pull(s, i)),
+        Confirm::new(ASK_PUSH, &icons::PUSH, format!("Push to {branch}, the default branch?"))
+            .detail(format!("{commits} goes to {branch} on GitHub straight away, without a pull request. A push can't be undone from RepoHub."))
+            .yes("Push", Tone::Go, move |s: &mut App| push(s, i)),
+        Confirm::new(ASK_COMMIT_PUSH, &icons::PUSH, format!("Commit and push to {branch}, the default branch?"))
+            .detail(format!("The commit goes to {branch} on GitHub straight away, without a pull request. A push can't be undone from RepoHub."))
+            .yes("Commit and push", Tone::Go, move |s: &mut App| s.commit(i, true)),
+    ];
+    asks.into_iter().find_map(|q| q.show(s, k))
 }
 
 /// Merging a local branch into the checked-out one: pick a branch, preview, merge; during a
@@ -157,7 +206,7 @@ fn merge_section(s: &App, k: &Kit, i: usize) -> Option<El> {
             .children(files)
             .child(row().gap(8.0)
                 .child(Button::new("Abort merge").variant(ButtonVariant::Danger).control_size(ControlSize::Small).disabled(busy)
-                    .on_press(move |s: &mut App| s.git_run(i, "Aborting the merge…", "Merge aborted", |root| crate::local::abort_merge(root).map(|_| String::new()))).build(k).key("merge-abort"))
+                    .on_press(|s: &mut App| s.ask(ASK_ABORT)).build(k).key("merge-abort"))
                 .child(Button::new("Open Terminal").icon(&icons::TERMINAL).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
                     .on_press(move |s: &mut App| s.set_tab(i, crate::state::RepoTab::Terminal)).build(k).key("merge-terminal"))));
     }
@@ -171,7 +220,7 @@ fn merge_section(s: &App, k: &Kit, i: usize) -> Option<El> {
     let chips = c.branches.iter().take(12).map(|b| {
         let on = picked.as_deref() == Some(b.as_str());
         let name = b.clone();
-        Button::new(b.clone()).icon(&icons::BRANCH).variant(if on { ButtonVariant::Neutral } else { ButtonVariant::Ghost }).control_size(ControlSize::Small)
+        Button::new(b.clone()).icon(&icons::BRANCH).variant(if on { ButtonVariant::Contrast } else { ButtonVariant::Ghost }).control_size(ControlSize::Small)
             .help(format!("Preview merging {b} into {}", c.branch))
             .on_press(move |s: &mut App| s.preview_merge(i, name.clone())).build(k).key(format!("merge-pick-{b}"))
     });
@@ -258,29 +307,22 @@ pub fn pull_panel_for(s: &App, k: &Kit, repo_filter: Option<&str>) -> Option<El>
     let files_url = format!("{url}/files");
     let key = crate::actions::busy_key(&full, number);
     let busy = s.busy.contains(&key);
-    let asking = s.confirm_merge.as_deref() == Some(key.as_str());
     let mut tools = row().gap(8.0).center_y().flex_wrap().child(pull_diff_head(s, k));
-    if open {
-        const METHODS: [&str; 3] = ["merge", "squash", "rebase"];
-        let method = METHODS[s.merge_method.min(2)];
-        let repo = full.clone();
-        if asking && !busy {
-            tools = tools
-                .child(text("Confirm merge?").font(k.ty.small_medium).color(k.c.text_base))
-                .child(Button::new("Merge").variant(ButtonVariant::Submit).control_size(ControlSize::Small)
-                    .on_press(move |s: &mut App| s.write(&repo, github::Write::Merge { number, method })).build(k).key("pull-merge-confirm"))
-                .child(Button::new("Cancel").variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
-                    .on_press(|s: &mut App| s.confirm_merge = None).build(k).key("pull-merge-cancel"));
-        } else {
-            let k2 = key.clone();
-            tools = tools
-                .child(SegmentedControl::new(&["Merge", "Squash", "Rebase"], Some(s.merge_method.min(2))).label("Merge method").fit()
-                    .on_pick(|s: &mut App, i, _| s.merge_method = i).build(k).key("merge-method"))
-                .child(Button::new(if busy { "Merging…" } else { "Merge" }).icon(&icons::MERGE).variant(ButtonVariant::Submit).control_size(ControlSize::Small)
-                    .disabled(busy || crate::actions::blocked(s).is_some())
-                    .help(match method { "squash" => "One commit with all the changes", "rebase" => "The commits replayed on the base, no merge commit", _ => "A merge commit" })
-                    .on_press(move |s: &mut App| s.confirm_merge = Some(k2.clone())).build(k).key("pull-merge"));
-        }
+    // Merge asks first (the same question as the row's: how, then Merge); on a computer it
+    // goes under the panel's head, in place of the button.
+    let title_text = pull.map(|p| p.title.clone()).unwrap_or_default();
+    let question = if open && !busy {
+        crate::actions::merge_question(s, k, &full, number, &title_text).keys("pull-merge-confirm", "pull-merge-cancel").show(s, k)
+    } else {
+        None
+    };
+    if open && question.is_none() {
+        let ask = crate::actions::merge_ask(&full, number);
+        tools = tools
+            .child(Button::new(if busy { "Merging…" } else { "Merge" }).icon(&icons::MERGE).variant(ButtonVariant::Submit).control_size(ControlSize::Small)
+                .disabled(busy || crate::actions::blocked(s).is_some())
+                .help("Asks how to merge (a merge commit, squash or rebase), then merges")
+                .on_press(move |s: &mut App| s.ask(ask.clone())).build(k).key("pull-merge"));
     }
     tools = tools
         .child(Button::new("Open on GitHub").icon(&icons::EXTERNAL).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
@@ -296,8 +338,11 @@ pub fn pull_panel_for(s: &App, k: &Kit, repo_filter: Option<&str>) -> Option<El>
     let mut out = panel(k).key("pull-diff").clip_rounded(k.radius.lg)
         .child(row().w_full().px(16.0).py(10.0).gap(12.0).center_y().flex_wrap()
             .child(text(title).font(k.ty.ui_medium).color(k.c.text_base).grow(1.0).shrink().min_w(200.0).max_lines(2))
-            .child(tools))
-        .child(rule(k));
+            .child(tools));
+    if let Some(q) = question {
+        out = out.child(col().w_full().px(16.0).pb(12.0).child(q));
+    }
+    let mut out = out.child(rule(k));
     if let Some(m) = more {
         out = out.child(m).child(rule(k));
     }

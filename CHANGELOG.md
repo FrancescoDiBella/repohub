@@ -10,6 +10,10 @@ The sections are **Added**, **Changed** and **Fixed**.
 ## Unreleased
 
 ### Added
+- RepoHub asks before aborting a merge, pulling over uncommitted changes, pushing (or committing
+  and pushing) straight to the repository's default branch, signing out and clearing the saved
+  data.
+- **Undo** in the toast after unpinning a repository or removing a coding assistant.
 - Esc, **Cancel**, opening another form or leaving a conversation asks "Discard what you typed?"
   (**Discard** or **Keep editing**) when a New issue, branch or pull request form, the release
   form, an edited title or description, or a comment you're writing holds text not sent yet. A
@@ -19,6 +23,11 @@ The sections are **Added**, **Changed** and **Fixed**.
   100 read, with a link to the rest.
 
 ### Changed
+- Every question asked before something that can't be undone looks and works the same: merging
+  a pull request (from its row or its diff, where you now pick a merge commit, squash or rebase
+  in the question), publishing a release, deleting a drawing, removing a plugin. On a computer
+  it takes the button's place; on a phone it's a sheet at the bottom of the screen, like
+  "Discard what you typed?". **Cancel**, Esc or the back button answer no.
 - With only a token and no user name, the lists of last time show once GitHub has said whose
   the token is (one request), so a token changed outside the app never shows the previous
   account's lists.

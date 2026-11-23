@@ -81,7 +81,7 @@ impl App {
             return;
         }
         self.close_pull_diff();
-        self.confirm_merge = None;
+        self.asking = None;
         self.open_run = None;
         self.thread_epoch = self.thread_epoch.wrapping_add(1);
         // The one being left is kept as it is now (with what was written in it).
@@ -224,7 +224,7 @@ impl App {
             return;
         }
         self.close_pull_diff();
-        self.confirm_merge = None;
+        self.asking = None;
         self.thread = None;
         self.run_epoch = self.run_epoch.wrapping_add(1);
         let repo = runs_page::full_repo_of(self, &r.repo);
@@ -398,8 +398,8 @@ impl App {
             return;
         }
         let key = (full.clone(), number);
-        // A merge confirmation belongs to the diff it was asked from.
-        self.confirm_merge = None;
+        // A merge question belongs to the diff it was asked from.
+        self.asking = None;
         self.pull_diff_of = Some(key.clone());
         self.pull_diff_load = Some(Load::Loading);
         self.pull_diff.set_files(Vec::new());
@@ -423,7 +423,7 @@ impl App {
 
     pub(crate) fn close_pull_diff(&mut self) {
         if self.pull_diff_of.is_some() {
-            self.confirm_merge = None;
+            self.asking = None;
         }
         self.pull_diff_of = None;
         self.pull_diff_load = None;

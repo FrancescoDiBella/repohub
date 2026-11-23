@@ -20,6 +20,7 @@ mod clones_shim;
 mod commits;
 mod commits_page;
 mod config;
+mod confirm;
 mod discard;
 mod github;
 mod harness;

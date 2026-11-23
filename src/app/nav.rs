@@ -111,10 +111,9 @@ impl App {
     pub(crate) fn leave_tab(&mut self) {
         self.flush_board();
         self.board = None;
-        self.confirm_delete = None;
+        self.asking = None;
         self.term_error = None;
         self.picker = None;
-        self.confirm_merge = None;
         self.thread = None;
         self.open_run = None;
         self.close_pull_diff();
@@ -250,10 +249,9 @@ impl App {
         if self.discard.is_some() {
             // "Discard what you typed?" is answered "Keep editing".
             self.answer_discard(false);
-        } else if self.confirm_merge.is_some() {
-            self.confirm_merge = None;
-        } else if self.confirm_delete.is_some() {
-            self.confirm_delete = None;
+        } else if self.asking.is_some() {
+            // A question asked before something that can't be undone (`confirm`): no.
+            self.asking = None;
         } else if self.picker.is_some() {
             self.picker = None;
         } else if let Some((picker, title, body)) = thread_edit.filter(|(p, t, b)| *p || *t || *b) {

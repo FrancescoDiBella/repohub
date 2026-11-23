@@ -5,12 +5,13 @@
 //! applies its [`github::Done`] to the screen at once (a new issue shows before GitHub's search
 //! catches up). The forms follow [`Submit`]; the picker fills a [`BranchSlot`].
 use rune::{El, TextEdit, col, el, row, text};
-use rune_kit::{Button, ButtonVariant, ControlSize, Kit, TextArea, TextInput};
+use rune_kit::{Button, ButtonVariant, ControlSize, Kit, SegmentedControl, TextArea, TextInput};
 
 use crate::github::{self, NewPull, Write};
 use crate::model::{Issue, Pull, PullState};
 use crate::state::{BranchSlot, Compose, Load, Submit};
 use crate::ui::{self, panel, panel_head, rule};
+use crate::confirm::{Confirm, Tone};
 use crate::{App, icons, lists};
 
 /// An open form, for one repository.
@@ -246,6 +247,36 @@ fn with_tools(s: &App, line: El, tools: El) -> El {
     }
 }
 
+/// The key of the question before merging pull request `number` of `repo` (its row and its
+/// diff ask the same one).
+pub fn merge_ask(repo: &str, number: u32) -> String {
+    format!("ask-merge-{}", busy_key(repo, number))
+}
+
+/// The question before merging pull request `number` of `repo`, from its row or its diff: how
+/// (a merge commit, squash or rebase, as on GitHub), then Merge.
+pub fn merge_question(s: &App, k: &Kit, repo: &str, number: u32, title: &str) -> Confirm {
+    const METHODS: [&str; 3] = ["merge", "squash", "rebase"];
+    let (yes, how) = match s.merge_method.min(2) {
+        1 => ("Squash and merge", "One commit with all the changes."),
+        2 => ("Rebase and merge", "Its commits replayed on the base branch, without a merge commit."),
+        _ => ("Merge", "A merge commit on the base branch."),
+    };
+    let how = col().w_full().gap(6.0)
+        .child(row().child(SegmentedControl::new(&["Merge commit", "Squash", "Rebase"], Some(s.merge_method.min(2))).label("Merge method").fit()
+            .on_pick(|s: &mut App, i, _| s.merge_method = i.min(2)).build(k).key("merge-method")))
+        .child(text(how).font(k.ty.text_small).color(k.c.text_muted).wrap());
+    let repo = repo.to_owned();
+    Confirm::new(merge_ask(&repo, number), &icons::MERGE, format!("Merge #{number}?"))
+        .detail(format!("{title} ({repo}). A merge can't be undone from RepoHub."))
+        .extra(how)
+        .disabled(blocked(s).is_some())
+        .yes(yes, Tone::Go, move |s: &mut App| {
+            let method = METHODS[s.merge_method.min(2)];
+            s.write(&repo, github::Write::Merge { number, method });
+        })
+}
+
 /// A pull request row with Merge (asks first) on open, non-draft pull requests.
 pub fn pull_line(s: &App, k: &Kit, p: &Pull, compact: bool) -> El {
     let key = busy_key(&p.repo, p.number);
@@ -260,31 +291,25 @@ pub fn pull_line(s: &App, k: &Kit, p: &Pull, compact: bool) -> El {
         return r;
     }
     let busy = s.busy.contains(&key);
-    let asking = s.confirm_merge.as_deref() == Some(key.as_str());
-    let (repo, number) = (p.repo.clone(), p.number);
     let mut tools = row().gap(6.0).center_y().children(files);
-    // With its diff open, the pull request merges from the diff panel (one confirmation on
+    // With its diff open, the pull request merges from the diff panel (one question on
     // screen, with the method picked there).
     if active {
         return with_tools(s, line, tools).fill(k.c.bg_accent.alpha(0.12));
     }
-    if asking && !busy {
-        let r2 = repo.clone();
-        tools = tools
-            .child(text(format!("Merge #{number}?")).font(k.ty.small_medium).color(k.c.text_base))
-            .child(Button::new("Merge").variant(ButtonVariant::Submit).control_size(ControlSize::Small)
-                .on_press(move |s: &mut App| s.write(&repo, github::Write::Merge { number, method: "merge" })).build(k).key(format!("merge-yes-{key}")))
-            .child(Button::new("Squash").control_size(ControlSize::Small)
-                .on_press(move |s: &mut App| s.write(&r2, github::Write::Merge { number, method: "squash" })).build(k).key(format!("squash-{key}")))
-            .child(Button::new("Cancel").variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
-                .on_press(|s: &mut App| s.confirm_merge = None).build(k).key(format!("merge-no-{key}")));
-    } else {
-        let k2 = key.clone();
+    // The question under the row on a computer (in place of Merge), a sheet on a phone.
+    let question = if busy { None } else { merge_question(s, k, &p.repo, p.number, &p.title).show(s, k) };
+    if question.is_none() {
+        let ask = merge_ask(&p.repo, p.number);
         tools = tools.child(Button::new(if busy { "Merging…" } else { "Merge" }).icon(&icons::MERGE).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
             .disabled(busy || blocked(s).is_some())
-            .on_press(move |s: &mut App| s.confirm_merge = Some(k2.clone())).build(k).key(format!("merge-{key}")));
+            .on_press(move |s: &mut App| s.ask(ask.clone())).build(k).key(format!("merge-{key}")));
     }
-    with_tools(s, line, tools)
+    let r = with_tools(s, line, tools);
+    match question {
+        Some(q) => col().w_full().child(r).child(col().w_full().px(16.0).pb(12.0).child(q)),
+        None => r,
+    }
 }
 
 #[cfg(test)]

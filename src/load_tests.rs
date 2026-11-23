@@ -528,6 +528,13 @@ fn clear_saved_data_in_settings_removes_the_copy() {
     rt.pointer_down(x, y);
     rt.pointer_up(x, y);
     rt.frame(0.1);
+    // It asks first (#66), then clears.
+    assert_eq!(copies().len(), 1, "not before the answer");
+    let (x, y) = rt.find("ask-clear-saved-data-yes").expect("the question's Clear saved data");
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.frame(0.2);
     assert!(copies().is_empty(), "cleared");
     assert!(rt.state.toast.as_ref().is_some_and(|t| t.text.contains("Saved data cleared")));
     assert!(!rt.state.data.repos.is_empty(), "the lists on screen stay");

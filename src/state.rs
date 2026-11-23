@@ -445,6 +445,10 @@ pub enum Undo {
     Reopen { repo: String, issue: crate::model::Issue },
     /// A pull request you closed without merging: it's reopened on GitHub.
     ReopenPull { repo: String, number: u32 },
+    /// A repository you unpinned: pinned again where it was in the sidebar.
+    Pin { repo: String, at: usize },
+    /// A coding assistant you removed in Settings: put back where it was.
+    Harness { harness: crate::harness::Harness, at: usize },
 }
 
 /// Text typed and not sent yet, which an action would throw away (see `discard`): it asks

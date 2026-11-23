@@ -120,17 +120,21 @@ fn note_row(s: &App, k: &Kit, i: usize, full: &str, branch: &str, n: &notes::Not
     let open = Button::new("Open").icon(&icons::PEN).control_size(ControlSize::Small)
         .on_press(move |s: &mut App| s.open_board(i, open_name.clone(), false))
         .build(k).key(format!("open-note-{}", n.name));
-    let confirming = s.confirm_delete.as_deref() == Some(n.name.as_str());
+    // Deleting asks first: on a computer in place of the row's buttons, on a phone in a sheet.
+    let ask = format!("ask-delete-note-{}", n.name);
     let name = n.name.clone();
-    let delete = if confirming {
-        Button::new("Delete for good").variant(ButtonVariant::Danger).control_size(ControlSize::Small)
-            .on_press(move |s: &mut App| s.delete_note(i, name.clone()))
-            .build(k).key(format!("confirm-delete-{}", n.name))
-    } else {
-        Button::new("Delete").icon(&icons::TRASH).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
-            .on_press(move |s: &mut App| s.confirm_delete = Some(name.clone()))
-            .build(k).key(format!("delete-note-{}", n.name))
-    };
+    let synced = s.sync.repo.is_some() && s.sync_blocked().is_none();
+    let question = crate::confirm::Confirm::new(ask.clone(), &icons::TRASH, format!("Delete the drawing {}?", n.name))
+        .detail(if synced {
+            "It moves to the trash in RepoHub's data folder, kept there for 30 days, and board sync deletes it on your other devices too."
+        } else {
+            "It moves to the trash in RepoHub's data folder, kept there for 30 days."
+        })
+        .yes("Delete", crate::confirm::Tone::Danger, move |s: &mut App| s.delete_note(i, name.clone()))
+        .show(s, k);
+    let delete = Button::new("Delete").icon(&icons::TRASH).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
+        .on_press(move |s: &mut App| s.ask(ask.clone()))
+        .build(k).key(format!("delete-note-{}", n.name));
     let mut meta = row().gap(8.0).center_y().flex_wrap()
         .child(text(format!("Edited {} · {}", n.updated_ago(s.now), notes::size(n.size))).font(k.ty.text_small).color(k.c.text_muted));
     if let Some(m) = mark {
@@ -140,10 +144,13 @@ fn note_row(s: &App, k: &Kit, i: usize, full: &str, branch: &str, n: &notes::Not
     let info = col().grow(1.0).shrink().min_w(160.0).gap(2.0)
         .child(text(n.name.clone()).font(k.ty.ui_medium).color(k.c.text_base).wrap())
         .child(meta);
-    row().w_full().px(16.0).py(10.0).gap(12.0).center_y().flex_wrap().hover(k.c.hover)
+    let line = row().w_full().px(16.0).py(10.0).gap(12.0).center_y().flex_wrap().hover(k.c.hover)
         .child(ui::ico(&icons::PEN, 16.0, k.c.icon_muted))
-        .child(info)
-        .child(buttons)
+        .child(info);
+    match question {
+        Some(q) => col().w_full().child(line).child(col().w_full().px(16.0).pb(12.0).child(q)),
+        None => line.child(buttons),
+    }
 }
 
 fn tool_icon(t: Tool) -> &'static rune::Icon {
