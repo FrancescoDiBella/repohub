@@ -22,6 +22,9 @@ use rune_kit::{Button, ButtonVariant, ControlSize, Kit};
 
 use crate::{App, ui};
 
+/// What an answer does.
+pub type Action = Rc<dyn Fn(&mut App)>;
+
 /// What the yes button does to what's on screen: throws something away (red), or goes ahead
 /// with a change (the main button's colour).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,8 +45,8 @@ pub struct Confirm {
     tone: Tone,
     yes_key: Option<String>,
     no_key: Option<String>,
-    on_yes: Rc<dyn Fn(&mut App)>,
-    on_no: Option<Rc<dyn Fn(&mut App)>>,
+    on_yes: Action,
+    on_no: Option<Action>,
     extra: Option<El>,
     disabled: bool,
 }
@@ -133,7 +136,7 @@ impl Confirm {
         let on_no = self.on_no.clone().unwrap_or_else(|| Rc::new(|s: &mut App| s.asking = None));
         let key = self.key.clone();
         let on_yes = self.on_yes.clone();
-        let yes_action: Rc<dyn Fn(&mut App)> = Rc::new(move |s: &mut App| {
+        let yes_action: Action = Rc::new(move |s: &mut App| {
             if s.asking.as_deref() == Some(key.as_str()) {
                 s.asking = None;
             }
@@ -167,9 +170,9 @@ pub struct Card {
     pub detail: String,
     pub extra: Option<El>,
     /// The no button: words, key, action.
-    pub no: (String, String, Rc<dyn Fn(&mut App)>),
+    pub no: (String, String, Action),
     /// The yes button: words, key, colour, action, whether it can't be pressed now.
-    pub yes: (String, String, Tone, Rc<dyn Fn(&mut App)>, bool),
+    pub yes: (String, String, Tone, Action, bool),
 }
 
 /// The look every question shares: an icon, the question, what it means, a choice if any, and
@@ -208,7 +211,7 @@ pub fn card(k: &Kit, compact: bool, c: Card) -> El {
 
 /// A card as the phone's sheet: at the bottom of the page area, over the dimmed page; a tap
 /// beside it or Esc answers no, and nothing behind it can be pressed meanwhile.
-pub fn sheet(k: &Kit, card: El, on_no: Rc<dyn Fn(&mut App)>) -> El {
+pub fn sheet(k: &Kit, card: El, on_no: Action) -> El {
     let dismiss = on_no;
     col().key("sheet-layer").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).justify_end().padding(10.0)
         // The kit's scrim hardly shows on a dark page: darker there.

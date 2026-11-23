@@ -222,7 +222,7 @@ and checks, a pull request's files, the history and a commit, releases and tags,
 in `tests/mock/fixtures/`; ETags and 304s; a delay on every answer (`MOCK_DELAY_MS`, default 150),
 slower searches (`MOCK_SEARCH_DELAY_MS`, to watch the lists arrive one by one), `MOCK_DOWN=1` to see
 a failed refresh. It takes a new issue, a comment, a change to an issue (state, title, description,
-labels, assignees, milestone) and a release (and its generated notes), checks what they carry and
+labels, assignees, milestone), a release (and its generated notes) and a merge, checks what they carry and
 answers as GitHub does; what they change reads back. Anything it doesn't know gets a 404 that names
 the request (also printed on its stderr). `/_stats` and `/_log` say what was asked (the log with
 each write's JSON body), `POST /_reset` forgets it, `POST /_fail?path=…&status=500` makes one read
