@@ -44,6 +44,9 @@ impl App {
                 if self.landed != landed {
                     self.changed(replay::Change::Star { repo: repo.to_owned(), on }, true);
                 }
+                // It changed something on GitHub: said, with Undo.
+                let name = self.data.repos.iter().find(|r| r.full_name.eq_ignore_ascii_case(repo)).map(|r| r.name.clone()).unwrap_or_else(|| repo.to_owned());
+                self.notify_undo(format!("{} {name}", if on { "Starred" } else { "Unstarred" }), state::Undo::Star { repo: repo.to_owned() });
             }
             Err(e) => {
                 self.replays.retain(|c| !matches!(c, replay::Change::Star { repo: r, .. } if r.eq_ignore_ascii_case(repo)));

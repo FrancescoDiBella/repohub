@@ -447,6 +447,12 @@ pub enum Undo {
     Reopen { repo: String, issue: crate::model::Issue },
     /// A pull request you closed without merging: it's reopened on GitHub.
     ReopenPull { repo: String, number: u32 },
+    /// An issue you reopened: closed again.
+    Close { repo: String, number: u32 },
+    /// A pull request you reopened: closed again.
+    ClosePull { repo: String, number: u32 },
+    /// A star you gave or took back: as it was.
+    Star { repo: String },
     /// A repository you unpinned: pinned again where it was in the sidebar.
     Pin { repo: String, at: usize },
     /// A coding assistant you removed in Settings: put back where it was.

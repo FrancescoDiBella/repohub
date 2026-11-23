@@ -195,3 +195,23 @@ fn unpinning_and_removing_an_assistant_offer_undo() {
     s.undo();
     assert_eq!(s.assist.harnesses.iter().map(|h| h.name.clone()).collect::<Vec<_>>(), harnesses);
 }
+
+#[test]
+fn reopening_and_starring_offer_undo() {
+    let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = app(Page::Overview, false);
+    let mut s = rt.state;
+    let full = s.data.repos[0].full_name.clone();
+    s.apply_done(&full, crate::github::Done::Reopened(7));
+    assert!(matches!(s.toast.as_ref().and_then(|t| t.undo.clone()), Some(crate::state::Undo::Close { number: 7, .. })), "a reopened issue can be closed again");
+    s.apply_done(&full, crate::github::Done::PullOpen(9, true));
+    assert!(matches!(s.toast.as_ref().and_then(|t| t.undo.clone()), Some(crate::state::Undo::ClosePull { number: 9, .. })), "and a reopened pull request");
+    let i = s.data.repos.iter().position(|r| !r.starred).unwrap();
+    let starred = s.data.repos[i].full_name.clone();
+    s.toggle_star(i);
+    let landed = s.landed;
+    s.star_sent(s.load_gen, &starred, true, landed, Ok(()));
+    assert!(s.toast.as_ref().is_some_and(|t| t.text.starts_with("Starred") && t.undo.is_some()), "a star says so, with Undo");
+    s.undo();
+    assert!(!s.data.repos[i].starred, "Undo takes it back");
+}

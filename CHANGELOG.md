@@ -22,7 +22,8 @@ The sections are **Added**, **Changed** and **Fixed**.
 - RepoHub asks before aborting a merge, pulling over uncommitted changes, pushing (or committing
   and pushing) straight to the repository's default branch, signing out and clearing the saved
   data.
-- **Undo** in the toast after unpinning a repository or removing a coding assistant.
+- **Undo** in the toast after unpinning a repository, removing a coding assistant, reopening an
+  issue or a pull request, and starring or unstarring (which now says it was done).
 - Esc, **Cancel**, opening another form or leaving a conversation asks "Discard what you typed?"
   (**Discard** or **Keep editing**) when a New issue, branch or pull request form, the release
   form, an edited title or description, or a comment you're writing holds text not sent yet. A

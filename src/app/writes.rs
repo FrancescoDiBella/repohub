@@ -41,6 +41,13 @@ impl App {
                 self.write(&repo, github::Write::ReopenIssue(number));
             }
             state::Undo::ReopenPull { repo, number } => self.write(&repo, github::Write::SetPullOpen { number, open: true }),
+            state::Undo::Close { repo, number } => self.write(&repo, github::Write::CloseIssue(number)),
+            state::Undo::ClosePull { repo, number } => self.write(&repo, github::Write::SetPullOpen { number, open: false }),
+            state::Undo::Star { repo } => {
+                if let Some(i) = self.repo_index_of(&repo) {
+                    self.toggle_star(i);
+                }
+            }
             state::Undo::Pin { repo, at } => self.repin(&repo, at),
             state::Undo::Harness { harness, at } => {
                 let name = harness.name.clone();
@@ -326,8 +333,11 @@ impl App {
                 if let Some(at) = self.reopening.iter().position(|x| x.number == n && same_repo(&x.repo, &full_name)) {
                     let issue = self.reopening.remove(at);
                     self.changed(replay::Change::Reopened(issue), exact);
+                    self.notify(format!("Reopened issue #{n}"));
+                } else {
+                    // Reopened from its conversation: Undo closes it again.
+                    self.notify_undo(format!("Reopened issue #{n}"), state::Undo::Close { repo: full_name.clone(), number: n });
                 }
-                self.notify(format!("Reopened issue #{n}"));
             }
             github::Done::Commented(n) => {
                 for x in self.data.issues.iter_mut().filter(|x| x.number == n && same_repo(&x.repo, &full_name)) {
@@ -360,7 +370,7 @@ impl App {
             github::Done::PullOpen(n, open) => {
                 self.changed(replay::Change::PullOpen { repo: full_name.clone(), number: n, open }, exact);
                 if open {
-                    self.notify(format!("Reopened pull request #{n}"));
+                    self.notify_undo(format!("Reopened pull request #{n}"), state::Undo::ClosePull { repo: full_name.clone(), number: n });
                 } else {
                     self.notify_undo(format!("Closed pull request #{n}"), state::Undo::ReopenPull { repo: full_name.clone(), number: n });
                 }

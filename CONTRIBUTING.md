@@ -356,10 +356,12 @@ works too (without its first-frame time). Times include the headless renderer's 
   merging, publishing a release, deleting a drawing, removing a plugin, aborting a merge, pulling
   over uncommitted changes, pushing to the default branch, signing out, clearing the saved data.
   It offers **Undo** (`notify_undo`, with a `state::Undo` that knows how to put it back) when it
-  can: closing an issue or a pull request, deleting a theme, unpinning, removing a coding
-  assistant. A form you fill in and send (a new issue, a comment, a triage change) is its own
-  question. Re-running a workflow and marking a notification as read do neither, as on GitHub
-  (GitHub has no way to mark one unread again).
+  can: closing or reopening an issue or a pull request, a star, deleting a theme, unpinning,
+  removing a coding assistant. A form you fill in and send (a new issue, a comment, a triage
+  change) is its own question. Re-running a workflow and marking a notification as read do
+  neither, as on GitHub (GitHub has no way to mark one unread again); pushing to a branch other
+  than the default one doesn't ask (a push never overwrites what's on GitHub: git refuses one
+  that isn't a fast-forward).
 - The Android app forwards the same writes: add a new one to `android/.../GitHubPaths.java` too,
   with its test.
 - The repository lists, the pinned set and the palette's entries are cached between frames and
