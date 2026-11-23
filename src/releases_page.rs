@@ -7,15 +7,11 @@ use rune_kit::{Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant
 use crate::releases::{self, Form, Kind, List, Listing, NotesJob, Release, TagUse};
 use crate::state::{BranchSlot, Load, RepoTab, Submit};
 use crate::ui::{self, panel, panel_head, rule};
+use crate::confirm::{Confirm, Tone};
 use crate::{App, actions, icons, model, pages};
 
 fn plural(n: usize, one: &str) -> String {
     if n == 1 { format!("1 {one}") } else { format!("{n} {one}s") }
-}
-
-fn empty(k: &Kit, msg: &str, key: &str) -> El {
-    col().w_full().padding(24.0).items_center().key(key.to_owned())
-        .child(text(msg.to_owned()).font(k.ty.ui).color(k.c.text_muted).wrap())
 }
 
 /// A note in a panel, with an icon.
@@ -87,7 +83,7 @@ fn list_panel(s: &App, k: &Kit, i: usize, list: Option<&List>) -> El {
     let count = if l.more { format!("{n}+ releases") } else { plural(n, "release") };
     let mut p = panel(k).key("releases-list").child(head(Some(count)));
     if listing.releases.is_empty() {
-        p = p.child(rule(k)).child(empty(k, "No releases yet.", "releases-empty"));
+        p = p.child(rule(k)).child(ui::empty(k, "No releases yet.", "New release drafts the first one, with notes GitHub can write.").key("releases-empty"));
     }
     let latest = s.releases.latest_id(&r.full_name);
     for rel in &listing.releases {
@@ -183,16 +179,18 @@ fn draft_tools(s: &App, k: &Kit, i: usize, listing: &Listing, rel: &Release, url
     let busy = s.releases.busy.contains(&id);
     let blocked = actions::blocked(s);
     let mut out = col().w_full().gap(8.0);
-    if s.releases.confirm == Some(id) && !busy {
-        let question = releases::publish_question(&rel.tag, &rel.target, listing.tag_exists(&rel.tag));
-        return out.child(col().w_full().padding(12.0).gap(10.0).radius(k.radius.md).fill(k.c.warning.icon.alpha(0.08)).border(1.0, k.c.warning.icon.alpha(0.4))
-            .role("alertdialog").label(question.clone()).key(format!("release-confirm-{id}"))
-            .child(text(question).font(k.ty.small_medium).color(k.c.text_base).wrap())
-            .child(row().gap(8.0).flex_wrap()
-                .child(Button::new("Publish").icon(&icons::TAG).variant(ButtonVariant::Submit).control_size(ControlSize::Small).disabled(blocked.is_some())
-                    .on_press(move |s: &mut App| s.publish_draft(i, id)).build(k).key(format!("release-publish-yes-{id}")))
-                .child(Button::new("Cancel").variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
-                    .on_press(|s: &mut App| s.releases.confirm = None).build(k).key(format!("release-publish-no-{id}")))));
+    // Publishing asks first (`releases.confirm`): in place of the buttons on a computer, in a
+    // sheet on a phone.
+    let question = releases::publish_question(&rel.tag, &rel.target, listing.tag_exists(&rel.tag));
+    if let Some(q) = Confirm::new(format!("release-confirm-{id}"), &icons::TAG, question)
+        .open(s.releases.confirm == Some(id) && !busy)
+        .keys(format!("release-publish-yes-{id}"), format!("release-publish-no-{id}"))
+        .disabled(blocked.is_some())
+        .yes("Publish", Tone::Go, move |s: &mut App| s.publish_draft(i, id))
+        .on_no(|s: &mut App| s.releases.confirm = None)
+        .show(s, k)
+    {
+        return out.child(q);
     }
     let files_url = url.to_owned();
     out = out.child(row().gap(8.0).center_y().flex_wrap()
@@ -361,17 +359,14 @@ fn form_panel(s: &App, k: &Kit, i: usize, f: &Form) -> El {
     if let Some((msg, ink)) = note {
         body = body.child(text(msg).font(k.ty.small).color(ink).wrap().key("release-form-note"));
     }
-    let foot = if f.confirm {
-        let question = releases::publish_question(&tag, &f.target, tag_use == TagUse::Existing);
-        col().w_full().padding(12.0).gap(10.0).radius(k.radius.md).fill(k.c.warning.icon.alpha(0.08)).border(1.0, k.c.warning.icon.alpha(0.4))
-            .role("alertdialog").label(question.clone()).key("release-confirm")
-            .child(text(question).font(k.ty.small_medium).color(k.c.text_base).wrap())
-            .child(row().w_full().gap(8.0).justify_end().flex_wrap()
-                .child(Button::new("Cancel").variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
-                    .on_press(|s: &mut App| if let Some(f) = s.releases.form.as_mut() { f.confirm = false; }).build(k).key("release-confirm-no"))
-                .child(Button::new("Publish").icon(&icons::TAG).variant(ButtonVariant::Submit).control_size(ControlSize::Small)
-                    .disabled(sending || publish_check.is_err() || blocked.is_some())
-                    .on_press(|s: &mut App| s.send_release(true)).build(k).key("release-confirm-yes")))
+    let question = Confirm::new("release-confirm", &icons::TAG, releases::publish_question(&tag, &f.target, tag_use == TagUse::Existing))
+        .open(f.confirm)
+        .disabled(sending || publish_check.is_err() || blocked.is_some())
+        .yes("Publish", Tone::Go, |s: &mut App| s.send_release(true))
+        .on_no(|s: &mut App| if let Some(f) = s.releases.form.as_mut() { f.confirm = false; })
+        .show(s, k);
+    let foot = if let Some(q) = question {
+        q
     } else {
         let (save_label, publish_label) = match (sending, f.publishing) {
             (true, false) => ("Saving…", "Publish release"),

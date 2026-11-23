@@ -32,6 +32,9 @@ impl App {
             state::trace("page", &self.page, &p);
             self.close_pull_diff();
             self.leave_tab();
+            self.cursor = None;
+            // Settings opens on its list of sections on a phone.
+            self.settings_open = false;
         }
         self.page = p;
         self.thread = None;
@@ -111,10 +114,9 @@ impl App {
     pub(crate) fn leave_tab(&mut self) {
         self.flush_board();
         self.board = None;
-        self.confirm_delete = None;
+        self.asking = None;
         self.term_error = None;
         self.picker = None;
-        self.confirm_merge = None;
         self.thread = None;
         self.open_run = None;
         self.close_pull_diff();
@@ -144,6 +146,7 @@ impl App {
         if self.tab != tab {
             state::trace("tab", &self.tab, &tab);
             self.leave_tab();
+            self.cursor = None;
         }
         self.tab = tab;
         self.reveal_tab = true;
@@ -225,6 +228,7 @@ impl App {
         }
         self.leave_tab();
         self.plugin_tab = Some(p);
+        self.reveal_tab = true;
     }
 
     /// Esc: closes what's open on top of the page, the most recent first (a question, a picker,
@@ -250,10 +254,9 @@ impl App {
         if self.discard.is_some() {
             // "Discard what you typed?" is answered "Keep editing".
             self.answer_discard(false);
-        } else if self.confirm_merge.is_some() {
-            self.confirm_merge = None;
-        } else if self.confirm_delete.is_some() {
-            self.confirm_delete = None;
+        } else if self.asking.is_some() {
+            // A question asked before something that can't be undone (`confirm`): no.
+            self.asking = None;
         } else if self.picker.is_some() {
             self.picker = None;
         } else if let Some((picker, title, body)) = thread_edit.filter(|(p, t, b)| *p || *t || *b) {
@@ -288,6 +291,12 @@ impl App {
             self.close_compare();
         } else if self.local_file.is_some() && matches!(self.page, Page::Repo(_)) {
             self.local_file = None;
+        } else if self.page == Page::Settings && self.editing_look() {
+            // The theme editor's view: back to the gallery.
+            self.look_edit = LookEditor::default();
+        } else if self.page == Page::Settings && self.compact && self.settings_open {
+            // A section on a phone: back to the list.
+            self.settings_open = false;
         } else {
             return false;
         }

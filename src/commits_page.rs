@@ -165,10 +165,10 @@ fn history(s: &App, k: &Kit, i: usize, at: &str) -> El {
     let mut p = panel(k).key("commits-history")
         .child(panel_head(k, &title, Some(text(count).font(k.ty.small).color(k.c.text_muted).key("commits-count"))));
     if rows.is_empty() {
-        p = p.child(rule(k)).child(empty(k, format!("{at} has no commits yet."), "commits-empty"));
+        p = p.child(rule(k)).child(ui::empty(k, &format!("{at} has no commits yet."), "Push a first commit to it, or pick another branch above.").key("commits-empty"));
     } else if shown.is_empty() {
-        let more = if h.more { " Load more to look further back." } else { "" };
-        p = p.child(rule(k)).child(empty(k, format!("No commit loaded matches “{q}”.{more}"), "commits-no-match"));
+        let more = if h.more { "Load more to look further back, or change the filter." } else { "Change or clear the filter." };
+        p = p.child(rule(k)).child(ui::empty(k, &format!("No commit loaded matches “{q}”."), more).key("commits-no-match"));
     }
     for (day, list) in commits::days(&shown, s.now, commits::local_clock) {
         p = p.child(rule(k)).child(row().w_full().px(16.0).py(7.0).fill(k.c.layer_01)

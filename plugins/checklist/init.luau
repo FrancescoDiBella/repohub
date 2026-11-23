@@ -109,7 +109,7 @@ local function page(view)
 			key = r.fullName, w = "full", gap = 12, align = "center", px = 12, py = 8, radius = 6,
 			hover = "hover", press = "press",
 			onPress = function()
-				repohub.openRepo(r.fullName)
+				repohub.openRepo(r.fullName, true)
 			end,
 		}, {
 			ui.text(r.name, { size = 13, weight = "medium", color = "text", w = 220, truncate = true }),

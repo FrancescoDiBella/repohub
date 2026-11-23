@@ -346,17 +346,11 @@ impl App {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn remove_plugin(&mut self, id: &str) {
-        if self.plugin_confirm.as_deref() != Some(id) {
-            self.plugin_confirm = Some(id.to_owned());
-            return;
-        }
-        self.plugin_confirm = None;
         if self.plugin_tab.as_deref() == Some(id) {
             self.plugin_tab = None;
         }
         if matches!(&self.page, Page::Plugin(pid) if pid == id) {
-            self.settings_section = state::SettingsSection::Plugins;
-            self.go(Page::Settings);
+            self.open_settings(state::SettingsSection::Plugins);
         }
         match plugins::remove(id) {
             Ok(()) => {
@@ -401,7 +395,7 @@ impl App {
     pub(crate) fn remove_harness(&mut self, n: usize) {
         if let Some(h) = self.assist.remove(n) {
             self.assist.save();
-            self.notify(format!("Removed {}", h.name));
+            self.notify_undo(format!("Removed {}", h.name), state::Undo::Harness { harness: h, at: n });
         }
     }
 }

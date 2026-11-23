@@ -16,6 +16,12 @@ mod followups_discard;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod followups_small;
 #[cfg(all(test, not(target_arch = "wasm32")))]
+mod confirm_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod section_bar;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod keyboard_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod fix52_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod fix63_tests;

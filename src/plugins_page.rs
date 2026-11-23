@@ -22,7 +22,7 @@ pub fn plugins_panel(s: &App, k: &Kit) -> El {
         .child(text("A plugin can read what RepoHub shows (your repositories, issues and pull requests, private ones too) and show notifications. To open a link or copy text it has to ask you each time: a link could carry what it read. Install only plugins you trust.")
             .font(k.ty.text_small).color(k.c.text_muted).wrap());
     if s.plugins.list.is_empty() {
-        body = body.child(text("No plugins yet.").font(k.ty.small).color(k.c.text_faint));
+        body = body.child(ui::empty(k, "No plugins yet", "Install one below from its folder or Git address, or start from the example plugin.").key("plugins-empty"));
     }
     for p in &s.plugins.list {
         body = body.child(plugin_row(s, k, p));
@@ -59,14 +59,18 @@ fn plugin_row(s: &App, k: &Kit, p: &crate::plugins::Plugin) -> El {
     {
         let (on, reload, remove) = (id.clone(), id.clone(), id.clone());
         let folder = format!("file://{}", p.dir.display().to_string().replace('%', "%25").replace(' ', "%20").replace('\\', "/"));
-        let confirm = s.plugin_confirm.as_deref() == Some(id.as_str());
+        // Its page, also where a phone (no sidebar) finds it.
+        if let Some((pid, label)) = s.plugins.pages().into_iter().find(|(pid, _)| *pid == id) {
+            actions = actions.child(Button::new(format!("Open {label}")).icon(&icons::SPARK).control_size(ControlSize::Small)
+                .on_press(move |s: &mut App| s.go(crate::Page::Plugin(pid.clone()))).build(k).key(format!("plugin-open-{id}")));
+        }
         actions = actions
             .child(Button::new("Reload").variant(ButtonVariant::Ghost).control_size(ControlSize::Small).disabled(!p.enabled)
                 .on_press(move |s: &mut App| if let Some(h) = s.handle.clone() { s.plugins.reload(&reload, &h) }).build(k).key(format!("plugin-reload-{id}")))
             .child(Button::new("Folder").icon(&icons::FOLDER).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
                 .on_press_tx(move |_: &mut App, tx| { let _ = tx.open_url(&folder); }).build(k).key(format!("plugin-folder-{id}")))
-            .child(Button::new(if confirm { "Remove? Click again" } else { "Remove" }).variant(ButtonVariant::Danger).control_size(ControlSize::Small)
-                .on_press(move |s: &mut App| s.remove_plugin(&remove)).build(k).key(format!("plugin-remove-{id}")))
+            .child(Button::new("Remove").variant(ButtonVariant::Danger).control_size(ControlSize::Small)
+                .on_press(move |s: &mut App| s.ask(format!("ask-remove-plugin-{remove}"))).build(k).key(format!("plugin-remove-{id}")))
             .child(rune_kit::Switch::new(p.enabled).label(format!("{} on", m.name))
                 .on_toggle(move |s: &mut App| {
                     let now = !s.plugins.list.iter().any(|p| p.id == on && p.enabled);
@@ -76,7 +80,22 @@ fn plugin_row(s: &App, k: &Kit, p: &crate::plugins::Plugin) -> El {
                 }).build(k).key(format!("plugin-on-{id}")));
     }
     let _ = (s, &id);
-    row().w_full().gap(12.0).py(8.0).flex_wrap().center_y().key(format!("plugin-{}", p.id)).child(info).child(actions)
+    // Removing asks first: its folder is deleted.
+    #[cfg(not(target_arch = "wasm32"))]
+    let question = {
+        let gone = id.clone();
+        crate::confirm::Confirm::new(format!("ask-remove-plugin-{id}"), &icons::TRASH, format!("Remove the plugin {}?", m.name))
+            .detail(format!("Its folder ({}) is deleted from this computer.", p.dir.display()))
+            .yes("Remove", crate::confirm::Tone::Danger, move |s: &mut App| s.remove_plugin(&gone))
+            .show(s, k)
+    };
+    #[cfg(target_arch = "wasm32")]
+    let question: Option<El> = None;
+    let line = row().w_full().gap(12.0).py(8.0).flex_wrap().center_y().key(format!("plugin-{}", p.id)).child(info);
+    match question {
+        Some(q) => col().w_full().gap(8.0).pb(8.0).child(line).child(q),
+        None => line.child(actions),
+    }
 }
 
 fn install_row(s: &App, k: &Kit) -> El {

@@ -106,7 +106,9 @@ fn a_closed_pull_request_offers_undo() {
     s.apply_done(&p.repo, github::Done::PullOpen(p.number, false));
     let undo = s.toast.as_ref().and_then(|t| t.undo.clone());
     assert!(matches!(&undo, Some(state::Undo::ReopenPull { number, .. }) if *number == p.number), "{undo:?}");
-    // Reopening it isn't undone in turn.
+    // Reopening it with that Undo isn't undone in turn (reopening it from its conversation is,
+    // `confirm_tests`).
+    s.undo();
     s.apply_done(&p.repo, github::Done::PullOpen(p.number, true));
     assert!(s.toast.as_ref().is_some_and(|t| t.undo.is_none() && t.text.starts_with("Reopened")));
 }

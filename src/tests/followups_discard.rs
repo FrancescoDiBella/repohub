@@ -122,7 +122,7 @@ fn another_form_or_another_repositorys_form_asks_before_replacing_a_typed_one() 
         s.open_form(1, Compose::Pull);
     });
     assert!(asking(&mut rt), "not silently replaced");
-    let what = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("discard-what")).and_then(|e| e.text).unwrap_or_default();
+    let what = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("discard-ask-what")).and_then(|e| e.text).unwrap_or_default();
     assert!(what.contains(&a), "it says which: {what}");
     press(&mut rt, "discard-no");
     assert_eq!(rt.state.form.as_ref().map(|f| (f.repo.clone(), f.title.text.clone())), Some((a.clone(), "For the first".into())));
@@ -262,9 +262,9 @@ fn the_back_button_follows_escs_order() {
         s.open_form(0, Compose::Issue);
         s.open_picker(Host::Form, Facet::Labels);
         s.picker = Some(BranchSlot::View);
-        s.confirm_merge = Some(crate::actions::busy_key(&pull.repo, pull.number));
+        s.ask(crate::actions::merge_ask(&pull.repo, pull.number));
     });
-    assert!(back(&mut rt) && rt.state.confirm_merge.is_none() && rt.state.picker.is_some(), "the question first");
+    assert!(back(&mut rt) && rt.state.asking.is_none() && rt.state.picker.is_some(), "the question first");
     assert!(back(&mut rt) && rt.state.picker.is_none() && rt.state.picker(Host::Form).is_some(), "the branch picker");
     assert!(back(&mut rt) && rt.state.picker(Host::Form).is_none() && rt.state.form.is_some(), "the form's picker");
     rt.update(|s, _| s.form.as_mut().unwrap().title = TextEdit::new("Typed"));

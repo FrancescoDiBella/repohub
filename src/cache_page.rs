@@ -1,6 +1,6 @@
 //! Settings → About → Saved data: where the copy of the last load is, how large and from when,
 //! and **Clear saved data**.
-use rune::{El, row, text};
+use rune::{El, col, row, text};
 use rune_kit::{Button, ButtonVariant, ControlSize, Kit};
 
 use crate::ui::{panel, panel_head, rule};
@@ -33,8 +33,16 @@ pub fn panel_of(s: &App, k: &Kit) -> El {
     };
     let clear = Button::new("Clear saved data").icon(&icons::TRASH).control_size(ControlSize::Small).variant(ButtonVariant::Ghost)
         .disabled(s.fresh.info.is_none())
-        .on_press(|s: &mut App| s.clear_saved_data()).build(k).key("clear-saved-data");
-    let mut p = panel(k).key("saved-data").child(panel_head(k, "Saved data", Some(clear))).child(rule(k))
+        .on_press(|s: &mut App| s.ask("ask-clear-saved-data")).build(k).key("clear-saved-data");
+    let question = crate::confirm::Confirm::new("ask-clear-saved-data", &icons::TRASH, "Clear the saved data?")
+        .detail("The copy of your last load is deleted from this computer: the next start waits for GitHub.")
+        .yes("Clear saved data", crate::confirm::Tone::Danger, |s: &mut App| s.clear_saved_data())
+        .show(s, k);
+    let mut p = panel(k).key("saved-data").child(panel_head(k, "Saved data", Some(clear)));
+    if let Some(q) = question {
+        p = p.child(col().w_full().px(16.0).pb(12.0).child(q));
+    }
+    let mut p = p.child(rule(k))
         .child(info(s, k, "Last load", state));
     if s.cfg.live() && cache::enabled() {
         p = p.child(rule(k)).child(info(s, k, "Where", cache::place(&s.cfg)));

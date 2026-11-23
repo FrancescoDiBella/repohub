@@ -116,7 +116,8 @@ pub fn run_row(k: &Kit, r: &Run, now: i64, compact: bool) -> El {
     }
 }
 
-fn listing(s: &App, k: &Kit, rows: Vec<El>, empty: &str, retry_key: &str) -> El {
+/// A page's list; `empty` says what's empty and what to do when it is.
+fn listing(s: &App, k: &Kit, rows: Vec<El>, empty: (&str, &str), retry_key: &str) -> El {
     if rows.is_empty() {
         // Only the repositories are in yet: this list is still on its way.
         if s.lists_loading() {
@@ -130,7 +131,7 @@ fn listing(s: &App, k: &Kit, rows: Vec<El>, empty: &str, retry_key: &str) -> El 
                 return ui::error_panel(k, e, retry_key, |s: &mut App| s.refresh());
             }
         }
-        return panel(k).padding(28.0).items_center().child(text(empty.to_owned()).font(k.ty.ui).color(k.c.text_muted));
+        return panel(k).child(ui::empty(k, empty.0, empty.1));
     }
     rows.into_iter().enumerate().fold(panel(k), |p, (i, r)| if i == 0 { p.child(r) } else { p.child(rule(k)).child(r) })
 }
@@ -144,7 +145,11 @@ pub fn pulls(s: &App, k: &Kit) -> El {
     let in_state: Vec<&Pull> = s.data.pulls.iter().filter(|p| p.state == s.pr_filter).collect();
     let (filter_repos, filter_labels) = crate::filters::pull_choices(in_state.iter().copied());
     let rows: Vec<El> = in_state.iter().filter(|p| s.pull_filter.pull(p, me)).map(|p| crate::actions::pull_line(s, k, p, s.compact)).collect();
-    let empty = if s.pull_filter.is_empty() || in_state.is_empty() { "No pull requests in this state" } else { "No pull requests match these filters" };
+    let empty = if s.pull_filter.is_empty() || in_state.is_empty() {
+        ("No pull requests in this state", if s.pr_filter == PullState::Open { "Pull requests you open, review or are mentioned in show here; Drafts, Merged and Closed have the others." } else { "Open, Drafts, Merged and Closed above have the others." })
+    } else {
+        ("No pull requests match these filters", "Clear shows them all again.")
+    };
     let is_open_group = matches!(s.pr_filter, PullState::Open | PullState::Draft);
     let (group_loaded, group_total) = if is_open_group {
         let count = s.data.pulls.iter().filter(|p| matches!(p.state, PullState::Open | PullState::Draft)).count();
@@ -203,7 +208,11 @@ pub fn issues(s: &App, k: &Kit) -> El {
     let me = s.data.profile.login.as_str();
     let (filter_repos, filter_labels) = crate::filters::issue_choices(s.data.issues.iter());
     let rows: Vec<El> = s.data.issues.iter().filter(|x| s.issue_filter.issue(x, me)).map(|i| crate::actions::issue_line(s, k, i)).collect();
-    let empty = if s.issue_filter.is_empty() || s.data.issues.is_empty() { "No open issues" } else { "No issues match these filters" };
+    let empty = if s.issue_filter.is_empty() || s.data.issues.is_empty() {
+        ("No open issues", "Open issues in your repositories show here; New issue is on a repository's page.")
+    } else {
+        ("No issues match these filters", "Clear shows them all again.")
+    };
     let loaded = s.data.issues.len();
     let can_load_more = !s.data.sample && s.data.issues_total.is_some_and(|tot| loaded < tot && loaded < 1000);
     let is_capped = can_load_more || s.data.issues_capped();
@@ -254,9 +263,9 @@ pub fn actions(s: &App, k: &Kit) -> El {
         .map(|r| crate::runs_page::run_line(s, k, r, s.compact))
         .collect();
     let empty = if s.runs_filter.is_empty() || s.data.runs.is_empty() {
-        "No recent runs"
+        ("No recent runs", "Workflow runs in your most recently pushed repositories show here.")
     } else {
-        "No workflow runs match these filters"
+        ("No workflow runs match these filters", "Clear shows them all again.")
     };
     let action = if !s.data.sample && s.data.runs_total > s.data.runs.len() {
         let me = &s.data.profile.login;
@@ -290,13 +299,15 @@ pub fn settings(s: &App, k: &Kit) -> El {
     let p = &s.data.profile;
     let cfg = &s.cfg;
     let stars = s.starred_count();
-    let profile = panel(k).padding(20.0).gap(16.0)
-        .child(row().gap(14.0).center_y()
-            .child(ui::user(k, if p.login.is_empty() { "?" } else { &p.login }, 56.0))
-            .child(col().gap(3.0).shrink()
+    // One line of who you are, so the account section fits a screen.
+    let profile = panel(k).padding(14.0)
+        .child(row().gap(12.0).center_y()
+            .child(ui::user(k, if p.login.is_empty() { "?" } else { &p.login }, 40.0))
+            .child(col().gap(2.0).shrink()
                 .child(text(if p.name.is_empty() { "—".to_owned() } else { p.name.clone() }).font(k.ty.body_medium).color(k.c.text_strong))
-                .child(text(format!("@{}{}", p.login, if p.bio.is_empty() { String::new() } else { format!(" · {}", p.bio) })).font(k.ty.small).color(k.c.text_muted).wrap())
-                .child(row().gap(14.0).child(ui::stat(k, &icons::REPO, format!("{} repositories", s.data.repos.len()))).child(ui::stat(k, &icons::STAR, format!("{stars} stars"))))));
+                .child(row().gap(14.0).flex_wrap()
+                    .child(text(format!("@{}{}", p.login, if p.bio.is_empty() { String::new() } else { format!(" · {}", p.bio) })).font(k.ty.small).color(k.c.text_muted).wrap())
+                    .child(ui::stat(k, &icons::REPO, format!("{} repositories", s.data.repos.len()))).child(ui::stat(k, &icons::STAR, format!("{stars} stars"))))));
     let source = match (&s.status, cfg.live()) {
         (Status::Sample, _) if cfg.demo => "Sample data (REPOHUB_DEMO=true)".to_owned(),
         (Status::Sample, _) => "Sample data: no configuration found".to_owned(),
@@ -376,31 +387,32 @@ pub fn settings(s: &App, k: &Kit) -> El {
     let assistants = assistants_panel(s, k);
     let plugins = crate::plugins_page::plugins_panel(s, k);
     let version = version_panel(s, k);
-    let keys = panel(k).child(panel_head(k, "Keyboard shortcuts", None));
-    let keys = [
-        ("⌘/Ctrl + K", "Search and commands: jump to any repository or page, run any action"),
-        ("⌘/Ctrl + 1 … 5", "Overview, Repositories, Pull requests, Issues, Actions"),
-        ("⌘/Ctrl + ,", "Settings"),
-        ("⌘/Ctrl + R", "Refresh from GitHub"),
-        ("⌘/Ctrl + [", "Back: out of a conversation, a commit or a comparison, or from a repository to the list"),
-        ("Esc", "Close what's open, the newest first: a question, a picker, an editor, a form, a diff, a conversation, a run, a commit, a comparison, a file, a message"),
-        ("Ctrl + Shift + Tab", "Leave the terminal, so the keyboard reaches the rest of the app"),
-        ("↑ ↓ in ⌘K", "Move through the results; Enter runs the one highlighted"),
-    ].iter().fold(keys, |p, (key, what)| p.child(rule(k)).child(info(k, key, (*what).to_owned())));
     use crate::state::SettingsSection as Section;
     let section = s.settings_section;
-    let picker = SegmentedControl::new(&Section::LABELS, Some(section.index())).label("Settings section").fit()
-        .on_pick(|s: &mut App, i, _| s.settings_section = Section::ALL[i.min(Section::ALL.len() - 1)]).build(k).key("settings-section");
-    // Five segments don't fit a phone: the row scrolls sideways there.
-    let picker = if s.compact { row().w_full().scroll_x().child(picker) } else { row().w_full().child(picker) };
-    let (subtitle, body): (&str, Vec<El>) = match section {
-        Section::Account => ("Your profile, the GitHub account, the connection and where boards sync.", vec![profile, account, conn, crate::sync_page::settings_block(s, k)]),
-        Section::Appearance => ("Light, dark or the system's, and the themes.", vec![appearance]),
-        Section::Assistants => ("Claude and the other coding assistants the Terminal starts.", vec![assistants]),
-        Section::Plugins => ("Sections and pages others wrote for RepoHub.", vec![plugins]),
-        Section::About => ("This version of RepoHub, its updates, the data it saves and the keyboard shortcuts.", vec![version, crate::cache_page::panel_of(s, k), keys]),
+    // On a phone the sections are a list, and one opens with a way back to it.
+    if s.compact && !s.settings_open {
+        return crate::settings_nav::phone_list(k);
+    }
+    let picker = if s.compact {
+        crate::settings_nav::back(k)
+    } else {
+        row().w_full().child(SegmentedControl::new(&Section::LABELS, Some(section.index())).label("Settings section").fit()
+            .on_pick(|s: &mut App, i, _| s.settings_section = Section::ALL[i.min(Section::ALL.len() - 1)]).build(k).key("settings-section"))
     };
-    col().w_full().gap(16.0).max_w(760.0)
+    let subtitle = section.about();
+    let body: Vec<El> = match section {
+        // Two columns where there's room, so it fits a screen: who you are and the account, then
+        // the connection and the boards.
+        Section::Account => vec![row().w_full().gap(16.0).items_start().flex_wrap()
+            .child(col().w(0.0).grow(1.0).min_w(360.0).gap(16.0).child(profile).child(account))
+            .child(col().w(0.0).grow(1.0).min_w(360.0).gap(16.0).child(conn).child(crate::sync_page::settings_block(s, k)))],
+        Section::Appearance => vec![appearance],
+        Section::Assistants => vec![assistants],
+        Section::Plugins => vec![plugins],
+        Section::Keyboard => vec![crate::keyboard::panel(s, k)],
+        Section::About => vec![version, crate::cache_page::panel_of(s, k)],
+    };
+    col().w_full().gap(16.0).max_w(if section == Section::Account { 1080.0 } else { 760.0 })
         .child(heading(k, "Settings", subtitle, None))
         .child(picker)
         .children(body)
@@ -477,7 +489,9 @@ fn account_panel(s: &App, k: &Kit) -> El {
             .child(text(format!("GITHUB_USER or GITHUB_TOKEN comes from {from}, and that wins. Change it there, or remove it to manage the account here."))
                 .font(k.ty.text_small).color(k.c.text_muted).wrap()));
     }
-    let label = |t: &str| text(t.to_owned()).font(k.ty.small).color(k.c.text_muted).w(110.0);
+    // Each field under its label, side by side on a wide window.
+    let field = |t: &str, input: El| col().grow(1.0).min_w(220.0).gap(4.0)
+        .child(text(t.to_owned()).font(k.ty.small).color(k.c.text_muted)).child(input.w_full());
     let user = TextInput::new(&s.acct_user).placeholder("octocat").label("GitHub user name")
         .on_edit(|s: &mut App| &mut s.acct_user).on_submit(|s: &mut App, _| s.save_account(false)).build(k).key("acct-user").grow(1.0).min_w(200.0);
     let token = TextInput::new(&s.acct_token).secure().label("Personal access token")
@@ -488,13 +502,19 @@ fn account_panel(s: &App, k: &Kit) -> El {
             .on_press(|s: &mut App| s.save_account(false)).build(k).key("acct-save"));
     if account == Account::SignedIn {
         buttons = buttons.child(Button::new("Sign out").variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
-            .on_press(|s: &mut App| s.save_account(true)).build(k).key("acct-sign-out"));
+            .on_press(|s: &mut App| s.ask("ask-sign-out")).build(k).key("acct-sign-out"));
     }
+    let buttons = buttons.child(Button::new(if s.token_help { "Hide which token" } else { "Which token?" }).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
+        .on_press(|s: &mut App| s.token_help = !s.token_help).build(k).key("token-help"));
+    let buttons = col().w_full().gap(12.0).child(buttons).children(crate::confirm::sign_out_question(s, k));
     let mut body = col().w_full().padding(16.0).gap(12.0)
-        .child(row().w_full().gap(12.0).center_y().flex_wrap().child(label("User name")).child(user))
-        .child(row().w_full().gap(12.0).center_y().flex_wrap().child(label("Token")).child(token))
-        .child(text("With only a user name RepoHub shows public repositories (60 requests an hour). A token adds private repositories, starring and 5,000 requests an hour: a fine-grained token with read access to Metadata and Actions, and read and write access to Contents, Issues and Pull requests (to create branches, issues and pull requests from the app). A fine-grained token sees one owner's repositories; for your organizations' private repositories use a classic token with repo and read:org. ".to_owned() + if cfg.device { "It stays on this device, encrypted with a key that never leaves it." } else { "It is saved on this computer only, in a file only you can read." })
+        .child(row().w_full().gap(12.0).flex_wrap().child(field("User name", user)).child(field("Token", token)))
+        .child(text("With only a user name RepoHub shows public repositories (60 requests an hour). A token adds private repositories, your notifications, starring and changes, and 5,000 requests an hour. ".to_owned() + if cfg.device { "It stays on this device, encrypted with a key that never leaves it." } else { "It is saved on this computer only, in a file only you can read." })
             .font(k.ty.text_small).color(k.c.text_muted).wrap());
+    if s.token_help {
+        body = body.child(text("A fine-grained token with read access to Metadata and Actions, and read and write access to Contents, Issues and Pull requests (to create branches, issues and pull requests from the app), sees one owner's repositories and can't read notifications. A classic token with repo, read:org and notifications also reads your organizations' private repositories and your notifications.")
+            .font(k.ty.text_small).color(k.c.text_muted).wrap().key("token-help-text"));
+    }
     if let Some(e) = &s.acct_error {
         body = body.child(text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap());
     }

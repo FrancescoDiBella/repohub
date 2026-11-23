@@ -16,11 +16,14 @@
 | `src/app/repos.rs` | The repository lists, pins and organizations cached between frames (`data_gen`), pinning and starring |
 | `src/app/updates.rs` | Updating RepoHub itself, and the status-bar widget's menu |
 | `src/app/settings.rs` | What Settings changes: the account and signing out, the theme and looks, plugins, coding assistants |
-| `src/app/chrome.rs`, `src/app/keys.rs` | The window around the pages (`view`: sidebar, toolbar, banners, the toast) and the keyboard shortcuts |
+| `src/app/chrome.rs`, `src/app/keys.rs` | The window around the pages (`view`: sidebar, toolbar, banners, the toast, the phone's question sheet) and the keyboard shortcuts (the ones of one key only while no field, terminal or drawing has the keyboard) |
 | `src/<module>/` | A module's parts, next to `src/<module>.rs`, which declares them and re-exports what the crate names: its test modules (`tests.rs`, or the module's own name such as `http_tests.rs`), and the parts of a large module listed below |
 | `src/tests/` | Tests that build the whole app and drive it headless, one module per file (`fix58_tests`, …; `load_gen_tests` has `TempDataDir`); `every_page` draws every page and section on a computer and a phone; `followups_*` the follow-ups of the bug hunt (#138) |
 | `src/replay.rs` | What a finished write changed in the lists (`Change`), applied again, exactly, on what a load that ran meanwhile brings |
 | `src/discard.rs` | "Discard what you typed?": which drafts hold typed text (`state::Draft`), `ask_first` before an action that throws them away, the question floating over the page |
+| `src/settings_nav.rs` | Settings on a phone: the list of its sections and the way back from one (`App::open_settings` opens a section anywhere) |
+| `src/keyboard.rs` | The keyboard: every shortcut (`SHORTCUTS`, Settings → Keyboard), the rows of the list on screen (`rows`) that `j` / `k` and the arrows move through and Enter opens, the marked row's look |
+| `src/confirm.rs` | Asking first before what can't be undone: `Confirm` (one question: inline on a computer, a sheet on a phone), `App::ask` and `App::asking`, the look every question shares (`card`, also the discard question's) |
 | `src/pages.rs`, `src/lists.rs` | Pages: overview, repositories, repository detail, pull requests, issues, Actions, settings |
 | `src/mobile.rs` | The phone layout (top bar and bottom tab bar) used below `mobile::BREAKPOINT`; pages read `App::compact` |
 | `src/ui.rs`, `src/icons.rs` | Small building blocks and the icon set |
@@ -111,6 +114,9 @@ Add `tab notes` (a section's name) after `page repo`, and `REPOHUB_TRACE=1` to p
 With an account and `REPOHUB_BLOCKING=1`, the conversation and the diff are read before the first frame.
 `discard form` (after `page repo tab issues`) types a title in the New issue form and asks
 "Discard what you typed?"; `discard reply` (after `thread 14`) does the same with a comment.
+`ask merge` (after `page pulls`) asks to merge the first open pull request; `ask sign-out` (or
+`push-default`, `pull-over-changes`, `abort-merge`, `clear-saved-data`, `delete-note-Name`,
+`remove-plugin-id`) asks that question, on its page.
 `tab commits` reads the history before the first frame; `commit 0123abc` (or `commit 2`, the
 second in the list) opens a commit, and `compare main...feature/x` compares two branches.
 `tab releases` reads the releases before the first frame; `release new` opens the New release
@@ -217,7 +223,7 @@ and checks, a pull request's files, the history and a commit, releases and tags,
 in `tests/mock/fixtures/`; ETags and 304s; a delay on every answer (`MOCK_DELAY_MS`, default 150),
 slower searches (`MOCK_SEARCH_DELAY_MS`, to watch the lists arrive one by one), `MOCK_DOWN=1` to see
 a failed refresh. It takes a new issue, a comment, a change to an issue (state, title, description,
-labels, assignees, milestone) and a release (and its generated notes), checks what they carry and
+labels, assignees, milestone), a release (and its generated notes) and a merge, checks what they carry and
 answers as GitHub does; what they change reads back. Anything it doesn't know gets a 404 that names
 the request (also printed on its stderr). `/_stats` and `/_log` say what was asked (the log with
 each write's JSON body), `POST /_reset` forgets it, `POST /_fail?path=…&status=500` makes one read
@@ -331,7 +337,13 @@ works too (without its first-frame time). Times include the headless renderer's 
   a `%` in a branch name arrives as `%25`, and decoded once a `%` may not start an escape (`%`
   and two hex digits), so nothing reading the path again can turn it into a dot, a slash or
   anything else; an encoded dot, slash, backslash or NUL is refused anywhere.
-- Text in the UI is plain and specific: say what happened and how to fix it.
+- Text in the UI is plain and specific: say what happened and how to fix it. One word for each
+  thing, as in the glossary below.
+- An empty list says what is empty and what to do about it (`ui::empty`): "No open issues in
+  rune" and "New issue starts one", never just "Nothing to show here".
+- One look for one thing: Public or Private is `ui::visibility`, a selected chip is
+  `ButtonVariant::Contrast`, a question before something that can't be undone is
+  `confirm::Confirm`, a pin is filled while pinned (`icons::PIN_ON`), pushing has `icons::PUSH`.
 - Every action gives feedback when it finishes or fails: a toast (`notify`, `notify_problem`) or
   a message where it happened. Nothing returns silently.
 - An action that throws away typed text (Esc, **Cancel**, another form, leaving a conversation
@@ -340,9 +352,18 @@ works too (without its first-frame time). Times include the headless renderer's 
 - A finished write changes the lists through `App::changed` with a `replay::Change`, so a load
   running meanwhile doesn't undo it: make a new `Change` exact (applying it to lists that
   already show it changes nothing).
-- An action that changes something on GitHub or deletes local data either asks first (merging,
-  publishing a release, removing a plugin, deleting a drawing) or offers **Undo** in its toast (`notify_undo`, with a
-  `state::Undo` that knows how to put it back: closing an issue, deleting a theme).
+- An action that changes something on GitHub or deletes local data either asks first or offers
+  **Undo** in its toast. It asks with `confirm::Confirm` (one look: inline where the button was on
+  a computer, a sheet on a phone; Esc and the back button answer no) when it can't be put back:
+  merging, publishing a release, deleting a drawing, removing a plugin, aborting a merge, pulling
+  over uncommitted changes, pushing to the default branch, signing out, clearing the saved data.
+  It offers **Undo** (`notify_undo`, with a `state::Undo` that knows how to put it back) when it
+  can: closing or reopening an issue or a pull request, a star, deleting a theme, unpinning,
+  removing a coding assistant. A form you fill in and send (a new issue, a comment, a triage
+  change) is its own question. Re-running a workflow and marking a notification as read do
+  neither, as on GitHub (GitHub has no way to mark one unread again); pushing to a branch other
+  than the default one doesn't ask (a push never overwrites what's on GitHub: git refuses one
+  that isn't a fast-forward).
 - The Android app forwards the same writes: add a new one to `android/.../GitHubPaths.java` too,
   with its test.
 - The repository lists, the pinned set and the palette's entries are cached between frames and
@@ -365,6 +386,21 @@ works too (without its first-frame time). Times include the headless renderer's 
 - A pull request that changes the app adds a line to [`CHANGELOG.md`](CHANGELOG.md) under
   **Unreleased** (Added, Changed or Fixed), written for the people who use RepoHub. CI warns
   when it's missing.
+
+### Glossary
+
+The words the UI uses, one per thing:
+
+| Say | For | Not |
+| --- | --- | --- |
+| repository | a GitHub repository (the page, a card, a row) | repo, Repos |
+| pull request | a GitHub pull request | PR, Pulls |
+| page | what the sidebar (on a phone, the tab bar) opens: Overview, Repositories, Pull requests, Issues, Actions, Notifications, Settings | tab, view |
+| section | a part of a repository's page (Code, Commits, … Settings) or of Settings (Account, Appearance, …), picked in its section bar | tab |
+| mode | Light, Dark or System: which of your two themes is on screen (Settings → Appearance → Mode; the sun and moon in the toolbar switch it) | theme, appearance |
+| theme | colours, background, glow and corners, ready-made or yours, picked for light mode and for dark mode. The code calls it a `Look` (`themes::Looks`) | look, skin |
+| Appearance | the Settings section with the mode and the themes | Theme |
+| Open on GitHub | a button that opens what's on screen on GitHub. A link to another page there names it: All checks on GitHub, Full log on GitHub, Settings on GitHub, All on GitHub (a list RepoHub shows part of) | GitHub, View on GitHub |
 
 ## Releasing a version
 

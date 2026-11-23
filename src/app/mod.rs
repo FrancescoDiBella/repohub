@@ -9,7 +9,7 @@ use rune::{AppHandle, Color, AppSpec, Cx, El, KeyEvent, ScrollSpec, TextEdit, Tx
 use rune_kit::shell::{self, PaneState, Sidebar, SidebarRow, SidebarSection, SidebarToggle, SplitView, Toolbar};
 use rune_kit::{ControlSize, IconButton, IconButtonVariant, Kit, PaletteSeed};
 
-use crate::{actions, board, cache, cache_page, claude, clones_shim, commits, diffs, discard, filters, github, harness, icons, inbox, lists, local, mobile, model, net, notes, notes_page, pages, palette, plugins, prefs, releases, replay, review, runs_page, state, sync_io, terminal, themes, thread, thread_page, tray, triage, ui, update};
+use crate::{actions, board, cache, cache_page, claude, clones_shim, commits, confirm, diffs, discard, filters, github, harness, icons, inbox, keyboard, lists, local, mobile, model, net, notes, notes_page, pages, palette, plugins, prefs, releases, replay, review, runs_page, state, sync_io, terminal, themes, thread, thread_page, tray, triage, ui, update};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::config;
 use crate::config::Config;
@@ -95,8 +95,6 @@ pub struct App {
     pub(crate) plugin_installing: bool,
     /// What a plugin asks to do outside the app, waiting for the user's answer.
     pub(crate) plugin_ask: Option<plugins::Request>,
-    /// The plugin whose Remove was pressed once (press again to remove it).
-    pub(crate) plugin_confirm: Option<String>,
     /// What the plugins' context was last built from (`plugins::context_key`).
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     plugin_ctx_key: u64,
@@ -166,20 +164,30 @@ pub struct App {
     pub(crate) branch_filter: TextEdit,
     /// The open form (new issue, branch or pull request).
     pub(crate) form: Option<actions::Form>,
-    /// The pull request whose Merge is waiting for a yes (`owner/repo#12`).
-    pub(crate) confirm_merge: Option<String>,
+    /// The question waiting for a yes (see `confirm`): its key, e.g. `ask-merge-owner/repo#12`.
+    pub(crate) asking: Option<String>,
+    /// On a phone, the open question's sheet, left by the page that asks it for `view` to draw
+    /// over the page (see `confirm::Confirm::show`).
+    pub(crate) sheet: std::cell::RefCell<Option<El>>,
     /// Your unread notifications; `None` until they're first asked for.
     pub(crate) inbox: Option<Load<Vec<inbox::Notification>>>,
     /// The notifications being marked as read.
     pub(crate) inbox_busy: std::collections::HashSet<String>,
     /// The Settings section on screen.
     pub(crate) settings_section: state::SettingsSection,
+    /// On a phone, a section is open rather than the list of them (see `settings_nav`).
+    pub(crate) settings_open: bool,
     /// The connection's details (environment variables, files) are shown in Settings.
     pub(crate) connection_details: bool,
+    /// Settings → Account says which token to make ("Which token?").
+    pub(crate) token_help: bool,
     /// The line comments of the pull request whose diff is open, and the one being written.
     pub(crate) pull_review: Option<review::Review>,
     /// Issues being reopened with Undo, to put back in the list when GitHub confirms.
     pub(crate) reopening: Vec<model::Issue>,
+    /// Pull requests being reopened with Undo (`owner/repo#12`): their message offers no Undo
+    /// in turn.
+    pub(crate) reopening_pulls: Vec<String>,
     /// What the Pull requests and the Issues pages are narrowed to.
     pub(crate) pull_filter: filters::ListFilter,
     pub(crate) issue_filter: filters::ListFilter,
@@ -190,8 +198,13 @@ pub struct App {
     /// The Releases section (its list, the form, questions waiting for a yes) and each
     /// repository's latest release for the header.
     pub(crate) releases: releases::Releases,
+    /// The row of the list on screen marked with the keyboard (`j` / `k`), by its key (see
+    /// `keyboard`).
+    pub(crate) cursor: Option<String>,
     /// The section bar scrolls the section on screen into view on the next frame (`poll`).
     pub(crate) reveal_tab: bool,
+    /// Where the section bar is scrolled, for its arrows (see `pages::SectionBar`).
+    pub(crate) section_bar: pages::SectionBar,
     /// The issue or pull request whose conversation is on screen, in place of the page.
     pub(crate) thread: Option<thread::Open>,
     /// Counts conversation loads (see [`thread::Open::epoch`]).
@@ -224,7 +237,6 @@ pub struct App {
     line_epoch: u64,
     pub(crate) notes: HashMap<(String, String), notes::NotesView>,
     pub(crate) note_name: TextEdit,
-    pub(crate) confirm_delete: Option<String>,
     /// Generation of the open board load request; incremented on board open so late load results
     /// from an earlier board or earlier load cannot overwrite the open board.
     pub(crate) board_load_gen: u64,
@@ -385,7 +397,6 @@ pub(crate) fn init() -> App {
         plugin_error: None,
         plugin_installing: false,
         plugin_ask: None,
-        plugin_confirm: None,
         plugin_ctx_key: 0,
         shown_dark: std::cell::Cell::new(false),
         assist: harness::Assistants::load(),
@@ -427,11 +438,15 @@ pub(crate) fn init() -> App {
         picker: None,
         branch_filter: TextEdit::new(""),
         form: None,
-        confirm_merge: None,
+        asking: None,
+        sheet: std::cell::RefCell::new(None),
         settings_section: state::SettingsSection::Account,
+        settings_open: false,
         connection_details: false,
+        token_help: false,
         pull_review: None,
         reopening: Vec::new(),
+        reopening_pulls: Vec::new(),
         inbox: None,
         inbox_busy: std::collections::HashSet::new(),
         pull_filter: filters::ListFilter::default(),
@@ -439,7 +454,9 @@ pub(crate) fn init() -> App {
         runs_filter: runs_page::RunsFilter::default(),
         commits: commits::Commits::default(),
         releases: releases::Releases::default(),
+        cursor: None,
         reveal_tab: false,
+        section_bar: pages::SectionBar::default(),
         thread: None,
         thread_epoch: 0,
         choices: triage::Cache::default(),
@@ -455,7 +472,6 @@ pub(crate) fn init() -> App {
         line_epoch: 0,
         notes: HashMap::new(),
         note_name: TextEdit::new(""),
-        confirm_delete: None,
         board_load_gen: 0,
         saving_notes: HashMap::new(),
         #[cfg(test)]
@@ -550,6 +566,7 @@ pub(crate) fn init() -> App {
     // `-- tab notes` (a name or a number) picks the repository page's section.
     if let Some(t) = arg("tab").and_then(|t| RepoTab::parse(&t)) {
         s.tab = t;
+        s.reveal_tab = true;
     }
     // For headless stills the clone's changes are read before the first frame (the background
     // read would land after the picture is taken).
@@ -563,6 +580,8 @@ pub(crate) fn init() -> App {
         s.diff.set_files(diffs::local_files(&c));
         s.changes = Some(c);
         s.diff_load = Some(Load::Ready(()));
+        // The clone's files too: the section bar offers Changes only with them.
+        s.local.insert(full.clone(), local::scan(&root).into());
     }
     // `-- thread 14` opens the conversation of that pull request or issue (for headless stills).
     if let Some(number) = arg("thread").and_then(|n| n.parse::<u32>().ok()) {
@@ -581,6 +600,7 @@ pub(crate) fn init() -> App {
         && let Some(n) = state::SettingsSection::LABELS.iter().position(|l| l.eq_ignore_ascii_case(&sec))
     {
         s.settings_section = state::SettingsSection::ALL[n];
+        s.settings_open = true;
     }
     // `-- diff 14` also opens that pull request's changes.
     if let Some(number) = arg("diff").and_then(|n| n.parse::<u32>().ok())
@@ -619,6 +639,9 @@ pub(crate) fn init() -> App {
     // `-- discard form` (or `reply`) types into the New issue form (or the conversation's
     // comment box) and asks "Discard what you typed?" (headless stills).
     s.discard_still(arg("discard"));
+    // `-- ask merge` (or `sign-out`, `push-default`, …) asks that question before something that
+    // can't be undone (headless stills).
+    confirm::still(&mut s, arg("ask"));
     // `-- board Name` opens a drawing of that section (for headless stills); `zoom 2` zooms it.
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(name) = arg("board")

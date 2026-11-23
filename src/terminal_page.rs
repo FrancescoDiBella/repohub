@@ -82,8 +82,12 @@ pub(crate) fn pick_folder(s: &App, k: &Kit, i: usize, found: bool) -> El {
     let use_it = Button::new("Use this folder").control_size(ControlSize::Small).disabled(s.clone_path.text.trim().is_empty())
         .on_press(move |s: &mut App| s.use_folder(i)).build(k).key("use-folder");
     let parent = &s.default_clone_parent;
-    let clone = Button::new(format!("Clone into {}", parent.join(&r.name).display())).icon(&icons::BRANCH).control_size(ControlSize::Small)
-        .on_press(move |s: &mut App| s.clone_repo(i)).build(k).key("clone-repo");
+    // The folder can be long: it wraps beside the button rather than widening it past a phone.
+    let clone = row().w_full().gap(8.0).center_y().flex_wrap()
+        .child(Button::new("Clone").icon(&icons::BRANCH).control_size(ControlSize::Small)
+            .help(format!("Clone {} into {}", r.full_name, parent.join(&r.name).display()))
+            .on_press(move |s: &mut App| s.clone_repo(i)).build(k).key("clone-repo"))
+        .child(text(format!("into {}", parent.join(&r.name).display())).font(k.ty.small).color(k.c.text_muted).wrap().grow(1.0).shrink().min_w(0.0));
     let mut p = panel(k).padding(20.0).gap(12.0);
     if !found {
         p = p.child(text("No local copy found").font(k.ty.body_medium).color(k.c.text_strong))
@@ -102,7 +106,7 @@ pub(crate) fn pick_folder(s: &App, k: &Kit, i: usize, found: bool) -> El {
         p = p.child(text("Use a different folder").font(k.ty.ui_medium).color(k.c.text_base));
     }
     p.child(row().w_full().gap(8.0).center_y().flex_wrap().child(field).child(use_it))
-        .child(if found { el() } else { row().child(clone) })
+        .child(if found { el() } else { clone })
 }
 
 /// The terminal's height: 520 pt, or what a phone's screen leaves.
@@ -226,5 +230,5 @@ fn view(s: &App, k: &Kit, i: usize, t: &terminal::Term, dark: bool) -> El {
     }
     col().w_full().gap(6.0)
         .child(area)
-        .child(text("Click the terminal to type. Paste with Ctrl/⌘+V; Ctrl+C stops the running command; Copy screen copies what is shown. Ctrl+Shift+Tab leaves the terminal; ⌘/Ctrl+K and the page shortcuts work here too.").font(k.ty.text_small).color(k.c.text_faint))
+        .child(text("Click the terminal to type. Paste with Ctrl/⌘+V; Ctrl+C stops the running command; Copy screen copies what is shown. Ctrl+Shift+Tab leaves the terminal; ⌘/Ctrl+K and the page shortcuts work here too.").font(k.ty.text_small).color(k.c.text_faint).wrap())
 }

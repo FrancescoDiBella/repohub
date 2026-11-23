@@ -65,7 +65,7 @@ impl App {
         let full = r.full_name.clone();
         let Some(root) = self.known_clone(&full) else {
             // Say why nothing happens rather than doing nothing.
-            self.notify_problem(format!("There's no local copy of {full} on this computer: pick its folder in the Terminal tab, or clone it there."));
+            self.notify_problem(format!("There's no local copy of {full} on this computer: pick its folder in the Terminal section, or clone it there."));
             return;
         };
         let Some(h) = self.handle.clone() else { return };

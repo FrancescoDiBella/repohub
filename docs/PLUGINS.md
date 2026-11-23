@@ -81,7 +81,7 @@ changes your variables, RepoHub draws the plugin again.
 | `repohub.open(url)` | Asks the user to open an `https://` link in the browser. RepoHub shows the address and opens it only if they agree. |
 | `repohub.notify(text)` | Shows a short message at the bottom of the window. |
 | `repohub.copy(text)` | Asks the user to copy text to the clipboard. RepoHub shows the text (control characters removed) and copies it only if they agree. |
-| `repohub.openRepo(fullName)` | Opens a repository's page (`"owner/name"`). |
+| `repohub.openRepo(fullName, own)` | Opens a repository's page (`"owner/name"`); with `own` true, on the plugin's own section there (its `repo_tab`). |
 
 The context:
 

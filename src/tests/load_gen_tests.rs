@@ -283,7 +283,14 @@ fn ui_sign_out_in_settings_resets_to_overview_and_drops_late_load() {
     rt.pointer_move(x, y);
     rt.pointer_down(x, y);
     rt.pointer_up(x, y);
-    rt.frame(0.0);
+    rt.frame(0.1);
+    // It asks first (#66): the token saved here is deleted.
+    assert_eq!(rt.state.cfg.token.as_deref(), Some("tok_alice"), "not before the answer");
+    let (x, y) = rt.find("ask-sign-out-yes").expect("the question's Sign out");
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.frame(0.2);
 
     assert_eq!(rt.state.status, Status::Sample);
     assert_eq!(rt.state.page, crate::Page::Overview, "signing out from Settings returns to Overview");
@@ -294,7 +301,7 @@ fn ui_sign_out_in_settings_resets_to_overview_and_drops_late_load() {
     rt.update(|s, _| {
         s.apply(stale_gen, Ok(account_data("alice", "secret-repo", true)));
     });
-    rt.frame(0.0);
+    rt.frame(0.3);
 
     assert_eq!(rt.state.status, Status::Sample);
     assert_eq!(rt.state.page, crate::Page::Overview);

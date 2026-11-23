@@ -108,8 +108,8 @@ pub fn entries(s: &App) -> Vec<Entry> {
     {
         let n = &r.name;
         let tabs = s.tabs();
-        out.push(entry(format!("New issue in {n}"), "Action", &icons::ISSUE, Command::Compose(i, Compose::Issue)));
-        out.push(entry(format!("New pull request in {n}"), "Action", &icons::PULL, Command::Compose(i, Compose::Pull)));
+        out.push(Entry { keys: &["I"], ..entry(format!("New issue in {n}"), "Action", &icons::ISSUE, Command::Compose(i, Compose::Issue)) });
+        out.push(Entry { keys: &["P"], ..entry(format!("New pull request in {n}"), "Action", &icons::PULL, Command::Compose(i, Compose::Pull)) });
         out.push(entry(format!("New branch in {n}"), "Action", &icons::BRANCH, Command::Compose(i, Compose::Branch)));
         out.push(entry(format!("New release in {n}"), "Action", &icons::TAG, Command::NewRelease(i)));
         if s.assist.claude {
@@ -121,9 +121,9 @@ pub fn entries(s: &App) -> Vec<Entry> {
             }
         }
         out.push(if s.is_pinned(i) {
-            entry(format!("Unpin {n}"), "Action", &icons::PIN, Command::TogglePin(i))
+            entry(format!("Unpin {n}"), "Action", &icons::PIN_ON, Command::TogglePin(i))
         } else {
-            entry(format!("Pin {n} to the sidebar"), "Action", &icons::PIN_ON, Command::TogglePin(i))
+            entry(format!("Pin {n} to the sidebar"), "Action", &icons::PIN, Command::TogglePin(i))
         });
         out.push(entry(format!("Open a terminal in {n}"), "Action", &icons::TERMINAL, Command::Tab(i, RepoTab::Terminal)));
         if s.tab != RepoTab::Commits {
@@ -182,7 +182,7 @@ pub fn entries(s: &App) -> Vec<Entry> {
     }
     for t in &s.looks.all {
         if s.looks.light != t.id && s.looks.dark != t.id {
-            out.push(Entry { detail: "theme look colours".into(), ..entry(format!("Theme: {}", t.name), "Appearance", if t.dark { &icons::MOON } else { &icons::SUN }, Command::Look(t.id.clone())) });
+            out.push(Entry { detail: "theme colours".into(), ..entry(format!("Theme: {}", t.name), "Appearance", if t.dark { &icons::MOON } else { &icons::SUN }, Command::Look(t.id.clone())) });
         }
     }
     for (o, n) in crate::orgs(s) {

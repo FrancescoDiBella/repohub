@@ -213,7 +213,7 @@ pub fn tooltip(s: &App) -> String {
     let my_failing = my_failing_pulls(&s.data);
     let base = format!("{} · {}", s.cfg.title, plural_capped(prs, prs_capped, "open pull request", "open pull requests"));
     if my_failing > 0 {
-        format!("{base} · {}", plural(my_failing, "failing check on your PRs", "failing checks on your PRs"))
+        format!("{base} · {}", plural(my_failing, "failing check on your pull requests", "failing checks on your pull requests"))
     } else {
         base
     }
@@ -419,7 +419,7 @@ mod tests {
             m.iter().any(|e| e.id == "go:pulls:mine-failing" && e.label == "1 of your pull requests has failing checks"),
             "{m:#?}"
         );
-        assert!(tooltip(&s).contains("1 failing check on your PRs"), "{}", tooltip(&s));
+        assert!(tooltip(&s).contains("1 failing check on your pull requests"), "{}", tooltip(&s));
         assert_eq!(parse("go:pulls:mine-failing"), Some(Action::MyFailingPulls));
     }
 

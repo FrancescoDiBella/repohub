@@ -263,7 +263,7 @@ impl App {
         } else {
             self.branch_of.insert(r.full_name.clone(), branch);
         }
-        self.confirm_delete = None;
+        self.asking = None;
         self.load_detail(i);
         if self.tab == RepoTab::Notes {
             self.load_notes(i);

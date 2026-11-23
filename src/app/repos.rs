@@ -44,6 +44,9 @@ impl App {
                 if self.landed != landed {
                     self.changed(replay::Change::Star { repo: repo.to_owned(), on }, true);
                 }
+                // It changed something on GitHub: said, with Undo.
+                let name = self.data.repos.iter().find(|r| r.full_name.eq_ignore_ascii_case(repo)).map(|r| r.name.clone()).unwrap_or_else(|| repo.to_owned());
+                self.notify_undo(format!("{} {name}", if on { "Starred" } else { "Unstarred" }), state::Undo::Star { repo: repo.to_owned() });
             }
             Err(e) => {
                 self.replays.retain(|c| !matches!(c, replay::Change::Star { repo: r, .. } if r.eq_ignore_ascii_case(repo)));
@@ -245,7 +248,8 @@ impl App {
         let name = self.data.repos[i].name.clone();
         if let Some(at) = list.iter().position(|p| p.eq_ignore_ascii_case(&full)) {
             list.remove(at);
-            self.notify(format!("Unpinned {name}"));
+            // Undo pins it again in the same place.
+            self.notify_undo(format!("Unpinned {name}"), state::Undo::Pin { repo: full, at });
         } else {
             list.push(full);
             self.notify(format!("Pinned {name}"));
@@ -253,6 +257,24 @@ impl App {
         prefs::save_pins(&list);
         self.pins = Some(list);
         self.sync_tray();
+    }
+
+    /// The toast's **Undo** after unpinning `repo`: it's pinned again at `at` (if it's still
+    /// loaded and not pinned since).
+    pub(crate) fn repin(&mut self, repo: &str, at: usize) {
+        let mut list: Vec<String> = match &self.pins {
+            Some(p) => p.clone(),
+            None => pinned(self).into_iter().map(|j| self.data.repos[j].full_name.clone()).collect(),
+        };
+        if list.iter().any(|p| p.eq_ignore_ascii_case(repo)) {
+            return;
+        }
+        let name = self.data.repos.iter().find(|r| r.full_name.eq_ignore_ascii_case(repo)).map(|r| r.name.clone()).unwrap_or_else(|| repo.to_owned());
+        list.insert(at.min(list.len()), repo.to_owned());
+        prefs::save_pins(&list);
+        self.pins = Some(list);
+        self.sync_tray();
+        self.notify(format!("Pinned {name} again"));
     }
 }
 

@@ -10,6 +10,20 @@ The sections are **Added**, **Changed** and **Fixed**.
 ## Unreleased
 
 ### Added
+- **Settings → Plugins** has an **Open** button for each plugin's page, also where a phone (which
+  has no sidebar) finds it.
+- The Pull requests and Issues pages have **Created by me** and **Assigned to me** on both, and
+  chips for who opened them (**Author**), next to the repository and label chips.
+- More of RepoHub works from the keyboard: `/` searches the page (Repositories, Pull requests,
+  Issues, a repository's Commits; elsewhere it opens the palette), `j` / `k` or ↓ / ↑ move through
+  the list on screen and Enter opens the marked row, `i` and `p` start a New issue or a New pull
+  request on a repository's page, and `?` lists every shortcut in the new **Settings →
+  Keyboard**. None of them fires while you type in a field, in the terminal or on a drawing.
+- RepoHub asks before aborting a merge, pulling over uncommitted changes, pushing (or committing
+  and pushing) straight to the repository's default branch, signing out and clearing the saved
+  data.
+- **Undo** in the toast after unpinning a repository, removing a coding assistant, reopening an
+  issue or a pull request, and starring or unstarring (which now says it was done).
 - Esc, **Cancel**, opening another form or leaving a conversation asks "Discard what you typed?"
   (**Discard** or **Keep editing**) when a New issue, branch or pull request form, the release
   form, an edited title or description, or a comment you're writing holds text not sent yet. A
@@ -19,6 +33,26 @@ The sections are **Added**, **Changed** and **Fixed**.
   100 read, with a link to the rest.
 
 ### Changed
+- On a phone Settings is a list of its sections, each saying what it holds; one opens with a
+  way back (**Settings**, Esc or the back button). The theme editor opens in a view of its own,
+  with **Themes** (or Esc) back to the gallery.
+- One word for each thing: "mode" is Light, Dark or System and "theme" the colours each mode
+  uses (the toolbar's button says "Switch to light mode"), a repository's parts are sections,
+  and links to GitHub say what they open ("All comments on GitHub", "Details on GitHub", "All on
+  GitHub").
+- Every empty list says what's empty and what to do, e.g. "No open issues in rune" with "New
+  issue starts one" (no more "Nothing to show here").
+- Public and Private look the same on the repository cards and on a repository's page, Private
+  with a lock.
+- Each Settings section fits on one screen: the account in two columns, five themes to a row,
+  the keyboard shortcuts in a section of their own, and the kind of token to make behind
+  **Which token?** (which also says that only a classic token reads your notifications).
+- The palette's Pin and Unpin show the pin the way the pin button does.
+- Every question asked before something that can't be undone looks and works the same: merging
+  a pull request (from its row or its diff, where you now pick a merge commit, squash or rebase
+  in the question), publishing a release, deleting a drawing, removing a plugin. On a computer
+  it takes the button's place; on a phone it's a sheet at the bottom of the screen, like
+  "Discard what you typed?". **Cancel**, Esc or the back button answer no.
 - With only a token and no user name, the lists of last time show once GitHub has said whose
   the token is (one request), so a token changed outside the app never shows the previous
   account's lists.
@@ -26,6 +60,15 @@ The sections are **Added**, **Changed** and **Fixed**.
   picker, questions and forms first.
 
 ### Fixed
+- On a phone the theme editor puts each label above its field and its title above its buttons,
+  so nothing overlaps, and the Terminal's hint wraps instead of running past the window.
+- The repository's section bar: when the sections don't fit, its edges fade and an arrow at each
+  end scrolls to the hidden ones, and the section on screen is always scrolled into view (a
+  plugin's section opened from the palette too).
+- The example plugin's Checklists page opens the repository's checklist, as it says; plugins
+  can open their own section with `repohub.openRepo(fullName, true)`.
+- On a phone, the Terminal section's **Clone** button no longer runs past the screen when the
+  folder's path is long.
 - Closing an issue, merging, a new issue or a star made while a refresh (or the first load) runs
   is no longer undone when it lands, and isn't counted twice when GitHub already shows it.
 - Branch names with `%` work in the web app and on Android (creating a branch from one,

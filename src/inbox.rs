@@ -94,7 +94,7 @@ fn line(s: &App, k: &Kit, n: &Notification) -> El {
                 Some(num) => format!("{} · {} #{num} · {}", n.why(), n.repo, model::fmt_ago(n.updated_at, s.now)),
                 None => format!("{} · {} · {}", n.why(), n.repo, model::fmt_ago(n.updated_at, s.now)),
             }).font(k.ty.text_small).color(k.c.text_muted).wrap()));
-    row().w_full().center_y().child(body).child(read.mr(12.0))
+    crate::keyboard::mark(k, row().w_full().center_y().child(body).child(read.mr(12.0)), s.marked(&format!("notif-{}", n.id)))
 }
 
 pub fn page(s: &App, k: &Kit) -> El {
@@ -110,7 +110,7 @@ pub fn page(s: &App, k: &Kit) -> El {
             panel(k).padding(28.0).items_center().gap(10.0).role("alert").key("inbox-failed")
                 .child(text(e.clone()).font(k.ty.small).color(k.c.text_base).wrap())
                 .child(Button::new("Retry").icon(&icons::REFRESH).control_size(ControlSize::Small).on_press(|s: &mut App| s.load_inbox()).build(k).key("inbox-retry"))),
-        Some(Load::Ready(list)) if list.is_empty() => ("Nothing unread.".to_owned(), note("You're all caught up.".into(), "inbox-empty")),
+        Some(Load::Ready(list)) if list.is_empty() => ("Nothing unread.".to_owned(), panel(k).key("inbox-empty").child(ui::empty(k, "No unread notifications", "You're all caught up: new ones show here, and Refresh asks GitHub now."))),
         Some(Load::Ready(list)) => {
             // Grouped by repository, in the order the newest notification puts them.
             let mut repos: Vec<&str> = Vec::new();

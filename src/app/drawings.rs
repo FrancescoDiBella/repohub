@@ -67,7 +67,6 @@ impl App {
 
     pub(crate) fn delete_note(&mut self, i: usize, name: String) {
         let Some((full, branch)) = self.notes_branch(i) else { return };
-        self.confirm_delete = None;
         let id = (full, branch, name);
         // Deleting wins over any write still waiting; an operation already running finishes
         // first, then the delete runs, so the drawing can't come back.

@@ -114,8 +114,7 @@ pub fn overview(s: &App, k: &Kit) -> El {
     let recent = if empty_loading {
         ui::skeleton_rows_in_panel(k, recent_head.key("skeleton-recent").role("status").label("Loading recent repositories…"), 4, false)
     } else if d.repos.is_empty() {
-        recent_head.child(rule(k)).child(col().w_full().padding(24.0).items_center()
-            .child(text("No repositories to show").font(k.ty.ui).color(k.c.text_muted)))
+        recent_head.child(rule(k)).child(ui::empty(k, "No repositories to show", "Your repositories show here once there are any: New repository on the Repositories page creates one on GitHub."))
     } else {
         d.repos.iter().enumerate().take(4).fold(
             recent_head,
@@ -127,8 +126,7 @@ pub fn overview(s: &App, k: &Kit) -> El {
     let review = if lists_loading {
         ui::skeleton_rows_in_panel(k, review_head.key("skeleton-pulls").role("status").label("Loading open pull requests…"), 4, true)
     } else if open_list.is_empty() {
-        review_head.child(rule(k)).child(col().w_full().padding(24.0).items_center()
-            .child(text("No open pull requests").font(k.ty.ui).color(k.c.text_muted)))
+        review_head.child(rule(k)).child(ui::empty(k, "No open pull requests", "Pull requests you open or are asked to review show here. New pull request is on a repository's page."))
     } else {
         open_list.into_iter().fold(
             review_head,
@@ -234,10 +232,11 @@ pub fn repos(s: &App, k: &Kit) -> El {
         let show_owner = !r.owner.eq_ignore_ascii_case(me);
         let pinned = s.is_pinned(i);
         let now = s.now;
+        let marked = s.marked(&format!("repo-{}", r.full_name));
         list = list.child(rune::memo(
             format!("card-{}", r.full_name),
-            ((i, r.pushed, r.stars, r.forks, r.issues, now_bucket), (r.starred, r.private, r.fork, r.archived, show_owner, pinned), &look_ver),
-            || repo_card(k, i, r, show_owner, pinned, now),
+            ((i, r.pushed, r.stars, r.forks, r.issues, now_bucket), (r.starred, r.private, r.fork, r.archived, show_owner, pinned, marked), &look_ver),
+            || crate::keyboard::mark(k, repo_card(k, i, r, show_owner, pinned, now), marked),
         ));
     }
     if remaining > 0 {
@@ -259,10 +258,14 @@ pub fn repos(s: &App, k: &Kit) -> El {
                 list = list.child(ui::error_panel(k, e, "retry-repos", |s: &mut App| s.refresh()));
             }
         } else {
-            let msg = if all.is_empty() { "No repositories to show" } else { "No repositories match your search" };
-            list = list.child(panel(k).padding(32.0).items_center().gap(6.0)
-                .child(ui::ico(&icons::REPO, 24.0, k.c.icon_faint))
-                .child(text(msg).font(k.ty.ui).color(k.c.text_muted)));
+            let (msg, todo) = if all.is_empty() {
+                ("No repositories to show", "New repository creates one on GitHub; it shows here after the next refresh.")
+            } else {
+                ("No repositories match your search", "Change or clear the search, or pick All and every owner above.")
+            };
+            list = list.child(panel(k).padding(4.0).items_center().gap(0.0)
+                .child(ui::ico(&icons::REPO, 24.0, k.c.icon_faint).mt(24.0))
+                .child(ui::empty(k, msg, todo).pt(8.0)));
         }
     }
     let sub = if s.data.is_empty() && s.status.is_busy() {
@@ -324,7 +327,7 @@ fn star_button(k: &Kit, i: usize, r: &Repo, with_count: bool, key: String) -> El
 
 /// A repository in the list; `show_owner` prefixes the name with its organization.
 fn repo_card(k: &Kit, i: usize, r: &Repo, show_owner: bool, pinned: bool, now: i64) -> El {
-    let vis = if r.private { Badge::new("Private").variant(BadgeVariant::Subtle).build(k) } else { Badge::new("Public").build(k) };
+    let vis = ui::visibility(k, r.private);
     let mut title = row().gap(8.0).center_y().flex_wrap();
     if show_owner {
         title = title.child(text(format!("{} /", r.owner)).font(k.ty.body).color(k.c.text_muted));
@@ -349,7 +352,7 @@ fn repo_card(k: &Kit, i: usize, r: &Repo, show_owner: bool, pinned: bool, now: i
         .child(ui::stat(k, &icons::ISSUE, r.issues.to_string()).help(format!("{} open issues and pull requests", r.issues)))
         .child(text(format!("Updated {}", r.updated_ago(now))).font(k.ty.text_small).color(k.c.text_faint));
     let desc = if r.description.is_empty() { "No description".to_owned() } else { r.description.clone() };
-    panel(k).padding(16.0).gap(10.0)
+    panel(k).padding(16.0).gap(10.0).key(format!("repo-{}", r.full_name))
         .child(row().w_full().justify_between().gap(12.0)
             .child(col().grow(1.0).shrink().gap(6.0)
                 .child(title)
@@ -369,7 +372,7 @@ pub fn repo_detail(s: &App, k: &Kit, i: usize, plugin: Option<El>) -> El {
     let r = &s.data.repos[i];
     let back = Button::new("Repositories").icon(&icons::BACK).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
         .on_press(|s: &mut App| s.go(Page::Repos)).build(k).key("back").self_start();
-    let vis = if r.private { ui::pill(k, "Private", k.c.warning.icon) } else { ui::pill(k, "Public", k.c.text_muted) };
+    let vis = ui::visibility(k, r.private);
     // The name, Public or Private, and the latest release's tag (it opens Releases).
     let header = row().w_full().center_y().justify_between().gap(12.0).flex_wrap()
         .child(row().gap(10.0).center_y().shrink().min_w(0.0)
@@ -402,21 +405,46 @@ pub fn repo_detail(s: &App, k: &Kit, i: usize, plugin: Option<El>) -> El {
             }
         }).build(k).key("tabs");
     // Eleven sections and the plugins' don't always fit (a phone, a narrow window): the strip
-    // scrolls sideways rather than squeezing the labels, and `reveal_tab` keeps the one on screen
-    // in view.
-    let tabs = row().w_full().scroll_x().child(tabs);
+    // scrolls sideways rather than squeezing the labels. Where sections are hidden its edge
+    // fades and an arrow scrolls to them; `reveal_tab` keeps the one on screen in view.
+    let bar = s.section_bar;
+    let tabs = tabs.on_layout_tx(|s: &mut App, [x, _, w, _], _| s.section_bar.content = [x, w]);
+    let strip = row().key("tabs-strip").grow(1.0).shrink().min_w(0.0).scroll_x().scroll_edge_fade(24.0).scroll_margin(28.0).child(tabs)
+        .on_layout_tx(|s: &mut App, [x, _, w, _], _| {
+            // A new width (the arrows came, the window changed): the section on screen stays in view.
+            if (s.section_bar.view[1] - w).abs() > 1.0 {
+                s.reveal_tab = true;
+            }
+            s.section_bar.view = [x, w];
+        });
+    // While sections don't fit, an arrow at each end (dimmed at the end it can't go past).
+    let arrow = |icon: &'static rune::Icon, label: &str, key: &str, dir: f32, on: bool| {
+        rune_kit::IconButton::new(icon).variant(rune_kit::IconButtonVariant::GhostMuted).label(label.to_owned()).help(label.to_owned()).disabled(!on)
+            .on_press_tx(move |s: &mut App, tx| tx.scroll_to_x("tabs-strip", s.section_bar.scrolled_by(dir))).build(k).key(key.to_owned())
+    };
+    let tabs = if bar.overflows() {
+        row().w_full().gap(4.0).center_y()
+            .child(arrow(&icons::BACK, "Show the sections before", "tabs-before", -1.0, bar.hidden_before()))
+            .child(strip)
+            .child(arrow(&icons::NEXT, "Show more sections", "tabs-after", 1.0, bar.hidden_after()))
+    } else {
+        row().w_full().child(strip)
+    };
     let in_repo = |name: &str| name.eq_ignore_ascii_case(&r.full_name) || name.eq_ignore_ascii_case(&r.name);
     let body = if let Some(p) = plugin.filter(|_| s.plugin_tab.is_some()) { p } else { match s.tab {
         RepoTab::Code => code_tab(s, k, i, r),
         RepoTab::Commits => crate::commits_page::commits_tab(s, k, i),
         RepoTab::Changes => crate::changes_page::changes_tab(s, k, i),
         RepoTab::Issues => list_of(s, k, "Open issues", Some(actions::open_form_button(k, i, Compose::Issue)),
-            s.data.issues.iter().filter(|x| in_repo(&x.repo)).map(|x| actions::issue_line(s, k, x)).collect()),
+            s.data.issues.iter().filter(|x| in_repo(&x.repo)).map(|x| actions::issue_line(s, k, x)).collect(),
+            (&format!("No open issues in {}", r.name), "New issue starts one (or press i).")),
         RepoTab::Pulls => col().w_full().gap(16.0)
             .children(crate::changes_page::pull_panel_for(s, k, Some(&r.full_name)))
             .child(list_of(s, k, "Pull requests", Some(actions::open_form_button(k, i, Compose::Pull)),
-                s.data.pulls.iter().filter(|x| in_repo(&x.repo)).map(|x| actions::pull_line(s, k, x, s.compact)).collect())),
-        RepoTab::Actions => list_of(s, k, "Workflow runs", None, s.data.runs.iter().filter(|x| in_repo(&x.repo)).map(|x| crate::runs_page::run_line(s, k, x, s.compact)).collect()),
+                s.data.pulls.iter().filter(|x| in_repo(&x.repo)).map(|x| actions::pull_line(s, k, x, s.compact)).collect(),
+                (&format!("No pull requests involving you in {}", r.name), "New pull request opens one from a branch (or press p)."))),
+        RepoTab::Actions => list_of(s, k, "Workflow runs", None, s.data.runs.iter().filter(|x| in_repo(&x.repo)).map(|x| crate::runs_page::run_line(s, k, x, s.compact)).collect(),
+            (&format!("No recent workflow runs in {}", r.name), "Runs show here once a workflow in .github/workflows runs on GitHub.")),
         RepoTab::Releases => crate::releases_page::releases_tab(s, k, i),
         RepoTab::Notes => crate::notes_page::notes_tab(s, k, i),
         RepoTab::Claude => crate::claude_page::claude_tab(s, k, i),
@@ -432,11 +460,52 @@ pub fn repo_detail(s: &App, k: &Kit, i: usize, plugin: Option<El>) -> El {
 /// elsewhere (the header, the palette, the place saved last time, a start-up argument). It runs
 /// on the frame after `App::set_tab` (see `poll`).
 pub fn reveal_tab(s: &App, tx: &mut rune::Tx) {
-    if !matches!(s.page, Page::Repo(_)) || s.plugin_tab.is_some() {
+    if !matches!(s.page, Page::Repo(_)) {
         return;
     }
-    if let Some(n) = s.tabs().iter().position(|t| *t == s.tab) {
+    let shown = s.tabs();
+    // A plugin's section comes after the app's.
+    let at = match &s.plugin_tab {
+        Some(p) => s.plugins.repo_tabs().iter().position(|(id, _)| id == p).map(|n| shown.len() + n),
+        None => shown.iter().position(|t| *t == s.tab),
+    };
+    if let Some(n) = at {
         tx.scroll_into_view(format!("tabs/segment{n}"));
+    }
+}
+
+/// Where the repository's section bar is scrolled: the strip's and its sections' left edge
+/// and width on screen (see `repo_detail`), for its arrows.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SectionBar {
+    pub view: [f32; 2],
+    pub content: [f32; 2],
+}
+
+impl SectionBar {
+    /// How far the strip is scrolled.
+    fn scrolled(&self) -> f32 {
+        (self.view[0] - self.content[0]).max(0.0)
+    }
+
+    /// The sections don't all fit.
+    pub fn overflows(&self) -> bool {
+        self.content[1] > self.view[1] + 1.0
+    }
+
+    /// Sections are hidden past the strip's left edge.
+    pub fn hidden_before(&self) -> bool {
+        self.overflows() && self.scrolled() > 1.0
+    }
+
+    /// Sections are hidden past its right edge.
+    pub fn hidden_after(&self) -> bool {
+        self.overflows() && self.content[0] + self.content[1] > self.view[0] + self.view[1] + 1.0
+    }
+
+    /// Where an arrow scrolls to: most of the strip's width back (`dir` -1) or on (1).
+    fn scrolled_by(&self, dir: f32) -> f32 {
+        (self.scrolled() + dir * self.view[1] * 0.75).max(0.0)
     }
 }
 
@@ -453,19 +522,19 @@ fn local_or_github(s: &App, k: &Kit, i: usize, r: &Repo, has_local: bool, github
     }
 }
 
-fn list_of(s: &App, k: &Kit, title: &str, action: Option<El>, rows: Vec<El>) -> El {
-    let empty = rows.is_empty();
+/// A repository section's list; `empty` says what's empty and what to do when it is.
+fn list_of(s: &App, k: &Kit, title: &str, action: Option<El>, rows: Vec<El>, empty: (&str, &str)) -> El {
+    let none = rows.is_empty();
     let mut p = panel(k).child(panel_head(k, title, action));
     for r in rows {
         p = p.child(rule(k)).child(r);
     }
     // Only the repositories are in yet: the list is on its way, not empty.
-    if empty && s.lists_loading() {
+    if none && s.lists_loading() {
         p = p.child(rule(k)).child(col().w_full().padding(28.0).items_center().role("status").key("repo-list-loading")
             .child(text("Loading…").font(k.ty.ui).color(k.c.text_muted)));
-    } else if empty {
-        p = p.child(rule(k)).child(col().w_full().padding(28.0).items_center()
-            .child(text("Nothing to show here").font(k.ty.ui).color(k.c.text_muted)));
+    } else if none {
+        p = p.child(rule(k)).child(ui::empty(k, empty.0, empty.1).key("repo-list-empty"));
     }
     p
 }
@@ -551,8 +620,7 @@ fn code_tab(s: &App, k: &Kit, i: usize, r: &Repo) -> El {
                 if d.commit.is_some() {
                     files = files.child(rule(k));
                 }
-                files = files.child(col().w_full().padding(24.0).items_center()
-                    .child(text("No files in this branch").font(k.ty.ui).color(k.c.text_muted)));
+                files = files.child(ui::empty(k, "No files in this branch", "Push a commit to it, or pick another branch above."));
             }
             if d.files.len() > 40 {
                 let tree_url = format!("{}/tree/{}", r.url, at);
@@ -561,7 +629,7 @@ fn code_tab(s: &App, k: &Kit, i: usize, r: &Repo) -> El {
                         .role("link").label(format!("Showing 40 of {} files. Open all on GitHub", d.files.len())).key("files-more")
                         .on_press_tx(move |_: &mut App, tx| { let _ = tx.open_url(&tree_url); })
                         .child(text(format!("Showing 40 of {} files", d.files.len())).font(k.ty.small).color(k.c.text_muted))
-                        .child(row().gap(6.0).center_y().child(text("Open on GitHub").font(k.ty.small).color(k.c.text_accent)).child(ui::ico(&icons::EXTERNAL, 13.0, k.c.text_accent))),
+                        .child(row().gap(6.0).center_y().child(text("All on GitHub").font(k.ty.small).color(k.c.text_accent)).child(ui::ico(&icons::EXTERNAL, 13.0, k.c.text_accent))),
                 );
             }
         }

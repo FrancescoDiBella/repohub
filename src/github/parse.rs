@@ -151,7 +151,7 @@ pub fn parse_check_runs(v: &Value) -> Vec<crate::thread::Check> {
 
 pub fn parse_issue(v: &Value) -> Issue {
     let created_at = s(v, "created_at");
-    Issue { labels: labels_of(v), assignees: logins_of(v, "assignees"),
+    Issue { labels: labels_of(v), assignees: logins_of(v, "assignees"), author: v.get("user").map(|u| s(u, "login")).unwrap_or_default(),
         number: n(v, "number"),
         title: s(v, "title"),
         repo: repo_from_url(&s(v, "repository_url")),

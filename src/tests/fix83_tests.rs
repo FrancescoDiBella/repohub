@@ -147,12 +147,12 @@ fn a_failed_write_on_the_open_drawing_shows_once() {
 fn a_merge_confirmation_closes_with_its_diff() {
     let mut s = app();
     s.open_pull_diff("owner/repo".into(), 14);
-    s.confirm_merge = Some(crate::actions::busy_key("owner/repo", 14));
+    s.ask(crate::actions::merge_ask("owner/repo", 14));
     s.open_pull_diff("owner/repo".into(), 9);
-    assert_eq!(s.confirm_merge, None, "another diff: the old question goes");
-    s.confirm_merge = Some(crate::actions::busy_key("owner/repo", 9));
+    assert_eq!(s.asking, None, "another diff: the old question goes");
+    s.ask(crate::actions::merge_ask("owner/repo", 9));
     s.close_pull_diff();
-    assert_eq!(s.confirm_merge, None);
+    assert_eq!(s.asking, None);
 }
 
 #[test]

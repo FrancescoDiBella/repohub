@@ -181,7 +181,7 @@ The app updates itself from one of two channels, picked in **Settings → About 
 The version (`0.1.0`, or `0.1.0-dev` for a Latest build) shows in Settings → About and in the
 status-bar menu.
 
-- It checks GitHub at start and every 6 hours (**Settings → App version → Check now**, or ⌘K →
+- It checks GitHub at start and every 6 hours (**Settings → About → Check now**, or ⌘K →
   *Check for updates*, any time).
 - When a newer build is out, a banner (and the status-bar menu) offers **Install and restart**.
   The package for your system is downloaded, checked against the release's `SHA256SUMS`, put in
@@ -203,7 +203,7 @@ Latest build, and the update banner shows them under **What's new** before you i
 
 ### Connect your account
 
-Open **Settings → GitHub account**, type your user name and (optionally) a token, and press
+Open **Settings → Account → GitHub account**, type your user name and (optionally) a token, and press
 **Connect**. No `.env` file is needed.
 
 - With only a user name RepoHub shows your public repositories.
@@ -233,9 +233,8 @@ packaging/macos/bundle.sh 0.1.0       # macOS: builds dist/RepoHub.app and the .
 ## Themes
 
 **Settings → Appearance** has ready-made themes: Classic Light and Dark, Midnight, Neon, Forest,
-Ember, Paper, Ocean and Mono. Pick one for the light appearance and one for the dark one. The
-Mode (System, Light or Dark) and the toolbar's sun and moon switch between them. ⌘K → *Theme: …*
-works too.
+Ember, Paper, Ocean and Mono. Pick one for light mode and one for dark mode. The mode (System,
+Light or Dark) and the toolbar's sun and moon switch between them. ⌘K → *Theme: …* works too.
 
 To make your own, choose **Duplicate to customize**. Then you can change:
 - **Colours** for each part of the window: page, sidebar and toolbar, panels and cards, text,
@@ -347,7 +346,19 @@ finds `repohub`) and press Enter:
   its other sections;
 - Refresh and the theme.
 
-↑ ↓ move through the results, Esc or a click outside closes it.
+↑ ↓ move through the results, Esc or a click outside closes it, and the keyboard goes back where
+it was.
+
+## Keyboard
+
+Besides ⌘K: `/` searches the page (Repositories, Pull requests, Issues, a repository's Commits;
+elsewhere it opens the palette), `j` / `k` (or ↓ / ↑) move through the list on screen (pull
+requests, issues, workflow runs, repositories, notifications) and Enter opens the row marked,
+`i` and `p` start a New issue or a New pull request on a repository's page, ⌘1…5 open the main
+pages, ⌘[ goes back, ⌘R refreshes and Esc closes what's open, the newest first. In the terminal
+⌘/Ctrl+K still opens the palette, and Ctrl+Shift+Tab leaves it. The keys of one letter never fire
+while you type in a field, in the terminal or on a drawing. `?` (or **Settings → Keyboard**)
+lists them all.
 
 ## Working on GitHub from the app
 
@@ -363,10 +374,10 @@ With a token that has write access, the everyday changes happen in RepoHub:
 | A conversation's title and description | **Edit** (when it's yours, or in one of your or your organizations' repositories): the title in a field, the description in the Markdown editor, **Save** or **Cancel**. What you typed stays if saving fails. |
 | Issue rows | **Close**. |
 | Notifications page | Your unread GitHub notifications, grouped by repository, with why you got each. Click one to open its conversation; it's marked as read. **Mark as read** does only that. Needs a classic token with the `notifications` or `repo` scope: GitHub doesn't give notifications to fine-grained tokens. |
-| Pull requests and Issues pages | **Filters**: search by title or number, pick a repository or a label, **Opened by me**, **Review requested**, **Drafts** and **Failing checks** (pull requests) or **Assigned to me** (issues). They narrow what's already loaded, as you type, and are kept between visits and runs. Rows show up to three assignees' avatars, and pull requests that wait for your review say so. |
+| Pull requests and Issues pages | **Filters**: search by title or number, pick a repository, a label or who opened it (**Author**), **Created by me** and **Assigned to me**, and for pull requests **Review requested**, **Drafts** and **Failing checks**. They narrow what's already loaded, as you type, and are kept between visits and runs. Rows show up to three assignees' avatars, and pull requests that wait for your review say so. |
 | Overview | **Waiting for your review**: the open pull requests where your review is requested, above the open pull requests, when there are any. |
-| Pull request rows | **Files** shows what it changes as a diff, unified or side by side, with syntax colours and word changes. From there **Merge** with a merge commit, **Squash** or **Rebase**. **Merge** on the row asks first. |
-| Changes tab (desktop, with a local clone) | What changed since the last commit, as a diff, new files included. **Commit** or **Commit and push** everything with a message. **Push**, **Pull** (fast-forward only), and **New pull request** from the branch. |
+| Pull request rows | **Files** shows what it changes as a diff, unified or side by side (unified on a phone), with syntax colours and word changes. **Merge**, on the row or in the diff, asks first, with how: a merge commit, **Squash** or **Rebase**. |
+| Changes tab (desktop, with a local clone) | What changed since the last commit, as a diff, new files included. **Commit** or **Commit and push** everything with a message. **Push**, **Pull** (fast-forward only), and **New pull request** from the branch. Pushing straight to the default branch, and pulling over uncommitted changes, ask first. |
 | Notes tab | With a notes repository chosen (Settings → Account → Boards), each change to a board is one commit to `boards/…/<name>.excalidraw` there, and a board deleted here is deleted there. See [Boards on every device](#boards-on-every-device). |
 | Releases tab | **New release**: a tag (the next versions are offered), the branch a new tag is made from, title, Markdown notes with **Generate notes**, pre-release. **Save draft**, or **Publish release** after a question. On a draft: **Edit** and **Publish** (it asks first). |
 | Changes tab: merging | **Merge a branch** into the one checked out: pick it to preview its commits and the diff it brings, then merge. If there are conflicts, it lists the files and offers **Abort merge**. Fix them in your editor or the Terminal, then **Commit** finishes the merge. Commit refuses files that still have conflict markers. |
@@ -378,6 +389,14 @@ any, shows in the form (for example "A pull request already exists"). A label, a
 milestone, reviewer, title or description change updates the conversation and the list rows
 without a reload, with a message; when GitHub refuses (the token may only read the
 repository), the details say so once and keep the old values.
+
+**Nothing changes by accident.** What can't be undone from RepoHub asks first, in one kind of
+question: merging, publishing a release, deleting a drawing, removing a plugin, aborting a merge,
+pulling over uncommitted changes, pushing to the default branch, signing out, clearing the saved
+data. On a computer the question takes the button's place; on a phone it's a sheet at the bottom
+of the screen. Esc, the back button or **Cancel** answer no. What can be put back offers **Undo**
+in its message instead: closing or reopening an issue or a pull request, a star, deleting a
+theme, unpinning, removing a coding assistant.
 
 **What you type isn't lost by accident.** Esc, **Cancel**, opening another form (for any
 repository) or leaving a conversation asks "Discard what you typed?" (**Discard** or **Keep
@@ -597,14 +616,15 @@ the text first: a link could carry what the plugin read. Install only plugins yo
   most). A plugin with links to other folders, or too big to be one (500 files, 10 MB), is
   refused. Each plugin can be turned off, reloaded or removed. Errors show in place of the
   plugin, never crashing the app.
-- ⌘K lists plugin sections and pages too.
+- ⌘K lists plugin sections and pages too, and **Settings → Plugins** has an **Open** button for
+  each page (on a phone, which has no sidebar, that's where they are).
 
 The guide is [`docs/PLUGINS.md`](docs/PLUGINS.md), and the example is
 [`plugins/checklist`](plugins/checklist).
 
 ## Coding assistants
 
-**Settings → Coding assistants** chooses which assistants RepoHub offers:
+**Settings → Assistants** chooses which assistants RepoHub offers:
 
 - **Claude** turns the Claude section on or off: the Claude tab of each repository, and every
   harness or terminal button that runs `claude`. It's on by default.
@@ -628,7 +648,7 @@ with colours, scrollback (mouse wheel) and paste.
   **Clone into …** to clone it there. A folder you pick is remembered.
   A folder found by its name is used only if one of its git remotes is that repository.
   Otherwise RepoHub says it found another repository there, and **Use it anyway** is your call.
-- **Coding assistants:** each harness in **Settings → Coding assistants** gets a button, such as
+- **Coding assistants:** each harness in **Settings → Assistants** gets a button, such as
   **Claude Code** or **Codex**, that starts it in the clone. ⌘K → *Start … in …* does the same.
 - **Command buttons:** one click types `git status`, `git pull` or `git log`. Set your own list
   with `REPOHUB_TERMINAL_COMMANDS` (`;`-separated).

@@ -47,7 +47,7 @@ fn checks(k: &Kit, list: &[Check], total: usize, url: &str) -> El {
             .child(text(c.name.clone()).font(k.ty.small).color(k.c.text_base).grow(1.0).wrap())
             .child(ui::pill(k, c.state.label(), ink));
         if !c.url.is_empty() {
-            line = line.child(pages::open_button(k, "Details", &c.url, &format!("thread-check-open-{n}")));
+            line = line.child(pages::open_button(k, "Details on GitHub", &c.url, &format!("thread-check-open-{n}")));
         }
         p = p.child(rule(k)).child(line);
     }

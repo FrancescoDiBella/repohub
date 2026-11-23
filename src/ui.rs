@@ -122,6 +122,25 @@ pub fn pull_icon(k: &Kit, s: PullState) -> El {
     }
 }
 
+/// An empty list: what is empty, and under it what to do about it (every empty state says both).
+pub fn empty(k: &Kit, what: &str, todo: &str) -> El {
+    col().w_full().padding(28.0).gap(4.0).items_center().role("status")
+        .child(text(what.to_owned()).font(k.ty.ui_medium).color(k.c.text_base).wrap())
+        .child(text(todo.to_owned()).font(k.ty.small).color(k.c.text_muted).wrap())
+}
+
+/// Public or Private, the same mark wherever a repository's visibility shows (its card, its page).
+pub fn visibility(k: &Kit, private: bool) -> El {
+    if private {
+        row().gap(4.0).center_y().px(8.0).py(2.0).radius(10.0).border(1.0, k.c.warning.icon.alpha(0.5))
+            .role("status").label("Private repository")
+            .child(ico(&icons::LOCK, 11.0, k.c.warning.icon))
+            .child(text("Private").font(k.ty.text_xsmall_medium).color(k.c.warning.icon))
+    } else {
+        pill(k, "Public", k.c.text_muted).role("status").label("Public repository")
+    }
+}
+
 /// A rounded pill with text, for states such as "Public" or "Draft".
 pub fn pill(k: &Kit, label: &str, ink: Color) -> El {
     text(label.to_owned()).font(k.ty.text_xsmall_medium).color(ink)

@@ -200,7 +200,7 @@ pub(crate) fn banner(s: &App, k: &Kit) -> Option<El> {
     }
     if connect {
         r = r.child(rune_kit::Button::new("Connect").variant(rune_kit::ButtonVariant::Submit).control_size(ControlSize::Small)
-            .on_press(|s: &mut App| { s.settings_section = state::SettingsSection::Account; s.go(Page::Settings); }).build(k).key("connect"));
+            .on_press(|s: &mut App| s.open_settings(state::SettingsSection::Account)).build(k).key("connect"));
     }
     Some(r.key("banner"))
 }
@@ -267,10 +267,19 @@ pub(crate) fn view(s: &App, cx: &mut Cx<App>) -> El {
         .child(backdrop)
         // The scroll bar shows where you are on a long page (as the system's "Show scroll bars" says).
         .child(rune_kit::ScrollBar::scroll_bar(col().key("page").w_full().h_full().shrink().scroll(ScrollSpec { stick_bottom: false }).child(page), &k));
+    // On a phone the question a page asks (`confirm`) is a sheet over the page; it's left in
+    // `sheet` while the page is drawn.
+    let sheet = s.sheet.borrow_mut().take();
     // "Discard what you typed?" floats over the page, at the bottom, until it's answered (in
-    // place of the toast).
+    // place of the toast); on a phone it's the sheet.
     if let Some(ask) = discard::question(s, &k) {
-        main = main.child(row().pin(Some(16.0), None, Some(16.0), Some(20.0)).center().child(ask));
+        if s.compact {
+            main = main.child(confirm::sheet(&k, ask, std::rc::Rc::new(|s: &mut App| s.answer_discard(false))));
+        } else {
+            main = main.child(row().pin(Some(16.0), None, Some(16.0), Some(20.0)).center().child(ask.max_w(560.0)));
+        }
+    } else if let Some(sheet) = sheet {
+        main = main.child(sheet);
     } else if let Some(toast) = &s.toast {
     // The toast floats over the page, at the bottom; it leaves by itself or with its button.
         let (icon, tint) = match toast.kind {
@@ -289,7 +298,7 @@ pub(crate) fn view(s: &App, cx: &mut Cx<App>) -> El {
                     .on_press(|s: &mut App| s.undo()).build(&k).key("toast-undo")))
                 .child(close)));
     }
-    let (theme_icon, theme_help) = if dark { (&icons::SUN, "Switch to the light theme") } else { (&icons::MOON, "Switch to the dark theme") };
+    let (theme_icon, theme_help) = if dark { (&icons::SUN, "Switch to light mode") } else { (&icons::MOON, "Switch to dark mode") };
     let theme = IconButton::new(theme_icon).variant(IconButtonVariant::GhostMuted).label(theme_help)
         .help(theme_help).on_press(move |s: &mut App| s.set_theme(s.theme.toggled(system_dark))).build(&k).key("theme");
     let mut trailing = row().gap(4.0).center_y();

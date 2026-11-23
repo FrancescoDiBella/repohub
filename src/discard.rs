@@ -15,11 +15,13 @@
 //!    └── action, nothing typed: runs at once
 //! ```
 
-use rune::{El, col, row, text};
-use rune_kit::{Button, ButtonVariant, ControlSize, Kit};
+use std::rc::Rc;
+
+use rune::El;
+use rune_kit::Kit;
 
 use crate::state::{Compose, Draft, Load};
-use crate::{App, icons, ui};
+use crate::{App, confirm, icons};
 
 /// The question on screen: what **Discard** throws away, and what happens then.
 pub struct Ask {
@@ -201,24 +203,18 @@ fn lost(s: &App, d: Draft) -> String {
     }
 }
 
-/// The question, floating at the bottom of the page while it waits for an answer.
+/// The question while it waits for an answer, in the look every question has (`confirm::card`):
+/// `view` floats it at the bottom of the page on a computer, and makes it the sheet on a phone.
 pub fn question(s: &App, k: &Kit) -> Option<El> {
     let ask = s.discard.as_ref()?;
     let detail: Vec<String> = ask.drafts.iter().map(|d| lost(s, *d)).filter(|t| !t.is_empty()).collect();
-    let detail = detail.join(" ");
-    let tint = k.c.warning.icon;
-    const QUESTION: &str = "Discard what you typed?";
-    Some(col().key("discard-ask").role("alertdialog").label(format!("{QUESTION} {detail}")).w_full().max_w(560.0)
-        .pl(14.0).pr(10.0).py(10.0).gap(10.0).radius(k.radius.lg)
-        .fill(k.c.bg_base).border(1.0, tint.alpha(0.6))
-        .child(row().w_full().gap(10.0).items_start()
-            .child(ui::ico(&icons::PEN, 15.0, tint).mt(2.0))
-            .child(col().gap(2.0).grow(1.0).shrink()
-                .child(text(QUESTION).font(k.ty.small_medium).color(k.c.text_strong).wrap())
-                .child(text(detail).font(k.ty.small).color(k.c.text_muted).wrap().key("discard-what"))))
-        .child(row().w_full().gap(8.0).justify_end().flex_wrap()
-            .child(Button::new("Keep editing").variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
-                .on_press(|s: &mut App| s.answer_discard(false)).build(k).key("discard-no"))
-            .child(Button::new("Discard").variant(ButtonVariant::Danger).control_size(ControlSize::Small)
-                .on_press(|s: &mut App| s.answer_discard(true)).build(k).key("discard-yes"))))
+    Some(confirm::card(k, s.compact, confirm::Card {
+        key: "discard-ask".into(),
+        icon: &icons::PEN,
+        question: "Discard what you typed?".into(),
+        detail: detail.join(" "),
+        extra: None,
+        no: ("Keep editing".into(), "discard-no".into(), Rc::new(|s: &mut App| s.answer_discard(false))),
+        yes: ("Discard".into(), "discard-yes".into(), confirm::Tone::Danger, Rc::new(|s: &mut App| s.answer_discard(true)), false),
+    }))
 }

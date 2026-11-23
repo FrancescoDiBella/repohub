@@ -40,7 +40,25 @@ impl App {
                 self.reopening.push(issue);
                 self.write(&repo, github::Write::ReopenIssue(number));
             }
-            state::Undo::ReopenPull { repo, number } => self.write(&repo, github::Write::SetPullOpen { number, open: true }),
+            state::Undo::ReopenPull { repo, number } => {
+                self.reopening_pulls.push(actions::busy_key(&repo, number));
+                self.write(&repo, github::Write::SetPullOpen { number, open: true });
+            }
+            state::Undo::Close { repo, number } => self.write(&repo, github::Write::CloseIssue(number)),
+            state::Undo::ClosePull { repo, number } => self.write(&repo, github::Write::SetPullOpen { number, open: false }),
+            state::Undo::Star { repo } => {
+                if let Some(i) = self.repo_index_of(&repo) {
+                    self.toggle_star(i);
+                }
+            }
+            state::Undo::Pin { repo, at } => self.repin(&repo, at),
+            state::Undo::Harness { harness, at } => {
+                let name = harness.name.clone();
+                let at = at.min(self.assist.harnesses.len());
+                self.assist.harnesses.insert(at, harness);
+                self.assist.save();
+                self.notify(format!("Restored {name}"));
+            }
         }
     }
 
@@ -173,7 +191,6 @@ impl App {
         if !self.busy.insert(key.clone()) {
             return;
         }
-        self.confirm_merge = None;
         let full_cb = full.clone();
         let Some(h) = self.handle.clone() else { return };
         let cfg = self.cfg.clone();
@@ -281,7 +298,7 @@ impl App {
                     _ => self.picked_for_new_issue(&full_name),
                 };
                 let number = c.number;
-                self.changed(replay::Change::Opened(model::Issue { label: labels.first().cloned(), labels, assignees, number, title: c.title, repo: full_name.clone(), created_at: self.now, comments: 0, url: c.url }), exact);
+                self.changed(replay::Change::Opened(model::Issue { label: labels.first().cloned(), labels, assignees, author: self.data.profile.login.clone(), number, title: c.title, repo: full_name.clone(), created_at: self.now, comments: 0, url: c.url }), exact);
                 self.notify(format!("Opened issue #{number} in {full_name}"));
             }
             github::Done::Branch(name) => {
@@ -319,8 +336,11 @@ impl App {
                 if let Some(at) = self.reopening.iter().position(|x| x.number == n && same_repo(&x.repo, &full_name)) {
                     let issue = self.reopening.remove(at);
                     self.changed(replay::Change::Reopened(issue), exact);
+                    self.notify(format!("Reopened issue #{n}"));
+                } else {
+                    // Reopened from its conversation: Undo closes it again.
+                    self.notify_undo(format!("Reopened issue #{n}"), state::Undo::Close { repo: full_name.clone(), number: n });
                 }
-                self.notify(format!("Reopened issue #{n}"));
             }
             github::Done::Commented(n) => {
                 for x in self.data.issues.iter_mut().filter(|x| x.number == n && same_repo(&x.repo, &full_name)) {
@@ -352,8 +372,14 @@ impl App {
             }
             github::Done::PullOpen(n, open) => {
                 self.changed(replay::Change::PullOpen { repo: full_name.clone(), number: n, open }, exact);
-                if open {
+                let key = actions::busy_key(&full_name, n);
+                if open && self.reopening_pulls.contains(&key) {
+                    // Put back with a close's Undo: not undone in turn.
+                    self.reopening_pulls.retain(|k| *k != key);
                     self.notify(format!("Reopened pull request #{n}"));
+                } else if open {
+                    // Reopened from its conversation: Undo closes it again.
+                    self.notify_undo(format!("Reopened pull request #{n}"), state::Undo::ClosePull { repo: full_name.clone(), number: n });
                 } else {
                     self.notify_undo(format!("Closed pull request #{n}"), state::Undo::ReopenPull { repo: full_name.clone(), number: n });
                 }
