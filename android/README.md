@@ -9,7 +9,7 @@ drawn with WebGPU) in a full-screen WebView, plus a small Java layer that does o
 | The page | `app/src/main/assets/web` (built, not in the repository) | The interface. On a phone it uses the layout in `src/mobile.rs` and the full-screen board editor in `src/notes_page.rs`. |
 | `MainActivity` | `app/src/main/java/…` | Shows the page, serves its files from the APK, opens links in the browser, passes the back button to the page, and opens the system's "save to" and file pickers for a board's **Export** and **Import…** (`saveFile`, `openFile` on the bridge). |
 | `Backend` | same | Answers the page's requests: the configuration, the account, GitHub, the drawings. |
-| `GitHubPaths` | same | The GitHub API paths the app may call: the same list as `server/src/main.rs`. Change both together. |
+| `GitHubPaths` | same | The GitHub API paths the app may call: the same list as `server/src/allowlist.rs`. Change both together. |
 | `AccountStore` | same | The user name and the token. The token is encrypted with a key kept in the Android Keystore. |
 | `Notes` | same | The drawings, as `.excalidraw` files in the app's private storage, laid out as on the server: conditional saves (`if=`), deletes into `trash/<date>/` for 30 days, every drawing with its git blob id (`api/notes/all`) and board sync's index (`api/notes/index`). |
 

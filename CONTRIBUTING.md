@@ -17,6 +17,7 @@
 | `src/app/updates.rs` | Updating RepoHub itself, and the status-bar widget's menu |
 | `src/app/settings.rs` | What Settings changes: the account and signing out, the theme and looks, plugins, coding assistants |
 | `src/app/chrome.rs`, `src/app/keys.rs` | The window around the pages (`view`: sidebar, toolbar, banners, the toast) and the keyboard shortcuts |
+| `src/<module>/` | A module's parts, next to `src/<module>.rs`, which declares them and re-exports what the crate names: its test modules (`tests.rs`, or the module's own name such as `http_tests.rs`), and the parts of a large module listed below |
 | `src/tests/` | Tests that build the whole app and drive it headless, one module per file (`fix58_tests`, …; `load_gen_tests` has `TempDataDir`); `every_page` draws every page and section on a computer and a phone; `followups_*` the follow-ups of the bug hunt (#138) |
 | `src/replay.rs` | What a finished write changed in the lists (`Change`), applied again, exactly, on what a load that ran meanwhile brings |
 | `src/discard.rs` | "Discard what you typed?": which drafts hold typed text (`state::Draft`), `ask_first` before an action that throws them away, the question floating over the page |
@@ -25,19 +26,19 @@
 | `src/ui.rs`, `src/icons.rs` | Small building blocks and the icon set |
 | `src/state.rs` | The state machines: where data comes from, loading, saving, theme, tabs, filters. Drawn in [`docs/STATE.md`](docs/STATE.md) |
 | `src/model.rs` | Data model, sample data, date and colour helpers |
-| `src/github.rs` | GitHub REST client: async, shared by the desktop and web builds. Every GET goes through `Gh::fetch` (conditional, see `etag`); `load_all_with` runs the parts of a load side by side and reports the profile and repositories early |
+| `src/github.rs`, `src/github/` | GitHub REST client: async, shared by the desktop and web builds. `github.rs` is the client (`Gh`, `LoadError`, the `Link` header, branch names): every GET goes through `Gh::fetch` (conditional, see `etag`). One `Gh` method per request in `reads.rs` and `writes.rs` (with `Write`, `Done` and `run`), GitHub's answers read in `parse.rs`, and in `load.rs` the `load_*` functions and `load_all_with`, which runs the parts of a load side by side and reports the profile and repositories early |
 | `src/net.rs` | Transport: blocking `ureq` on the desktop, `fetch` to the `/gh` proxy on the web, both sending `If-None-Match` and reading `ETag`; `spawn` runs work in the background and reports to the UI; `join`/`join_all` (scoped threads on the desktop, polled futures on the web), `Gate` (at most N requests at once), `Mailbox` (the first load, started before the window) |
 | `src/etag.rs` | Conditional requests: each GET's ETag with its answer, shared by the process, cleared on sign-out; searches left out |
 | `src/cache.rs`, `src/cache_page.rs` | The saved copy of the last load: its format (versioned), where it lives, the size cap, writing it in the background and removing it; showing it at start (with only a token, once `/user` said whose it is: `profile_known`), the first part of a load, what's kept to show at once (`Fresh`); Settings → About → Saved data |
 | `src/load_tests.rs` | A mock GitHub on localhost: the parallel load equals the sequential one, 304s reuse kept answers, at most four at once; the saved copy in the app |
 | `src/config.rs` | `.env` parsing (desktop: the project file and the app's own settings file, where Settings saves the account) and `config.json` (web) |
-| `src/board.rs` | The Notes whiteboard: model, hand-drawn rendering, gestures, undo/redo, `.excalidraw` read/write |
+| `src/board.rs`, `src/board/` | The Notes whiteboard: model, gestures, undo/redo; hand-drawn rendering in `drawing.rs`, `.excalidraw` read/write in `file.rs` |
 | `src/actions.rs` | The branch picker, the New issue / branch / pull request forms, Close and Merge on rows |
 | `src/notes.rs`, `src/notes_page.rs` | Notes storage (local folder on desktop, `/api/notes` on the web: saving that merges with a file changed underneath, conditional writes, the trash, the list of every drawing, sync's index) and the Notes tab |
-| `src/sync.rs` | Boards on every device, the engine (pure, tested): git blob ids and base64, notes-repository paths, the index, the decision table (`decide`, `plan`), merging two boards (`merge`), and the run over the `Remote` and `Local` traits, with fakes in its tests |
+| `src/sync.rs` | Boards on every device, the engine (pure, tested): git blob ids and base64, notes-repository paths, the index, the decision table (`decide`, `plan`), merging two boards (`merge`), and the run over the `Remote` and `Local` traits (`sync/runner.rs`), with fakes in its tests |
 | `src/sync_io.rs`, `src/sync_page.rs` | Board sync wired up: GitHub as the notes repository (`GhRemote`), the notes storage (`NotesLocal`), checking and choosing the repository, when sync runs, the app's sync state; the Notes header, the board marks and Settings → Account → Boards |
 | `src/board_file.rs` | **Export…** and **Import…** of one board: Rune's file dialogs on the desktop, a download and the file picker on the web, the `RepoHubNative` pickers on Android |
-| `src/triage.rs`, `src/triage_page.rs` | Triage: a repository's labels, assignable people and milestones (kept per repository), the picker (filter, ticks, what changed), each change's request and GitHub's answer, applying it to the conversation and the rows; the details block, the pickers, title and description editing, the New issue form's labels and assignees, the Overview's **Waiting for your review** |
+| `src/triage.rs`, `src/triage_page.rs` | Triage: a repository's labels, assignable people and milestones (kept per repository), the picker (filter, ticks, what changed), each change's request and GitHub's answer, applying it to the conversation and the rows (`triage/app.rs`); the details block, the pickers, title and description editing, the New issue form's labels and assignees, the Overview's **Waiting for your review** |
 | `src/palette.rs` | The command palette (⌘K): the commands for the current state, the fuzzy ranking (both tested), the modal layer |
 | `src/update.rs` | In-app updates: the build's commit (`REPOHUB_BUILD`, set by the Desktop workflow), the Latest build's package for this platform, the SHA256SUMS check, install and restart |
 | `src/themes.rs`, `src/themes_page.rs` | Themes: the ready-made looks, yours (`Looks`, saved in the preferences), the `Kit` built from a look, background patterns and pictures; the gallery and editor in Settings |
@@ -48,8 +49,8 @@
 | `src/harness.rs` | Coding assistants: the Claude switch and the harnesses (name and command), saved in the preferences; Settings → Coding assistants is `lists::assistants_panel` |
 | `src/terminal.rs`, `src/terminal_page.rs` | Embedded terminal (desktop): `portable-pty` runs the login shell, `vt100` keeps the screen; key mapping, colours, the Terminal tab |
 | `src/local.rs`, `src/local_page.rs` | The local clone read from disk: `git` run on the computer, the file list (`git ls-files`, `git status`), reading a file safely, and the Code tab's folder listing and file viewer |
-| `src/commits.rs`, `src/commits_page.rs` | The Commits section: reading GitHub's commit list, one commit and a comparison (tested), the day groups and the filter, the sample history, loading with late answers dropped; the history, the commit page and the comparison form |
-| `src/releases.rs`, `src/releases_page.rs` | The Releases section: reading GitHub's releases and tags (tested), the next versions and the tag check, the sample releases, loading with late answers dropped, saving and publishing (publishing only after its question); the list, the tags without a release, the form, and the latest release's tag in the header |
+| `src/commits.rs`, `src/commits_page.rs` | The Commits section: reading GitHub's commit list, one commit and a comparison (tested), the day groups and the filter, the sample history (`commits/sample.rs`), loading with late answers dropped (`commits/loading.rs`); the history, the commit page and the comparison form |
+| `src/releases.rs`, `src/releases_page.rs` | The Releases section: reading GitHub's releases and tags (tested), the next versions and the tag check, the sample releases (`releases/sample.rs`), loading with late answers dropped, saving and publishing (publishing only after its question; `releases/loading.rs`); the list, the tags without a release, the form, and the latest release's tag in the header |
 | `src/diffs.rs`, `src/changes_page.rs` | Diffs with rune-kit's `DiffView`: the local changes (`local::changes`, commit, push, pull) in the Changes tab, and a pull request's files (`github::load_pull_files`) with Merge, Squash and Rebase |
 | `src/clones.rs` | Finding and remembering each repository's local clone |
 | `assets/fonts/` | Inter and IBM Plex Mono (SIL OFL), bundled so mono text is monospaced everywhere |
@@ -57,7 +58,7 @@
 | `src/test_env.rs` | The tests' environment: taking `ENV_LOCK` clears the machine's account (`GITHUB_TOKEN`, a project `.env`, the saved one), so no test reaches GitHub or depends on who runs it |
 | `tests/flows/` | The flows (see [Flows](#flows)): `run.py` runs each `cases/*.py` (the program itself, headless, against the mock or on the sample data) and checks the element tree and the requests; `flowkit.py` is what a flow is made of |
 | `tests/mock/` | A mock GitHub on localhost (`mock_github.py`) and its GitHub-shaped fixtures (`fixtures/`), for the flows and `scripts/bench-load.sh` |
-| `server/` | `repohub-server`: static files (`files.rs`: the precompressed `.br`/`.gz` copy the browser accepts, `Cache-Control` and `ETag`), `config.json`, the `/gh/*` GitHub proxy that holds the token, and `/api/notes` (drawings in `DATA_DIR`; `all`, conditional writes with `if=`, the trash, sync's `index`) |
+| `server/` | `repohub-server`: static files (`files.rs`: the precompressed `.br`/`.gz` copy the browser accepts, `Cache-Control` and `ETag`), `config.json`, the `/gh/*` GitHub proxy that holds the token (`proxy.rs`; what it forwards: `allowlist.rs`), and `/api/notes` (drawings in `DATA_DIR`; `all`, conditional writes with `if=`, the trash, sync's `index`) |
 | `web/manifest.webmanifest`, `web/icon.svg` | Add to Home Screen on phones |
 | `web/index.html` | Page that loads the WebAssembly build (`app.js` and `app_bg.wasm` are build outputs) |
 | `Dockerfile`, `compose.yaml` | Container: builds the web app and the server, runs the server on port 8080 |
@@ -313,7 +314,7 @@ works too (without its first-frame time). Times include the headless renderer's 
 - State that has more than two values gets a named type in `src/state.rs`, and one method that
   changes it. No tab numbers, no pairs of booleans.
 - Never commit `.env` or anything that contains a token.
-- Keep the proxy allowlist (`server/src/main.rs`, `allowed`) as narrow as the app needs. Add an
+- Keep the proxy allowlist (`server/src/allowlist.rs`, `allowed`) as narrow as the app needs. Add an
   endpoint there only together with the feature that uses it.
 - RepoHub creates issues, branches, pull requests and releases (drafts, and publishing them),
   closes issues, merges pull requests, edits an issue's or pull request's labels, assignees,
@@ -322,7 +323,7 @@ works too (without its first-frame time). Times include the headless renderer's 
   and nothing more: deleting repositories, branches, releases or tags, uploading release files
   and rewriting history stay on GitHub. The only other `DELETE` in a repository takes back a
   review request. A new write goes through `github::Write` (board sync through
-  `sync_io::GhRemote` on the same transport), the proxy allowlist (`server/src/main.rs`) and its
+  `sync_io::GhRemote` on the same transport), the proxy allowlist (`server/src/allowlist.rs`) and its
   test. Every new request, read or write, is added to `server/allowlist.txt` (with its refused
   neighbours as `deny` lines): the app's test fails until it's there, and the proxy's and the
   Android app's tests until both allowlists take it. The board paths are checked on the raw address (`board_contents_path`), as narrowly as
