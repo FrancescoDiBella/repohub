@@ -183,6 +183,9 @@ pub struct App {
     pub(crate) pull_review: Option<review::Review>,
     /// Issues being reopened with Undo, to put back in the list when GitHub confirms.
     pub(crate) reopening: Vec<model::Issue>,
+    /// Pull requests being reopened with Undo (`owner/repo#12`): their message offers no Undo
+    /// in turn.
+    pub(crate) reopening_pulls: Vec<String>,
     /// What the Pull requests and the Issues pages are narrowed to.
     pub(crate) pull_filter: filters::ListFilter,
     pub(crate) issue_filter: filters::ListFilter,
@@ -440,6 +443,7 @@ pub(crate) fn init() -> App {
         token_help: false,
         pull_review: None,
         reopening: Vec::new(),
+        reopening_pulls: Vec::new(),
         inbox: None,
         inbox_busy: std::collections::HashSet::new(),
         pull_filter: filters::ListFilter::default(),

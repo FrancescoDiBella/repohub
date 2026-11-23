@@ -40,7 +40,10 @@ impl App {
                 self.reopening.push(issue);
                 self.write(&repo, github::Write::ReopenIssue(number));
             }
-            state::Undo::ReopenPull { repo, number } => self.write(&repo, github::Write::SetPullOpen { number, open: true }),
+            state::Undo::ReopenPull { repo, number } => {
+                self.reopening_pulls.push(actions::busy_key(&repo, number));
+                self.write(&repo, github::Write::SetPullOpen { number, open: true });
+            }
             state::Undo::Close { repo, number } => self.write(&repo, github::Write::CloseIssue(number)),
             state::Undo::ClosePull { repo, number } => self.write(&repo, github::Write::SetPullOpen { number, open: false }),
             state::Undo::Star { repo } => {
@@ -369,7 +372,13 @@ impl App {
             }
             github::Done::PullOpen(n, open) => {
                 self.changed(replay::Change::PullOpen { repo: full_name.clone(), number: n, open }, exact);
-                if open {
+                let key = actions::busy_key(&full_name, n);
+                if open && self.reopening_pulls.contains(&key) {
+                    // Put back with a close's Undo: not undone in turn.
+                    self.reopening_pulls.retain(|k| *k != key);
+                    self.notify(format!("Reopened pull request #{n}"));
+                } else if open {
+                    // Reopened from its conversation: Undo closes it again.
                     self.notify_undo(format!("Reopened pull request #{n}"), state::Undo::ClosePull { repo: full_name.clone(), number: n });
                 } else {
                     self.notify_undo(format!("Closed pull request #{n}"), state::Undo::ReopenPull { repo: full_name.clone(), number: n });
