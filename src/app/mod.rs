@@ -175,6 +175,8 @@ pub struct App {
     pub(crate) inbox_busy: std::collections::HashSet<String>,
     /// The Settings section on screen.
     pub(crate) settings_section: state::SettingsSection,
+    /// On a phone, a section is open rather than the list of them (see `settings_nav`).
+    pub(crate) settings_open: bool,
     /// The connection's details (environment variables, files) are shown in Settings.
     pub(crate) connection_details: bool,
     /// Settings → Account says which token to make ("Which token?").
@@ -439,6 +441,7 @@ pub(crate) fn init() -> App {
         asking: None,
         sheet: std::cell::RefCell::new(None),
         settings_section: state::SettingsSection::Account,
+        settings_open: false,
         connection_details: false,
         token_help: false,
         pull_review: None,
@@ -597,6 +600,7 @@ pub(crate) fn init() -> App {
         && let Some(n) = state::SettingsSection::LABELS.iter().position(|l| l.eq_ignore_ascii_case(&sec))
     {
         s.settings_section = state::SettingsSection::ALL[n];
+        s.settings_open = true;
     }
     // `-- diff 14` also opens that pull request's changes.
     if let Some(number) = arg("diff").and_then(|n| n.parse::<u32>().ok())

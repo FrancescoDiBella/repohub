@@ -33,6 +33,8 @@ impl App {
             self.close_pull_diff();
             self.leave_tab();
             self.cursor = None;
+            // Settings opens on its list of sections on a phone.
+            self.settings_open = false;
         }
         self.page = p;
         self.thread = None;
@@ -289,6 +291,12 @@ impl App {
             self.close_compare();
         } else if self.local_file.is_some() && matches!(self.page, Page::Repo(_)) {
             self.local_file = None;
+        } else if self.page == Page::Settings && self.editing_look() {
+            // The theme editor's view: back to the gallery.
+            self.look_edit = LookEditor::default();
+        } else if self.page == Page::Settings && self.compact && self.settings_open {
+            // A section on a phone: back to the list.
+            self.settings_open = false;
         } else {
             return false;
         }

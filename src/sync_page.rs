@@ -42,10 +42,7 @@ pub fn header(s: &App, k: &Kit) -> El {
         let mut bar = bar.child(line(&CLOUD_OFF, k.c.icon_muted, msg));
         if s.sync_blocked().is_none() {
             bar = bar.child(Button::new("Set up sync").variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
-                .on_press(|s: &mut App| {
-                    s.settings_section = crate::state::SettingsSection::Account;
-                    s.go(crate::Page::Settings);
-                }).build(k).key("sync-setup"));
+                .on_press(|s: &mut App| s.open_settings(crate::state::SettingsSection::Account)).build(k).key("sync-setup"));
         }
         return bar;
     };

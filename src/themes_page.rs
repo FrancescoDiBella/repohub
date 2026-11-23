@@ -9,6 +9,13 @@ use crate::{App, icons, ui};
 
 pub fn appearance(s: &App, k: &Kit) -> El {
     let shown_dark = k.dark;
+    // One of your themes open: the editor is a view of its own, with a way back to the gallery.
+    if s.editing_look() {
+        let back = Button::new("Themes").icon(&icons::BACK).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
+            .on_press(|s: &mut App| s.look_edit = crate::LookEditor::default()).build(k).key("look-back");
+        return col().w_full().gap(12.0).child(row().child(back))
+            .child(panel(k).key("appearance").child(editor(s, k, shown_dark)));
+    }
     let mode = row().w_full().px(16.0).py(12.0).gap(16.0).center_y().justify_between().flex_wrap()
         .child(col().grow(1.0).shrink().min_w(200.0).gap(2.0)
             .child(text("Mode").font(k.ty.ui_medium).color(k.c.text_base))
@@ -23,6 +30,13 @@ pub fn appearance(s: &App, k: &Kit) -> El {
     panel(k).key("appearance").child(panel_head(k, "Appearance", None)).child(rule(k))
         .child(mode).child(rule(k)).child(gallery).child(rule(k))
         .child(editor(s, k, shown_dark))
+}
+
+impl App {
+    /// Whether one of your themes is open in the editor (its own view in Settings → Appearance).
+    pub(crate) fn editing_look(&self) -> bool {
+        self.looks.get(&self.look_edit.id).is_some_and(|t| !t.builtin)
+    }
 }
 
 /// A theme in the gallery: a small picture of it, its name and the appearance it's used for.
@@ -229,6 +243,8 @@ mod tests {
         s.compact = true;
         s.page = crate::Page::Settings;
         s.settings_section = crate::state::SettingsSection::Appearance;
+        // On a phone the section is opened from the list of sections.
+        s.settings_open = true;
         let dark = s.theme.is_dark(true);
         let base_id = s.looks.active(dark).id.clone();
         s.duplicate_look(&base_id, dark);

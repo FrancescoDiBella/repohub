@@ -389,21 +389,28 @@ pub fn settings(s: &App, k: &Kit) -> El {
     let version = version_panel(s, k);
     use crate::state::SettingsSection as Section;
     let section = s.settings_section;
-    let picker = SegmentedControl::new(&Section::LABELS, Some(section.index())).label("Settings section").fit()
-        .on_pick(|s: &mut App, i, _| s.settings_section = Section::ALL[i.min(Section::ALL.len() - 1)]).build(k).key("settings-section");
-    // Five segments don't fit a phone: the row scrolls sideways there.
-    let picker = if s.compact { row().w_full().scroll_x().child(picker) } else { row().w_full().child(picker) };
-    let (subtitle, body): (&str, Vec<El>) = match section {
+    // On a phone the sections are a list, and one opens with a way back to it.
+    if s.compact && !s.settings_open {
+        return crate::settings_nav::phone_list(k);
+    }
+    let picker = if s.compact {
+        crate::settings_nav::back(k)
+    } else {
+        row().w_full().child(SegmentedControl::new(&Section::LABELS, Some(section.index())).label("Settings section").fit()
+            .on_pick(|s: &mut App, i, _| s.settings_section = Section::ALL[i.min(Section::ALL.len() - 1)]).build(k).key("settings-section"))
+    };
+    let subtitle = section.about();
+    let body: Vec<El> = match section {
         // Two columns where there's room, so it fits a screen: who you are and the account, then
         // the connection and the boards.
-        Section::Account => ("Your profile, the GitHub account, the connection and where boards sync.", vec![row().w_full().gap(16.0).items_start().flex_wrap()
+        Section::Account => vec![row().w_full().gap(16.0).items_start().flex_wrap()
             .child(col().w(0.0).grow(1.0).min_w(360.0).gap(16.0).child(profile).child(account))
-            .child(col().w(0.0).grow(1.0).min_w(360.0).gap(16.0).child(conn).child(crate::sync_page::settings_block(s, k)))]),
-        Section::Appearance => ("The mode (light, dark or the system's) and the theme each mode uses.", vec![appearance]),
-        Section::Assistants => ("Claude and the other coding assistants the Terminal starts.", vec![assistants]),
-        Section::Plugins => ("Sections and pages others wrote for RepoHub.", vec![plugins]),
-        Section::Keyboard => ("Every shortcut. The ones of one key work while no text field, the terminal or a drawing has the keyboard.", vec![crate::keyboard::panel(s, k)]),
-        Section::About => ("This version of RepoHub, its updates and the data it saves.", vec![version, crate::cache_page::panel_of(s, k)]),
+            .child(col().w(0.0).grow(1.0).min_w(360.0).gap(16.0).child(conn).child(crate::sync_page::settings_block(s, k)))],
+        Section::Appearance => vec![appearance],
+        Section::Assistants => vec![assistants],
+        Section::Plugins => vec![plugins],
+        Section::Keyboard => vec![crate::keyboard::panel(s, k)],
+        Section::About => vec![version, crate::cache_page::panel_of(s, k)],
     };
     col().w_full().gap(16.0).max_w(if section == Section::Account { 1080.0 } else { 760.0 })
         .child(heading(k, "Settings", subtitle, None))

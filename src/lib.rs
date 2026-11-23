@@ -52,6 +52,7 @@ mod prefs;
 mod releases;
 mod releases_page;
 mod replay;
+mod settings_nav;
 mod state;
 mod review;
 mod runs_page;

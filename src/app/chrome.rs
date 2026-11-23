@@ -200,7 +200,7 @@ pub(crate) fn banner(s: &App, k: &Kit) -> Option<El> {
     }
     if connect {
         r = r.child(rune_kit::Button::new("Connect").variant(rune_kit::ButtonVariant::Submit).control_size(ControlSize::Small)
-            .on_press(|s: &mut App| { s.settings_section = state::SettingsSection::Account; s.go(Page::Settings); }).build(k).key("connect"));
+            .on_press(|s: &mut App| s.open_settings(state::SettingsSection::Account)).build(k).key("connect"));
     }
     Some(r.key("banner"))
 }

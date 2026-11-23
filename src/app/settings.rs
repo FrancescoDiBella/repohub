@@ -350,8 +350,7 @@ impl App {
             self.plugin_tab = None;
         }
         if matches!(&self.page, Page::Plugin(pid) if pid == id) {
-            self.settings_section = state::SettingsSection::Plugins;
-            self.go(Page::Settings);
+            self.open_settings(state::SettingsSection::Plugins);
         }
         match plugins::remove(id) {
             Ok(()) => {

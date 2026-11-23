@@ -282,6 +282,18 @@ impl SettingsSection {
     pub fn index(self) -> usize {
         SettingsSection::ALL.iter().position(|x| *x == self).unwrap_or(0)
     }
+
+    /// What the section holds, under the page's title (and in the phone's list of sections).
+    pub fn about(self) -> &'static str {
+        match self {
+            SettingsSection::Account => "Your profile, the GitHub account, the connection and where boards sync.",
+            SettingsSection::Appearance => "The mode (light, dark or the system's) and the theme each mode uses.",
+            SettingsSection::Assistants => "Claude and the other coding assistants the Terminal starts.",
+            SettingsSection::Plugins => "Sections and pages others wrote for RepoHub.",
+            SettingsSection::Keyboard => "Every shortcut. The ones of one key work while no text field, the terminal or a drawing has the keyboard.",
+            SettingsSection::About => "This version of RepoHub, its updates and the data it saves.",
+        }
+    }
 }
 
 /// The sections of a repository's page.

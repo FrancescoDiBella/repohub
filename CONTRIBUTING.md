@@ -21,6 +21,7 @@
 | `src/tests/` | Tests that build the whole app and drive it headless, one module per file (`fix58_tests`, …; `load_gen_tests` has `TempDataDir`); `every_page` draws every page and section on a computer and a phone; `followups_*` the follow-ups of the bug hunt (#138) |
 | `src/replay.rs` | What a finished write changed in the lists (`Change`), applied again, exactly, on what a load that ran meanwhile brings |
 | `src/discard.rs` | "Discard what you typed?": which drafts hold typed text (`state::Draft`), `ask_first` before an action that throws them away, the question floating over the page |
+| `src/settings_nav.rs` | Settings on a phone: the list of its sections and the way back from one (`App::open_settings` opens a section anywhere) |
 | `src/keyboard.rs` | The keyboard: every shortcut (`SHORTCUTS`, Settings → Keyboard), the rows of the list on screen (`rows`) that `j` / `k` and the arrows move through and Enter opens, the marked row's look |
 | `src/confirm.rs` | Asking first before what can't be undone: `Confirm` (one question: inline on a computer, a sheet on a phone), `App::ask` and `App::asking`, the look every question shares (`card`, also the discard question's) |
 | `src/pages.rs`, `src/lists.rs` | Pages: overview, repositories, repository detail, pull requests, issues, Actions, settings |

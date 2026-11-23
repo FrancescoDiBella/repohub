@@ -33,6 +33,9 @@ The sections are **Added**, **Changed** and **Fixed**.
   100 read, with a link to the rest.
 
 ### Changed
+- On a phone Settings is a list of its sections, each saying what it holds; one opens with a
+  way back (**Settings**, Esc or the back button). The theme editor opens in a view of its own,
+  with **Themes** (or Esc) back to the gallery.
 - One word for each thing: "mode" is Light, Dark or System and "theme" the colours each mode
   uses (the toolbar's button says "Switch to light mode"), a repository's parts are sections,
   and links to GitHub say what they open ("All comments on GitHub", "Details on GitHub", "All on

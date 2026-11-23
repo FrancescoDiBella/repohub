@@ -85,3 +85,57 @@ fn one_visibility_mark_and_empty_sections_that_say_what_to_do() {
     assert!(texts.contains(&format!("No open issues in {name}")) && texts.iter().any(|t| t.starts_with("New issue starts one")), "{texts:?}");
     assert!(!texts.iter().any(|t| t == "Nothing to show here"));
 }
+
+/// The theme editor opens in a view of its own, with a way back (the button, or Esc).
+#[test]
+fn the_theme_editor_is_its_own_view() {
+    let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _tmp = crate::load_gen_tests::TempDataDir::new("theme-editor-view");
+    let mut s = crate::init();
+    s.data = crate::model::Data::sample();
+    s.pending_place = None;
+    s.page = Page::Settings;
+    s.settings_section = SettingsSection::Appearance;
+    let mut rt = rune::Runtime::new(s, crate::view, (1180.0, 2400.0), rune::Env::new(true, 1.0));
+    rt.on_key = Some(crate::on_key);
+    rt.frame(0.0);
+    assert!(rt.find("theme-pick").is_some() && rt.find("look-back").is_none(), "the gallery");
+    let base = rt.state.looks.all[0].id.clone();
+    rt.update(move |s, _| s.duplicate_look(&base, true));
+    rt.frame(0.2);
+    assert!(rt.find("look-back").is_some() && rt.find("look-color-0").is_some(), "the editor");
+    assert!(rt.find("theme-pick").is_none(), "without the gallery and the mode");
+    rt.key(rune::KeyEvent { key: rune::Key::Escape, mods: rune::Mods::default() });
+    rt.frame(0.4);
+    assert!(rt.find("theme-pick").is_some() && rt.find("look-back").is_none(), "Esc goes back to the gallery");
+}
+
+/// On a phone Settings is a list of its sections; one opens with a way back (the button, Esc).
+#[test]
+fn on_a_phone_settings_is_a_list_of_sections() {
+    let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut s = crate::init();
+    s.data = crate::model::Data::sample();
+    s.pending_place = None;
+    s.compact = true;
+    s.page = Page::Overview;
+    let mut rt = rune::Runtime::new(s, crate::view, (390.0, 844.0), rune::Env::new(true, 1.0));
+    rt.on_key = Some(crate::on_key);
+    rt.reduced_motion = true;
+    rt.frame(0.0);
+    rt.update(|s, _| s.go(Page::Settings));
+    rt.frame(0.1);
+    for name in SettingsSection::LABELS {
+        assert!(rt.find(&format!("settings-open-{name}")).is_some(), "{name} is in the list");
+    }
+    assert!(rt.find("connection").is_none(), "no section open yet");
+    let (x, y) = rt.find("settings-open-Keyboard").unwrap();
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.frame(0.2);
+    assert!(rt.find("shortcuts").is_some() && rt.find("settings-back").is_some(), "the section, with a way back");
+    rt.key(rune::KeyEvent { key: rune::Key::Escape, mods: rune::Mods::default() });
+    rt.frame(0.3);
+    assert!(rt.find("settings-open-Account").is_some() && rt.find("shortcuts").is_none(), "Esc goes back to the list");
+}

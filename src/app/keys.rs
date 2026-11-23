@@ -92,8 +92,7 @@ fn one_key(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
         rune::Key::Text(t) => match t.as_str() {
             "/" => s.focus_search(),
             "?" => {
-                s.settings_section = state::SettingsSection::Keyboard;
-                s.go(Page::Settings);
+                s.open_settings(state::SettingsSection::Keyboard);
                 true
             }
             "j" if !ev.mods.shift => s.move_cursor(1, tx),
