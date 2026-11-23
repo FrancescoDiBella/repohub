@@ -94,7 +94,7 @@ fn line(s: &App, k: &Kit, n: &Notification) -> El {
                 Some(num) => format!("{} · {} #{num} · {}", n.why(), n.repo, model::fmt_ago(n.updated_at, s.now)),
                 None => format!("{} · {} · {}", n.why(), n.repo, model::fmt_ago(n.updated_at, s.now)),
             }).font(k.ty.text_small).color(k.c.text_muted).wrap()));
-    row().w_full().center_y().child(body).child(read.mr(12.0))
+    crate::keyboard::mark(k, row().w_full().center_y().child(body).child(read.mr(12.0)), s.marked(&format!("notif-{}", n.id)))
 }
 
 pub fn page(s: &App, k: &Kit) -> El {

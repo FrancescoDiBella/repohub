@@ -9,7 +9,7 @@ use rune::{AppHandle, Color, AppSpec, Cx, El, KeyEvent, ScrollSpec, TextEdit, Tx
 use rune_kit::shell::{self, PaneState, Sidebar, SidebarRow, SidebarSection, SidebarToggle, SplitView, Toolbar};
 use rune_kit::{ControlSize, IconButton, IconButtonVariant, Kit, PaletteSeed};
 
-use crate::{actions, board, cache, cache_page, claude, clones_shim, commits, confirm, diffs, discard, filters, github, harness, icons, inbox, lists, local, mobile, model, net, notes, notes_page, pages, palette, plugins, prefs, releases, replay, review, runs_page, state, sync_io, terminal, themes, thread, thread_page, tray, triage, ui, update};
+use crate::{actions, board, cache, cache_page, claude, clones_shim, commits, confirm, diffs, discard, filters, github, harness, icons, inbox, keyboard, lists, local, mobile, model, net, notes, notes_page, pages, palette, plugins, prefs, releases, replay, review, runs_page, state, sync_io, terminal, themes, thread, thread_page, tray, triage, ui, update};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::config;
 use crate::config::Config;
@@ -177,6 +177,8 @@ pub struct App {
     pub(crate) settings_section: state::SettingsSection,
     /// The connection's details (environment variables, files) are shown in Settings.
     pub(crate) connection_details: bool,
+    /// Settings → Account says which token to make ("Which token?").
+    pub(crate) token_help: bool,
     /// The line comments of the pull request whose diff is open, and the one being written.
     pub(crate) pull_review: Option<review::Review>,
     /// Issues being reopened with Undo, to put back in the list when GitHub confirms.
@@ -191,6 +193,9 @@ pub struct App {
     /// The Releases section (its list, the form, questions waiting for a yes) and each
     /// repository's latest release for the header.
     pub(crate) releases: releases::Releases,
+    /// The row of the list on screen marked with the keyboard (`j` / `k`), by its key (see
+    /// `keyboard`).
+    pub(crate) cursor: Option<String>,
     /// The section bar scrolls the section on screen into view on the next frame (`poll`).
     pub(crate) reveal_tab: bool,
     /// Where the section bar is scrolled, for its arrows (see `pages::SectionBar`).
@@ -432,6 +437,7 @@ pub(crate) fn init() -> App {
         sheet: std::cell::RefCell::new(None),
         settings_section: state::SettingsSection::Account,
         connection_details: false,
+        token_help: false,
         pull_review: None,
         reopening: Vec::new(),
         inbox: None,
@@ -441,6 +447,7 @@ pub(crate) fn init() -> App {
         runs_filter: runs_page::RunsFilter::default(),
         commits: commits::Commits::default(),
         releases: releases::Releases::default(),
+        cursor: None,
         reveal_tab: false,
         section_bar: pages::SectionBar::default(),
         thread: None,

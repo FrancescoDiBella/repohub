@@ -269,13 +269,15 @@ pub enum SettingsSection {
     /// Claude and the other coding assistants.
     Assistants,
     Plugins,
-    /// The version, updates and the keyboard shortcuts.
+    /// Every keyboard shortcut.
+    Keyboard,
+    /// The version, updates and the data RepoHub saves.
     About,
 }
 
 impl SettingsSection {
-    pub const ALL: [SettingsSection; 5] = [SettingsSection::Account, SettingsSection::Appearance, SettingsSection::Assistants, SettingsSection::Plugins, SettingsSection::About];
-    pub const LABELS: [&'static str; 5] = ["Account", "Appearance", "Assistants", "Plugins", "About"];
+    pub const ALL: [SettingsSection; 6] = [SettingsSection::Account, SettingsSection::Appearance, SettingsSection::Assistants, SettingsSection::Plugins, SettingsSection::Keyboard, SettingsSection::About];
+    pub const LABELS: [&'static str; 6] = ["Account", "Appearance", "Assistants", "Plugins", "Keyboard", "About"];
 
     pub fn index(self) -> usize {
         SettingsSection::ALL.iter().position(|x| *x == self).unwrap_or(0)

@@ -26,6 +26,7 @@ mod github;
 mod harness;
 mod icons;
 mod inbox;
+mod keyboard;
 mod lists;
 mod diffs;
 mod etag;

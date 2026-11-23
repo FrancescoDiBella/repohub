@@ -10,6 +10,11 @@ The sections are **Added**, **Changed** and **Fixed**.
 ## Unreleased
 
 ### Added
+- More of RepoHub works from the keyboard: `/` searches the page (Repositories, Pull requests,
+  Issues, a repository's Commits; elsewhere it opens the palette), `j` / `k` or ↓ / ↑ move through
+  the list on screen and Enter opens the marked row, `i` and `p` start a New issue or a New pull
+  request on a repository's page, and `?` lists every shortcut in the new **Settings →
+  Keyboard**. None of them fires while you type in a field, in the terminal or on a drawing.
 - RepoHub asks before aborting a merge, pulling over uncommitted changes, pushing (or committing
   and pushing) straight to the repository's default branch, signing out and clearing the saved
   data.
@@ -23,6 +28,10 @@ The sections are **Added**, **Changed** and **Fixed**.
   100 read, with a link to the rest.
 
 ### Changed
+- Each Settings section fits on one screen: the account in two columns, five themes to a row,
+  the keyboard shortcuts in a section of their own, and the kind of token to make behind
+  **Which token?** (which also says that only a classic token reads your notifications).
+- The palette's Pin and Unpin show the pin the way the pin button does.
 - Every question asked before something that can't be undone looks and works the same: merging
   a pull request (from its row or its diff, where you now pick a merge commit, squash or rebase
   in the question), publishing a release, deleting a drawing, removing a plugin. On a computer

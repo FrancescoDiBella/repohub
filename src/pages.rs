@@ -234,10 +234,11 @@ pub fn repos(s: &App, k: &Kit) -> El {
         let show_owner = !r.owner.eq_ignore_ascii_case(me);
         let pinned = s.is_pinned(i);
         let now = s.now;
+        let marked = s.marked(&format!("repo-{}", r.full_name));
         list = list.child(rune::memo(
             format!("card-{}", r.full_name),
-            ((i, r.pushed, r.stars, r.forks, r.issues, now_bucket), (r.starred, r.private, r.fork, r.archived, show_owner, pinned), &look_ver),
-            || repo_card(k, i, r, show_owner, pinned, now),
+            ((i, r.pushed, r.stars, r.forks, r.issues, now_bucket), (r.starred, r.private, r.fork, r.archived, show_owner, pinned, marked), &look_ver),
+            || crate::keyboard::mark(k, repo_card(k, i, r, show_owner, pinned, now), marked),
         ));
     }
     if remaining > 0 {
@@ -349,7 +350,7 @@ fn repo_card(k: &Kit, i: usize, r: &Repo, show_owner: bool, pinned: bool, now: i
         .child(ui::stat(k, &icons::ISSUE, r.issues.to_string()).help(format!("{} open issues and pull requests", r.issues)))
         .child(text(format!("Updated {}", r.updated_ago(now))).font(k.ty.text_small).color(k.c.text_faint));
     let desc = if r.description.is_empty() { "No description".to_owned() } else { r.description.clone() };
-    panel(k).padding(16.0).gap(10.0)
+    panel(k).padding(16.0).gap(10.0).key(format!("repo-{}", r.full_name))
         .child(row().w_full().justify_between().gap(12.0)
             .child(col().grow(1.0).shrink().gap(6.0)
                 .child(title)

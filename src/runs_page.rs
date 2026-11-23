@@ -168,6 +168,11 @@ pub fn filter_bar(s: &App, k: &Kit, repos: Vec<String>, workflows: Vec<String>) 
 
 /// A workflow run row with a quick **Re-run failed** button when the run failed.
 pub fn run_line(s: &App, k: &Kit, r: &Run, compact: bool) -> El {
+    let key = if r.id > 0 { format!("run-{}-{}", r.repo, r.id) } else { format!("run-{}-{}", r.repo, r.workflow) };
+    crate::keyboard::mark(k, run_line_of(s, k, r, compact), s.marked(&key))
+}
+
+fn run_line_of(s: &App, k: &Kit, r: &Run, compact: bool) -> El {
     let line = lists::run_row(k, r, s.now, compact);
     if r.checks != Checks::Failing || r.id == 0 {
         return line;

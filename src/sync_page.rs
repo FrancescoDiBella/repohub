@@ -105,7 +105,7 @@ pub fn mark(s: &App, k: &Kit, key: &Key) -> Option<El> {
 pub fn settings_block(s: &App, k: &Kit) -> El {
     let create = crate::pages::open_button(k, "Create it on GitHub", &sync_io::create_url(&s.cfg), "notes-repo-create");
     let head = panel(k).key("boards-sync").child(panel_head(k, "Boards", if s.sync.repo.is_none() && s.sync_blocked().is_none() { Some(create) } else { None })).child(rule(k));
-    let about = text("Boards sync through one private repository on your GitHub account, so a board drawn on one device opens on the others. RepoHub writes only to boards/ there, one commit per change, and never creates or deletes repositories. The token needs Contents: read and write on that repository.")
+    let about = text("Boards sync through one private repository on your GitHub account, so a board drawn on one device opens on the others. RepoHub writes only to its boards/ folder (one commit per change); the token needs Contents: read and write there.")
         .font(k.ty.text_small).color(k.c.text_muted).wrap();
     let mut body = col().w_full().padding(16.0).gap(12.0).child(about);
     if let Some(why) = s.sync_blocked() {

@@ -234,7 +234,8 @@ pub fn issue_line(s: &App, k: &Kit, x: &Issue) -> El {
         .disabled(busy || blocked(s).is_some())
         .on_press(move |s: &mut App| s.write(&repo, github::Write::CloseIssue(number)))
         .build(k).key(format!("close-{key}"));
-    with_tools(s, lists::issue_row(k, x, s.now), row().child(close))
+    let marked = s.marked(&format!("issue-{}-{}", x.repo, x.number));
+    crate::keyboard::mark(k, with_tools(s, lists::issue_row(k, x, s.now), row().child(close)), marked)
 }
 
 /// A row and its buttons: side by side, or on a phone the buttons under the row, where the
@@ -277,8 +278,13 @@ pub fn merge_question(s: &App, k: &Kit, repo: &str, number: u32, title: &str) ->
         })
 }
 
-/// A pull request row with Merge (asks first) on open, non-draft pull requests.
+/// A pull request row with Merge (asks first) on open, non-draft pull requests; marked when the
+/// keyboard's `j` / `k` is on it.
 pub fn pull_line(s: &App, k: &Kit, p: &Pull, compact: bool) -> El {
+    crate::keyboard::mark(k, pull_line_of(s, k, p, compact), s.marked(&format!("pr-{}-{}", p.repo, p.number)))
+}
+
+fn pull_line_of(s: &App, k: &Kit, p: &Pull, compact: bool) -> El {
     let key = busy_key(&p.repo, p.number);
     let active = s.pull_diff_of.as_ref().is_some_and(|(full, num)| *num == p.number && crate::changes_page::pull_repo(&p.url).is_some_and(|f| f.eq_ignore_ascii_case(full)));
     let line = lists::pull_row(k, p, s.now, compact);

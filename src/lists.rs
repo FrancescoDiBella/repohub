@@ -290,13 +290,15 @@ pub fn settings(s: &App, k: &Kit) -> El {
     let p = &s.data.profile;
     let cfg = &s.cfg;
     let stars = s.starred_count();
-    let profile = panel(k).padding(20.0).gap(16.0)
-        .child(row().gap(14.0).center_y()
-            .child(ui::user(k, if p.login.is_empty() { "?" } else { &p.login }, 56.0))
-            .child(col().gap(3.0).shrink()
+    // One line of who you are, so the account section fits a screen.
+    let profile = panel(k).padding(14.0)
+        .child(row().gap(12.0).center_y()
+            .child(ui::user(k, if p.login.is_empty() { "?" } else { &p.login }, 40.0))
+            .child(col().gap(2.0).shrink()
                 .child(text(if p.name.is_empty() { "—".to_owned() } else { p.name.clone() }).font(k.ty.body_medium).color(k.c.text_strong))
-                .child(text(format!("@{}{}", p.login, if p.bio.is_empty() { String::new() } else { format!(" · {}", p.bio) })).font(k.ty.small).color(k.c.text_muted).wrap())
-                .child(row().gap(14.0).child(ui::stat(k, &icons::REPO, format!("{} repositories", s.data.repos.len()))).child(ui::stat(k, &icons::STAR, format!("{stars} stars"))))));
+                .child(row().gap(14.0).flex_wrap()
+                    .child(text(format!("@{}{}", p.login, if p.bio.is_empty() { String::new() } else { format!(" · {}", p.bio) })).font(k.ty.small).color(k.c.text_muted).wrap())
+                    .child(ui::stat(k, &icons::REPO, format!("{} repositories", s.data.repos.len()))).child(ui::stat(k, &icons::STAR, format!("{stars} stars"))))));
     let source = match (&s.status, cfg.live()) {
         (Status::Sample, _) if cfg.demo => "Sample data (REPOHUB_DEMO=true)".to_owned(),
         (Status::Sample, _) => "Sample data: no configuration found".to_owned(),
@@ -376,17 +378,6 @@ pub fn settings(s: &App, k: &Kit) -> El {
     let assistants = assistants_panel(s, k);
     let plugins = crate::plugins_page::plugins_panel(s, k);
     let version = version_panel(s, k);
-    let keys = panel(k).child(panel_head(k, "Keyboard shortcuts", None));
-    let keys = [
-        ("⌘/Ctrl + K", "Search and commands: jump to any repository or page, run any action"),
-        ("⌘/Ctrl + 1 … 5", "Overview, Repositories, Pull requests, Issues, Actions"),
-        ("⌘/Ctrl + ,", "Settings"),
-        ("⌘/Ctrl + R", "Refresh from GitHub"),
-        ("⌘/Ctrl + [", "Back: out of a conversation, a commit or a comparison, or from a repository to the list"),
-        ("Esc", "Close what's open, the newest first: a question, a picker, an editor, a form, a diff, a conversation, a run, a commit, a comparison, a file, a message"),
-        ("Ctrl + Shift + Tab", "Leave the terminal, so the keyboard reaches the rest of the app"),
-        ("↑ ↓ in ⌘K", "Move through the results; Enter runs the one highlighted"),
-    ].iter().fold(keys, |p, (key, what)| p.child(rule(k)).child(info(k, key, (*what).to_owned())));
     use crate::state::SettingsSection as Section;
     let section = s.settings_section;
     let picker = SegmentedControl::new(&Section::LABELS, Some(section.index())).label("Settings section").fit()
@@ -394,13 +385,18 @@ pub fn settings(s: &App, k: &Kit) -> El {
     // Five segments don't fit a phone: the row scrolls sideways there.
     let picker = if s.compact { row().w_full().scroll_x().child(picker) } else { row().w_full().child(picker) };
     let (subtitle, body): (&str, Vec<El>) = match section {
-        Section::Account => ("Your profile, the GitHub account, the connection and where boards sync.", vec![profile, account, conn, crate::sync_page::settings_block(s, k)]),
+        // Two columns where there's room, so it fits a screen: who you are and the account, then
+        // the connection and the boards.
+        Section::Account => ("Your profile, the GitHub account, the connection and where boards sync.", vec![row().w_full().gap(16.0).items_start().flex_wrap()
+            .child(col().w(0.0).grow(1.0).min_w(360.0).gap(16.0).child(profile).child(account))
+            .child(col().w(0.0).grow(1.0).min_w(360.0).gap(16.0).child(conn).child(crate::sync_page::settings_block(s, k)))]),
         Section::Appearance => ("Light, dark or the system's, and the themes.", vec![appearance]),
         Section::Assistants => ("Claude and the other coding assistants the Terminal starts.", vec![assistants]),
         Section::Plugins => ("Sections and pages others wrote for RepoHub.", vec![plugins]),
-        Section::About => ("This version of RepoHub, its updates, the data it saves and the keyboard shortcuts.", vec![version, crate::cache_page::panel_of(s, k), keys]),
+        Section::Keyboard => ("Every shortcut. The ones of one key work while no text field, the terminal or a drawing has the keyboard.", vec![crate::keyboard::panel(s, k)]),
+        Section::About => ("This version of RepoHub, its updates and the data it saves.", vec![version, crate::cache_page::panel_of(s, k)]),
     };
-    col().w_full().gap(16.0).max_w(760.0)
+    col().w_full().gap(16.0).max_w(if section == Section::Account { 1080.0 } else { 760.0 })
         .child(heading(k, "Settings", subtitle, None))
         .child(picker)
         .children(body)
@@ -477,7 +473,9 @@ fn account_panel(s: &App, k: &Kit) -> El {
             .child(text(format!("GITHUB_USER or GITHUB_TOKEN comes from {from}, and that wins. Change it there, or remove it to manage the account here."))
                 .font(k.ty.text_small).color(k.c.text_muted).wrap()));
     }
-    let label = |t: &str| text(t.to_owned()).font(k.ty.small).color(k.c.text_muted).w(110.0);
+    // Each field under its label, side by side on a wide window.
+    let field = |t: &str, input: El| col().grow(1.0).min_w(220.0).gap(4.0)
+        .child(text(t.to_owned()).font(k.ty.small).color(k.c.text_muted)).child(input.w_full());
     let user = TextInput::new(&s.acct_user).placeholder("octocat").label("GitHub user name")
         .on_edit(|s: &mut App| &mut s.acct_user).on_submit(|s: &mut App, _| s.save_account(false)).build(k).key("acct-user").grow(1.0).min_w(200.0);
     let token = TextInput::new(&s.acct_token).secure().label("Personal access token")
@@ -490,12 +488,17 @@ fn account_panel(s: &App, k: &Kit) -> El {
         buttons = buttons.child(Button::new("Sign out").variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
             .on_press(|s: &mut App| s.ask("ask-sign-out")).build(k).key("acct-sign-out"));
     }
+    let buttons = buttons.child(Button::new(if s.token_help { "Hide which token" } else { "Which token?" }).variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
+        .on_press(|s: &mut App| s.token_help = !s.token_help).build(k).key("token-help"));
     let buttons = col().w_full().gap(12.0).child(buttons).children(crate::confirm::sign_out_question(s, k));
     let mut body = col().w_full().padding(16.0).gap(12.0)
-        .child(row().w_full().gap(12.0).center_y().flex_wrap().child(label("User name")).child(user))
-        .child(row().w_full().gap(12.0).center_y().flex_wrap().child(label("Token")).child(token))
-        .child(text("With only a user name RepoHub shows public repositories (60 requests an hour). A token adds private repositories, starring and 5,000 requests an hour: a fine-grained token with read access to Metadata and Actions, and read and write access to Contents, Issues and Pull requests (to create branches, issues and pull requests from the app). A fine-grained token sees one owner's repositories; for your organizations' private repositories use a classic token with repo and read:org. ".to_owned() + if cfg.device { "It stays on this device, encrypted with a key that never leaves it." } else { "It is saved on this computer only, in a file only you can read." })
+        .child(row().w_full().gap(12.0).flex_wrap().child(field("User name", user)).child(field("Token", token)))
+        .child(text("With only a user name RepoHub shows public repositories (60 requests an hour). A token adds private repositories, your notifications, starring and changes, and 5,000 requests an hour. ".to_owned() + if cfg.device { "It stays on this device, encrypted with a key that never leaves it." } else { "It is saved on this computer only, in a file only you can read." })
             .font(k.ty.text_small).color(k.c.text_muted).wrap());
+    if s.token_help {
+        body = body.child(text("A fine-grained token with read access to Metadata and Actions, and read and write access to Contents, Issues and Pull requests (to create branches, issues and pull requests from the app), sees one owner's repositories and can't read notifications. A classic token with repo, read:org and notifications also reads your organizations' private repositories and your notifications.")
+            .font(k.ty.text_small).color(k.c.text_muted).wrap().key("token-help-text"));
+    }
     if let Some(e) = &s.acct_error {
         body = body.child(text(e.clone()).font(k.ty.small).color(k.c.danger.icon).wrap());
     }

@@ -32,6 +32,7 @@ impl App {
             state::trace("page", &self.page, &p);
             self.close_pull_diff();
             self.leave_tab();
+            self.cursor = None;
         }
         self.page = p;
         self.thread = None;
@@ -143,6 +144,7 @@ impl App {
         if self.tab != tab {
             state::trace("tab", &self.tab, &tab);
             self.leave_tab();
+            self.cursor = None;
         }
         self.tab = tab;
         self.reveal_tab = true;

@@ -12,7 +12,7 @@ pub fn appearance(s: &App, k: &Kit) -> El {
     let mode = row().w_full().px(16.0).py(12.0).gap(16.0).center_y().justify_between().flex_wrap()
         .child(col().grow(1.0).shrink().min_w(200.0).gap(2.0)
             .child(text("Mode").font(k.ty.ui_medium).color(k.c.text_base))
-            .child(text("System follows your computer. The sun and moon in the toolbar switch between your light and dark theme.")
+            .child(text("Light, dark, or the system's. Each mode has its theme, picked below: the sun and moon in the toolbar switch between them.")
                 .font(k.ty.text_small).color(k.c.text_muted).wrap()))
         .child(SegmentedControl::new(&Theme::LABELS, Some(s.theme.index())).label("Mode").fit()
             .on_pick(|s: &mut App, i, _| s.set_theme(Theme::ALL[i.min(2)])).build(k).key("theme-pick"));
@@ -38,7 +38,7 @@ fn card(s: &App, k: &Kit, t: &Look, shown_dark: bool) -> El {
     let pattern = if matches!(t.backdrop, Backdrop::Plain | Backdrop::Image) { el() } else {
         themes::backdrop(t, [96.0, 72.0], None)
     };
-    let picture = row().w_full().h(72.0).radius(8.0).clip_rounded(8.0).fill(c(Part::Page)).border(1.0, k.c.border_weak)
+    let picture = row().w_full().h(64.0).radius(8.0).clip_rounded(8.0).fill(c(Part::Page)).border(1.0, k.c.border_weak)
         .child(col().w(30.0).h_full().fill(c(Part::Sidebar)).padding(6.0).gap(4.0)
             .child(el().w_full().h(4.0).radius(2.0).fill(c(Part::Muted).alpha(0.6)))
             .child(el().w_full().h(4.0).radius(2.0).fill(accent.alpha(0.8)))
@@ -54,7 +54,8 @@ fn card(s: &App, k: &Kit, t: &Look, shown_dark: bool) -> El {
         name = name.child(ui::pill(k, u, if on_screen { k.c.text_accent } else { k.c.text_muted }));
     }
     let id = t.id.clone();
-    let box_ = col().w(150.0).padding(6.0).gap(6.0).radius(10.0)
+    // Five to a row in Settings' width, so the gallery and the editor's start fit a screen.
+    let box_ = col().w(134.0).padding(6.0).gap(6.0).radius(10.0)
         .border(if on_screen { 2.0 } else { 1.0 }, if on_screen { k.c.bg_accent } else { k.c.border_weak })
         .role("button").label(format!("Use the theme {}", t.name))
         .on_press(move |s: &mut App| s.choose_look(&id, shown_dark))

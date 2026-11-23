@@ -377,6 +377,10 @@ def write(method, path, body):
                          "html_url": f"https://github.com/{full}/issues/{rest[1]}#issuecomment-8800"}
         if method == "PATCH" and len(rest) == 2 and rest[0] == "issues" and rest[1].isdigit():
             return edit(full, int(rest[1]), body)
+        if method == "PUT" and len(rest) == 3 and rest[0] == "pulls" and rest[1].isdigit() and rest[2] == "merge":
+            if body.get("merge_method", "merge") not in ("merge", "squash", "rebase"):
+                return 422, {"message": "Validation Failed"}
+            return 200, {"sha": fixture("commits.json", full)[0]["sha"], "merged": True, "message": "Pull Request successfully merged"}
         if method == "POST" and rest == ["releases", "generate-notes"]:
             tag = body.get("tag_name")
             if not tag:
