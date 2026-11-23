@@ -54,6 +54,7 @@ fn sample_500() -> Data {
             review_requested: false,
         });
         d.issues.push(Issue {
+            author: String::new(),
             number: (200 + i) as u32,
             title: format!("Investigate latency spike on {} #{i}", r.name),
             repo: r.full_name.clone(),

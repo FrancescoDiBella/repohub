@@ -279,7 +279,7 @@ fn apply_done_on_unloaded_external_repo_does_not_mutate_loaded_same_name_repo() 
         comments: 0,
         url: "https://github.com/other-org/app/pull/42".into(),
     });
-    s.data.issues.insert(0, crate::model::Issue { labels: Vec::new(), assignees: Vec::new(),
+    s.data.issues.insert(0, crate::model::Issue { labels: Vec::new(), assignees: Vec::new(), author: String::new(),
         number: 77,
         title: "External Issue".into(),
         repo: "other-org/app".into(),

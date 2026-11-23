@@ -106,6 +106,8 @@ pub struct Issue {
     pub labels: Vec<(String, f32)>,
     /// Who it's assigned to (logins).
     pub assignees: Vec<String>,
+    /// Who opened it (login; empty in a saved copy from before it was kept).
+    pub author: String,
 }
 
 impl Issue {
@@ -462,7 +464,7 @@ impl Data {
         pulls[1].assignees = vec!["francescodibella".into()];
         pulls[2].labels = vec![("bug".into(), 25.0)];
         pulls[2].review_requested = true;
-        let issue = |number, title: &str, repo: &str, label: &str, hue, age_secs: i64| Issue { labels: vec![(label.into(), hue)], assignees: Vec::new(),
+        let issue = |number, title: &str, repo: &str, label: &str, hue, age_secs: i64| Issue { labels: vec![(label.into(), hue)], assignees: Vec::new(), author: SAMPLE_LOGIN.into(),
             number, title: title.into(), repo: repo.into(), label: Some((label.into(), hue)), created_at: now - age_secs, comments: 0,
             url: format!("https://github.com/francescodibella/{repo}/issues/{number}"),
         };
@@ -474,6 +476,8 @@ impl Data {
         ];
         issues[0].assignees = vec!["francescodibella".into()];
         issues[2].assignees = vec!["francescodibella".into(), "hubot".into()];
+        issues[0].author = "octocat".into();
+        issues[3].author = "hubot".into();
         let run = |id, workflow: &str, repo: &str, branch: &str, checks, duration: &str, age_secs: i64, pull_numbers: Vec<u32>| Run {
             id, workflow: workflow.into(), repo: repo.into(), branch: branch.into(), checks, duration: duration.into(), updated_at: now - age_secs,
             url: format!("https://github.com/francescodibella/{repo}/actions/runs/{id}"),
@@ -620,7 +624,7 @@ mod tests {
         assert_eq!(repo.updated_ago(t + 30 * 60), "30 minutes ago");
         assert_eq!(repo.updated_ago(t + 2 * 3600), "2 hours ago");
 
-        let issue = Issue { labels: Vec::new(), assignees: Vec::new(),
+        let issue = Issue { labels: Vec::new(), assignees: Vec::new(), author: String::new(),
             number: 1, title: "Bug".into(), repo: "a/b".into(), label: None,
             created_at: t, comments: 0, url: String::new(),
         };

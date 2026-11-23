@@ -288,7 +288,7 @@ impl App {
                     _ => self.picked_for_new_issue(&full_name),
                 };
                 let number = c.number;
-                self.changed(replay::Change::Opened(model::Issue { label: labels.first().cloned(), labels, assignees, number, title: c.title, repo: full_name.clone(), created_at: self.now, comments: 0, url: c.url }), exact);
+                self.changed(replay::Change::Opened(model::Issue { label: labels.first().cloned(), labels, assignees, author: self.data.profile.login.clone(), number, title: c.title, repo: full_name.clone(), created_at: self.now, comments: 0, url: c.url }), exact);
                 self.notify(format!("Opened issue #{number} in {full_name}"));
             }
             github::Done::Branch(name) => {

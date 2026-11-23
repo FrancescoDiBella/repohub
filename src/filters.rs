@@ -1,5 +1,6 @@
-//! Narrowing the Pull requests and Issues pages: a search field and chips for the repository,
-//! the label and whose they are. Each page has its own [`ListFilter`]; nothing is asked of
+//! Narrowing the Pull requests and Issues pages: a search field, chips for the repository, the
+//! label and the author, and toggles for what's yours (created by you, assigned to you, your
+//! review asked for) and, for pull requests, drafts and failing checks. Each page has its own [`ListFilter`]; nothing is asked of
 //! GitHub, the lists already loaded are filtered as you type.
 //!
 //! The filters are kept between visits, and between runs in the preferences (`"filters"`, next
@@ -24,8 +25,12 @@ pub struct ListFilter {
     pub search: TextEdit,
     pub repo: Option<String>,
     pub label: Option<String>,
-    /// Pull requests you opened; issues assigned to you.
+    /// Who opened them (a login).
+    pub author: Option<String>,
+    /// Created by you.
     pub mine: bool,
+    /// Assigned to you.
+    pub assigned: bool,
     /// Pull requests only: drafts, and ones whose checks failed.
     pub drafts: bool,
     pub failing: bool,
@@ -35,13 +40,13 @@ pub struct ListFilter {
 
 impl Default for ListFilter {
     fn default() -> Self {
-        ListFilter { search: TextEdit::new(""), repo: None, label: None, mine: false, drafts: false, failing: false, review: false }
+        ListFilter { search: TextEdit::new(""), repo: None, label: None, author: None, mine: false, assigned: false, drafts: false, failing: false, review: false }
     }
 }
 
 impl ListFilter {
     pub fn is_empty(&self) -> bool {
-        self.search.text.trim().is_empty() && self.repo.is_none() && self.label.is_none() && !self.mine && !self.drafts && !self.failing && !self.review
+        self.search.text.trim().is_empty() && self.repo.is_none() && self.label.is_none() && self.author.is_none() && !self.mine && !self.assigned && !self.drafts && !self.failing && !self.review
     }
 
     /// What's kept in the preferences.
@@ -50,22 +55,28 @@ impl ListFilter {
             "search": self.search.text.trim(),
             "repo": self.repo,
             "label": self.label,
+            "author": self.author,
             "mine": self.mine,
+            "assigned": self.assigned,
             "drafts": self.drafts,
             "failing": self.failing,
             "review": self.review,
         })
     }
 
-    /// A filter read back from the preferences; what's missing or odd is left empty.
-    pub fn from_json(v: &Value) -> ListFilter {
+    /// A filter of page `which` read back from the preferences; what's missing or odd is left
+    /// empty. (Before "Assigned to me" was on both pages, the Issues page's `mine` meant it.)
+    pub fn from_json(v: &Value, which: Which) -> ListFilter {
         let text = |k: &str| v.get(k).and_then(Value::as_str).map(str::trim).filter(|x| !x.is_empty()).map(str::to_owned);
         let on = |k: &str| v.get(k).and_then(Value::as_bool).unwrap_or(false);
+        let older = which == Which::Issues && v.get("assigned").is_none();
         ListFilter {
             search: TextEdit::new(text("search").unwrap_or_default()),
             repo: text("repo"),
             label: text("label"),
-            mine: on("mine"),
+            author: text("author"),
+            mine: on("mine") && !older,
+            assigned: on("assigned") || (older && on("mine")),
             drafts: on("drafts"),
             failing: on("failing"),
             review: on("review"),
@@ -89,22 +100,25 @@ impl ListFilter {
         q.split_whitespace().all(|w| title.contains(w))
     }
 
-    fn common(&self, number: u32, title: &str, repo: &str, labels: &[(String, f32)]) -> bool {
+    #[allow(clippy::too_many_arguments)]
+    fn common(&self, number: u32, title: &str, repo: &str, labels: &[(String, f32)], author: &str, assignees: &[String], me: &str) -> bool {
         self.text_matches(number, title)
             && self.repo.as_deref().is_none_or(|r| r.eq_ignore_ascii_case(repo))
             && self.label.as_deref().is_none_or(|l| labels.iter().any(|(name, _)| name.eq_ignore_ascii_case(l)))
+            && self.author.as_deref().is_none_or(|a| a.eq_ignore_ascii_case(author))
+            && (!self.mine || author.eq_ignore_ascii_case(me))
+            && (!self.assigned || assignees.iter().any(|a| a.eq_ignore_ascii_case(me)))
     }
 
     pub fn pull(&self, p: &Pull, me: &str) -> bool {
-        self.common(p.number, &p.title, &p.repo, &p.labels)
-            && (!self.mine || p.author.eq_ignore_ascii_case(me))
+        self.common(p.number, &p.title, &p.repo, &p.labels, &p.author, &p.assignees, me)
             && (!self.drafts || p.state == crate::model::PullState::Draft)
             && (!self.failing || p.checks == Some(crate::model::Checks::Failing))
             && (!self.review || p.review_requested)
     }
 
     pub fn issue(&self, x: &Issue, me: &str) -> bool {
-        self.common(x.number, &x.title, &x.repo, &x.labels) && (!self.mine || x.assignees.iter().any(|a| a.eq_ignore_ascii_case(me)))
+        self.common(x.number, &x.title, &x.repo, &x.labels, &x.author, &x.assignees, me)
     }
 }
 
@@ -175,10 +189,10 @@ impl App {
     pub(crate) fn restore_filters(&mut self) {
         let Some(v) = crate::prefs::get("filters") else { return };
         if let Some(p) = v.get("pulls") {
-            self.pull_filter = ListFilter::from_json(p);
+            self.pull_filter = ListFilter::from_json(p, Which::Pulls);
         }
         if let Some(i) = v.get("issues") {
-            self.issue_filter = ListFilter::from_json(i);
+            self.issue_filter = ListFilter::from_json(i, Which::Issues);
         }
         if let Some(st) = v.get("state").and_then(Value::as_str) {
             self.pr_filter = [PullState::Open, PullState::Draft, PullState::Merged, PullState::Closed].into_iter().find(|p| state_word(*p) == st).unwrap_or(PullState::Open);
@@ -209,7 +223,6 @@ pub fn bar(s: &App, k: &Kit, which: Which, repos: Vec<String>, labels: Vec<Strin
     };
     let search = TextInput::new(&f.search).leading_icon(k.glyph.search).placeholder(format!("Search {what} by title or number…")).label(format!("Search {what}"))
         .on_edit(move |s: &mut App| &mut of(s, which).search).build(k).key(format!("{tag}-search")).grow(1.0).min_w(220.0);
-    let mine_label = if which == Which::Pulls { "Opened by me" } else { "Assigned to me" };
     let chip = |label: String, on: bool, key: String| {
         Button::new(label).control_size(ControlSize::Small)
             // Outlined when off, filled when on: a choice, not a link.
@@ -217,7 +230,8 @@ pub fn bar(s: &App, k: &Kit, which: Which, repos: Vec<String>, labels: Vec<Strin
             .build(k).key(key)
     };
     let mut top_row = row().w_full().gap(8.0).center_y().flex_wrap().child(search)
-        .child(chip(mine_label.to_owned(), f.mine, format!("{tag}-mine")).on_press(move |s: &mut App| { let f = of(s, which); f.mine = !f.mine; s.save_filters(); }));
+        .child(chip("Created by me".to_owned(), f.mine, format!("{tag}-mine")).on_press(move |s: &mut App| { let f = of(s, which); f.mine = !f.mine; s.save_filters(); }))
+        .child(chip("Assigned to me".to_owned(), f.assigned, format!("{tag}-assigned")).on_press(move |s: &mut App| { let f = of(s, which); f.assigned = !f.assigned; s.save_filters(); }));
     if which == Which::Pulls {
         top_row = top_row
             .child(chip("Review requested".to_owned(), f.review, format!("{tag}-review")).on_press(|s: &mut App| { s.pull_filter.review = !s.pull_filter.review; s.save_filters(); }))
@@ -239,7 +253,11 @@ pub fn bar(s: &App, k: &Kit, which: Which, repos: Vec<String>, labels: Vec<Strin
             let shown = if kind == "repo" { v.rsplit('/').next().unwrap_or(&v).to_owned() } else { v.clone() };
             r = r.child(chip(shown, on, format!("{tag}-{kind}-{v}")).on_press(move |s: &mut App| {
                 let f = of(s, which);
-                let slot = if kind == "repo" { &mut f.repo } else { &mut f.label };
+                let slot = match kind {
+                    "repo" => &mut f.repo,
+                    "author" => &mut f.author,
+                    _ => &mut f.label,
+                };
                 *slot = if on { None } else { Some(value.clone()) };
                 s.save_filters();
             }));
@@ -252,6 +270,14 @@ pub fn bar(s: &App, k: &Kit, which: Which, repos: Vec<String>, labels: Vec<Strin
     }
     if !labels.is_empty() || f.label.is_some() {
         out = out.child(group("Label", labels, &f.label, "label"));
+    }
+    // Who opened them, among the ones the page lists (most first).
+    let authors = match which {
+        Which::Pulls => top(s.data.pulls.iter().filter(|p| p.state == s.pr_filter).map(|p| p.author.clone()).filter(|a| !a.is_empty()), 10),
+        Which::Issues => top(s.data.issues.iter().map(|x| x.author.clone()).filter(|a| !a.is_empty()), 10),
+    };
+    if authors.len() > 1 || f.author.is_some() {
+        out = out.child(group("Author", authors, &f.author, "author"));
     }
     out
 }
@@ -272,6 +298,7 @@ mod tests {
 
     fn issue(number: u32, title: &str, repo: &str, labels: &[&str], assignees: &[&str]) -> Issue {
         Issue {
+            author: "carol".into(),
             number, title: title.into(), repo: repo.into(), label: None, created_at: 0, comments: 0, url: String::new(),
             labels: labels.iter().map(|l| ((*l).to_owned(), 0.0)).collect(), assignees: assignees.iter().map(|a| (*a).to_owned()).collect(),
         }
@@ -303,11 +330,23 @@ mod tests {
         f.repo = Some("octo/site".into());
         assert!(!f.issue(&a, "alice") && !f.issue(&b, "alice"), "the filters add up");
         f.clear();
-        f.mine = true;
+        f.assigned = true;
         assert!(f.issue(&a, "Alice") && !f.issue(&a, "bob") && !f.issue(&b, "alice"));
-        // For pull requests "mine" is the author.
+        // "Created by me" is the author, on both pages; so is the author chip.
+        f.clear();
+        f.mine = true;
         assert!(f.pull(&pull(1, "x", "octo/app", "alice"), "alice") && !f.pull(&pull(2, "x", "octo/app", "bob"), "alice"));
+        assert!(f.issue(&a, "carol") && !f.issue(&a, "alice"));
         assert!(!f.is_empty());
+        f.clear();
+        f.author = Some("BOB".into());
+        assert!(f.pull(&pull(2, "x", "octo/app", "bob"), "alice") && !f.pull(&pull(1, "x", "octo/app", "alice"), "alice"));
+        assert!(!f.issue(&a, "alice") && !f.is_empty());
+        // Assigned to me, on pull requests too.
+        let mut assigned = pull(5, "x", "octo/app", "bob");
+        assigned.assignees = vec!["alice".into()];
+        let f = ListFilter { assigned: true, ..ListFilter::default() };
+        assert!(f.pull(&assigned, "alice") && !f.pull(&pull(6, "x", "octo/app", "bob"), "alice"));
         // Drafts, and failing checks, for pull requests.
         let mut draft = pull(3, "x", "octo/app", "bob");
         draft.state = PullState::Draft;
@@ -327,15 +366,23 @@ mod tests {
         let f = ListFilter { review: true, ..ListFilter::default() };
         assert!(f.pull(&waiting, "alice") && !f.pull(&other, "alice") && !f.is_empty());
 
-        let f = ListFilter { search: TextEdit::new(" vocab "), repo: Some("octo/app".into()), label: Some("bug".into()), mine: true, drafts: true, failing: true, review: true };
-        let back = ListFilter::from_json(&f.to_json());
-        assert_eq!(back.search.text, "vocab");
-        assert_eq!((back.repo.as_deref(), back.label.as_deref()), (Some("octo/app"), Some("bug")));
-        assert!(back.mine && back.drafts && back.failing && back.review);
+        let f = ListFilter { search: TextEdit::new(" vocab "), repo: Some("octo/app".into()), label: Some("bug".into()), author: Some("bob".into()), mine: true, assigned: true, drafts: true, failing: true, review: true };
+        for which in [Which::Pulls, Which::Issues] {
+            let back = ListFilter::from_json(&f.to_json(), which);
+            assert_eq!(back.search.text, "vocab");
+            assert_eq!((back.repo.as_deref(), back.label.as_deref(), back.author.as_deref()), (Some("octo/app"), Some("bug"), Some("bob")));
+            assert!(back.mine && back.assigned && back.drafts && back.failing && back.review);
+        }
+        // Saved before "Assigned to me" was on both pages: the Issues page's `mine` meant it.
+        let older = serde_json::json!({ "mine": true });
+        let issues = ListFilter::from_json(&older, Which::Issues);
+        assert!(issues.assigned && !issues.mine);
+        let pulls = ListFilter::from_json(&older, Which::Pulls);
+        assert!(pulls.mine && !pulls.assigned);
         // Missing or odd values are left empty.
-        let odd = ListFilter::from_json(&serde_json::json!({ "search": 3, "repo": "", "mine": "yes" }));
+        let odd = ListFilter::from_json(&serde_json::json!({ "search": 3, "repo": "", "mine": "yes" }), Which::Pulls);
         assert!(odd.is_empty());
-        assert!(ListFilter::from_json(&ListFilter::default().to_json()).is_empty());
+        assert!(ListFilter::from_json(&ListFilter::default().to_json(), Which::Issues).is_empty());
     }
 
     #[test]

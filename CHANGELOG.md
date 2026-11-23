@@ -10,6 +10,8 @@ The sections are **Added**, **Changed** and **Fixed**.
 ## Unreleased
 
 ### Added
+- The Pull requests and Issues pages have **Created by me** and **Assigned to me** on both, and
+  chips for who opened them (**Author**), next to the repository and label chips.
 - More of RepoHub works from the keyboard: `/` searches the page (Repositories, Pull requests,
   Issues, a repository's Commits; elsewhere it opens the palette), `j` / `k` or ↓ / ↑ move through
   the list on screen and Enter opens the marked row, `i` and `p` start a New issue or a New pull

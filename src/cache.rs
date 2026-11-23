@@ -242,7 +242,7 @@ fn issue_json(x: &Issue) -> Value {
         "number": x.number, "title": x.title, "repo": x.repo,
         "label": x.label.as_ref().map(|(name, hue)| json!([name, hue])),
         "createdAt": x.created_at, "comments": x.comments, "url": x.url,
-        "labels": labels_json(&x.labels), "assignees": x.assignees,
+        "labels": labels_json(&x.labels), "assignees": x.assignees, "author": x.author,
     })
 }
 
@@ -257,6 +257,7 @@ fn issue_of(v: &Value) -> Issue {
         url: s(v, "url"),
         labels: labels_of(v, "labels"),
         assignees: strings(v, "assignees"),
+        author: s(v, "author"),
     }
 }
 
