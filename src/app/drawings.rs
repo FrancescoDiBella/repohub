@@ -62,7 +62,9 @@ impl App {
     /// The Notes tab's branch chips: the same branch as the Code tab.
     pub(crate) fn pick_branch(&mut self, i: usize, branch: String) {
         self.set_branch(i, branch);
-        self.load_notes(i);
+        if self.tab != RepoTab::Notes {
+            self.load_notes(i);
+        }
     }
 
     pub(crate) fn delete_note(&mut self, i: usize, name: String) {

@@ -132,8 +132,8 @@ pub fn repohub_back() {
 pub fn start() {
     let app = rune::App::new(AppSpec { on_key: Some(on_key), poll: Some(poll), setup: Some(setup), fonts: FONTS, families: FAMILIES, ..AppSpec::new("RepoHub", (1180.0, 760.0), init, view) });
     // macOS: draw with wgpu's Metal backend rather than Rune's own, which makes coloured parts of
-    // the window flicker on every key press and pointer move (#108). `RUNE_GPU_BACKEND=metal`
-    // still picks Rune's, to check whether a newer Rune fixed it.
+    // the window flicker on every key press and pointer move (#108). Rune's `metal-backend`
+    // feature is left off in Cargo.toml so the unused renderer isn't shipped in macOS builds.
     let mut app = app.gpu_backend(rune::GpuBackend::Wgpu);
     // With the status-bar widget, closing the window keeps RepoHub there (macOS, Windows).
     if tray::keeps_running() {

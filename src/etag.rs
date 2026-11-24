@@ -129,12 +129,28 @@ pub fn export(budget: usize) -> Vec<(String, Entry)> {
     })
 }
 
-/// Takes the answers of a saved copy (only into an empty store of the same generation: a load
-/// that already ran knows better).
+/// Takes the answers of a saved copy (only for keys not already present in the current
+/// generation: a load that already ran knows better, and imported entries never evict live ones).
 pub fn import(generation: u64, entries: Vec<(String, Entry)>) {
-    for (k, e) in entries.into_iter().rev() {
-        put(generation, k, e);
-    }
+    with(|s| {
+        if s.generation != generation {
+            return;
+        }
+        // `export` orders most-recently-used first; walk in that order so the hottest saved
+        // answers fit first, and mark them with `used = 0` so live entries (`clock >= 1`) always
+        // outrank them in LRU eviction.
+        for (k, entry) in entries {
+            if s.entries.contains_key(&k) {
+                continue;
+            }
+            let size = k.len() + entry.body.len() + entry.etag.len();
+            if size > MAX_BYTES / 4 || s.bytes + size > MAX_BYTES {
+                continue;
+            }
+            s.entries.insert(k, (entry, 0));
+            s.bytes += size;
+        }
+    });
 }
 
 #[cfg(test)]
@@ -174,6 +190,21 @@ mod tests {
         clear();
         import(generation(), out);
         assert!(get("k1").is_some() && get("k4").is_some() && get("k0").is_none());
+        clear();
+    }
+
+    #[test]
+    fn import_does_not_overwrite_fresher_live_entries() {
+        let _l = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear();
+        let g = generation();
+        put(g, "live".into(), Entry { etag: "W/\"fresh\"".into(), body: "[2]".into(), link: None });
+        import(g, vec![
+            ("live".into(), Entry { etag: "W/\"stale\"".into(), body: "[1]".into(), link: None }),
+            ("only-saved".into(), Entry { etag: "W/\"saved\"".into(), body: "[0]".into(), link: None }),
+        ]);
+        assert_eq!(get("live").map(|e| (e.etag, e.body.to_string())), Some(("W/\"fresh\"".into(), "[2]".into())));
+        assert_eq!(get("only-saved").map(|e| e.etag), Some("W/\"saved\"".into()));
         clear();
     }
 }

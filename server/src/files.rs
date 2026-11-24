@@ -219,73 +219,83 @@ mod tests {
             notes_max_bytes: 1 << 20,
         });
         let server = std::sync::Arc::new(tiny_http::Server::http("127.0.0.1:0").unwrap());
-        let base = format!("http://{}", server.server_addr());
+        let addr = format!("{}", server.server_addr());
         let (s, c) = (server.clone(), cfg.clone());
         std::thread::spawn(move || {
             for req in s.incoming_requests() {
                 crate::handle(&c, req);
             }
         });
-        let client = ureq::AgentBuilder::new().try_proxy_from_env(false).timeout(std::time::Duration::from_secs(5)).build();
         let get = |path: &str, headers: &[(&str, &str)]| {
-            let mut r = client.get(&format!("{base}{path}"));
+            use std::io::{Read, Write};
+            let mut s = std::net::TcpStream::connect(&addr).unwrap();
+            let mut req = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n");
             for (k, v) in headers {
-                r = r.set(k, v);
+                req.push_str(&format!("{k}: {v}\r\n"));
             }
-            match r.call() {
-                Ok(resp) | Err(ureq::Error::Status(_, resp)) => resp,
-                Err(e) => panic!("request failed: {e}"),
+            req.push_str("\r\n");
+            s.write_all(req.as_bytes()).unwrap();
+            let mut raw = Vec::new();
+            s.read_to_end(&mut raw).unwrap();
+            let split = raw.windows(4).position(|w| w == b"\r\n\r\n").expect("http headers");
+            let head = std::str::from_utf8(&raw[..split]).unwrap();
+            let mut lines = head.lines();
+            let status: u16 = lines.next().unwrap().split_whitespace().nth(1).unwrap().parse().unwrap();
+            let mut hdrs = Vec::new();
+            for line in lines {
+                if let Some((k, v)) = line.split_once(':') {
+                    hdrs.push((k.trim().to_ascii_lowercase(), v.trim().to_owned()));
+                }
             }
+            (status, hdrs, raw[split + 4..].to_vec())
         };
-        let body = |resp: ureq::Response| {
-            let mut out = Vec::new();
-            std::io::Read::read_to_end(&mut resp.into_reader(), &mut out).unwrap();
-            out
+        let hdr = |hdrs: &[(String, String)], name: &str| -> Option<String> {
+            hdrs.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.clone())
         };
 
         // Brotli when accepted, gzip when only that is, the file itself otherwise; always the
         // .wasm's own type, and Vary.
         let versioned = "/app_bg.wasm?v=0123456789abcdef";
-        let r = get(versioned, &[("Accept-Encoding", "gzip, deflate, br")]);
-        assert_eq!(r.status(), 200);
-        assert_eq!(r.header("Content-Encoding"), Some("br"));
-        assert_eq!(r.header("Content-Type"), Some("application/wasm"));
-        assert_eq!(r.header("Vary"), Some("Accept-Encoding"));
-        assert_eq!(r.header("Cache-Control"), Some(IMMUTABLE));
-        assert_eq!(body(r), b"brotli bytes");
-        let r = get(versioned, &[("Accept-Encoding", "gzip")]);
-        assert_eq!(r.header("Content-Encoding"), Some("gzip"));
-        assert_eq!(body(r), b"gzip bytes");
-        let r = get(versioned, &[]);
-        assert_eq!(r.header("Content-Encoding"), None);
-        assert_eq!(r.header("Vary"), Some("Accept-Encoding"));
-        assert_eq!(body(r), b"\0asm raw module");
+        let (st, h, b) = get(versioned, &[("Accept-Encoding", "gzip, deflate, br")]);
+        assert_eq!(st, 200);
+        assert_eq!(hdr(&h, "Content-Encoding").as_deref(), Some("br"));
+        assert_eq!(hdr(&h, "Content-Type").as_deref(), Some("application/wasm"));
+        assert_eq!(hdr(&h, "Vary").as_deref(), Some("Accept-Encoding"));
+        assert_eq!(hdr(&h, "Cache-Control").as_deref(), Some(IMMUTABLE));
+        assert_eq!(b, b"brotli bytes");
+        let (_, h, b) = get(versioned, &[("Accept-Encoding", "gzip")]);
+        assert_eq!(hdr(&h, "Content-Encoding").as_deref(), Some("gzip"));
+        assert_eq!(b, b"gzip bytes");
+        let (_, h, b) = get(versioned, &[]);
+        assert_eq!(hdr(&h, "Content-Encoding"), None);
+        assert_eq!(hdr(&h, "Vary").as_deref(), Some("Accept-Encoding"));
+        assert_eq!(b, b"\0asm raw module");
 
         // Without a version: checked each time, and unchanged costs a 304, per copy.
-        let r = get("/app_bg.wasm", &[("Accept-Encoding", "br")]);
-        assert_eq!(r.header("Cache-Control"), Some("no-cache"));
-        let tag = r.header("ETag").expect("an ETag").to_owned();
-        let r = get("/app_bg.wasm", &[("Accept-Encoding", "br"), ("If-None-Match", &tag)]);
-        assert_eq!(r.status(), 304);
-        assert_eq!(r.header("ETag"), Some(tag.as_str()));
-        assert!(body(r).is_empty());
+        let (_, h, _) = get("/app_bg.wasm", &[("Accept-Encoding", "br")]);
+        assert_eq!(hdr(&h, "Cache-Control").as_deref(), Some("no-cache"));
+        let tag = hdr(&h, "ETag").expect("an ETag");
+        let (st, h, b) = get("/app_bg.wasm", &[("Accept-Encoding", "br"), ("If-None-Match", &tag)]);
+        assert_eq!(st, 304);
+        assert_eq!(hdr(&h, "ETag").as_deref(), Some(tag.as_str()));
+        assert!(b.is_empty());
         // The plain file has another tag, so the brotli one doesn't match it.
-        let r = get("/app_bg.wasm", &[("If-None-Match", &tag)]);
-        assert_eq!(r.status(), 200);
-        assert_eq!(body(r), b"\0asm raw module");
+        let (st, _, b) = get("/app_bg.wasm", &[("If-None-Match", &tag)]);
+        assert_eq!(st, 200);
+        assert_eq!(b, b"\0asm raw module");
 
         // The page is never kept without asking.
-        let r = get("/", &[("Accept-Encoding", "br, gzip")]);
-        assert_eq!(r.status(), 200);
-        assert_eq!(r.header("Cache-Control"), Some("no-cache"));
-        assert_eq!(r.header("Content-Type"), Some("text/html; charset=utf-8"));
-        assert_eq!(r.header("Content-Encoding"), None);
-        assert_eq!(body(r), b"<h1>RepoHub</h1>");
-        let r = get("/index.html?v=../../etc", &[]);
-        assert_eq!(r.header("Cache-Control"), Some("no-cache"));
+        let (st, h, b) = get("/", &[("Accept-Encoding", "br, gzip")]);
+        assert_eq!(st, 200);
+        assert_eq!(hdr(&h, "Cache-Control").as_deref(), Some("no-cache"));
+        assert_eq!(hdr(&h, "Content-Type").as_deref(), Some("text/html; charset=utf-8"));
+        assert_eq!(hdr(&h, "Content-Encoding"), None);
+        assert_eq!(b, b"<h1>RepoHub</h1>");
+        let (_, h, _) = get("/index.html?v=../../etc", &[]);
+        assert_eq!(hdr(&h, "Cache-Control").as_deref(), Some("no-cache"));
 
         // A missing file is still a 404.
-        assert_eq!(get("/missing.js", &[("Accept-Encoding", "br")]).status(), 404);
+        assert_eq!(get("/missing.js", &[("Accept-Encoding", "br")]).0, 404);
 
         server.unblock();
         let _ = std::fs::remove_dir_all(&dir);

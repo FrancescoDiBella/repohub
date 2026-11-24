@@ -40,7 +40,7 @@ public class MainActivity extends Activity {
     static final String HOST = "appassets.androidplatform.net";
     static final String BASE = "https://" + HOST + "/";
 
-    private final ExecutorService pool = Executors.newFixedThreadPool(4);
+    private final ExecutorService pool = Executors.newFixedThreadPool(6);
     private WebView web;
     private Backend backend;
     /** True while the page on screen is the app's own: only then does the bridge answer. */

@@ -309,7 +309,7 @@ impl Gh {
     /// Every GET goes through here: with the tag of the answer it already has, so GitHub answers
     /// 304 when nothing changed and the kept answer comes back as if it had been sent again
     /// (searches excepted, see `etag`).
-    async fn fetch(&self, path: &str, accept: &str) -> Result<Resp, String> {
+    pub(crate) async fn fetch(&self, path: &str, accept: &str) -> Result<Resp, String> {
         use crate::etag;
         let key = etag::key(&self.api_base, accept, path);
         let known = if etag::conditional(path) { etag::get(&key) } else { None };

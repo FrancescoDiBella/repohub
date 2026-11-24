@@ -320,3 +320,29 @@ fn the_sample_data_has_a_history_a_commit_and_a_comparison() {
     assert_eq!((c.ahead, c.behind, c.summary().as_str()), (3, 1, "3 commits ahead, 1 behind main"));
     assert_eq!(sample_comparison(site, "main", "main", "me", 0).standing, Standing::Identical);
 }
+
+#[test]
+fn immutable_commits_are_cached_in_memory() {
+    let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut s = crate::init();
+    s.data = crate::model::Data::sample();
+    s.data.sample = false;
+    let repo = s.data.repos[0].full_name.clone();
+    let full_sha = "a".repeat(40);
+    let parent_sha = "b".repeat(40);
+    let mut detail = sample_detail(&s.data.repos[0], &sample_history(&s.data.repos[0], "main", "me")[0].sha, "me").unwrap();
+    detail.sha = full_sha.clone();
+    detail.parents = vec![parent_sha.clone()];
+    s.open_commit(&repo, &full_sha, None);
+    let epoch = s.commits.open.as_ref().unwrap().epoch;
+    s.apply_commit(s.load_gen, epoch, Ok(detail.clone()));
+    // Navigating to a parent and pressing Back serves the cached commit synchronously (even without a handle).
+    s.open_parent(&parent_sha);
+    s.close_commit(None);
+    assert_eq!(s.commits.open.as_ref().and_then(|o| o.load.ready()), Some(&detail));
+    // Short SHAs are not cached to avoid prefix ambiguity.
+    let mut short_detail = detail;
+    short_detail.sha = "1234567".into();
+    s.commits.remember_commit(&repo, &short_detail);
+    assert!(s.commits.cached_commit(&repo, "1234567").is_none());
+}

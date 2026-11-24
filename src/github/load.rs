@@ -9,7 +9,7 @@ pub async fn load_all(cfg: &Config) -> Result<Data, LoadError> {
 }
 
 /// How many requests a load sends at once.
-pub const AT_ONCE: usize = 4;
+pub const AT_ONCE: usize = 6;
 
 /// [`load_all`], with the parts that don't need each other side by side (at most [`AT_ONCE`]
 /// requests at a time), and `early` called with the profile and the repositories as soon as
@@ -22,7 +22,7 @@ pub const AT_ONCE: usize = 4;
 /// profile ─┬─ repositories ─┬─ issues (needs the organizations)
 /// (viewer) │                ├─ runs + activity of each active repository
 ///          │                └─ (early: profile and repositories)
-///          └─ pull requests ── waiting for your review (needs your account)
+///          └─ pull requests + waiting for your review (needs your account)
 /// ```
 pub async fn load_all_with(cfg: &Config, early: impl Fn(Data) + net::MaybeSend + net::MaybeSync) -> Result<Data, LoadError> {
     load_all_reporting(cfg, |_: String| {}, early).await
@@ -67,11 +67,14 @@ pub async fn load_all_reporting(cfg: &Config, known: impl Fn(String) + net::Mayb
             ).await;
             Ok::<_, String>((repos, repos_capped, warnings, issues, activity))
         },
-        // Pull requests, then those waiting for your review (with a token: GitHub only knows
-        // whose review is asked for an account).
+        // Pull requests and those waiting for your review (with a token: GitHub only knows
+        // whose review is asked for an account) run side by side.
         async move {
-            let pulls = gh.pulls(login).await;
-            let waiting = if own && pulls.is_ok() { Some(gh.review_requested(login).await) } else { None };
+            let (pulls, waiting) = net::join(
+                gh.pulls(login),
+                async move { if own { Some(gh.review_requested(login).await) } else { None } },
+            ).await;
+            let waiting = if pulls.is_ok() { waiting } else { None };
             (pulls, waiting)
         },
     ).await;
@@ -190,7 +193,7 @@ pub async fn load_more_pulls(cfg: &Config, login: &str, open: bool, page: usize)
 }
 
 pub async fn load_more_issues(cfg: &Config, login: &str, orgs: &[String], page: usize) -> Result<(Vec<Issue>, usize), String> {
-    Gh::new(cfg).issues_page(login, orgs, page).await
+    Gh::new(cfg).limited(AT_ONCE).issues_page(login, orgs, page).await
 }
 
 pub async fn load_notifications(cfg: &Config) -> Result<Vec<Notification>, String> {

@@ -137,6 +137,7 @@ impl Cfg {
         }
         let agent = ureq::AgentBuilder::new()
             .try_proxy_from_env(!bypass_proxy(&api))
+            .max_idle_connections_per_host(8)
             .timeout(std::time::Duration::from_secs(30))
             .user_agent("RepoHub server")
             .build();

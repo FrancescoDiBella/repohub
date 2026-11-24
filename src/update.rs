@@ -261,7 +261,7 @@ pub fn is_newer(release: &Release, sha: &str, built: Option<i64>) -> bool {
     if let Some(v) = &release.version {
         return version_newer(v, version());
     }
-    let same = release.sha.starts_with(sha) || sha.starts_with(&release.sha);
+    let same = !sha.is_empty() && !release.sha.is_empty() && (release.sha.starts_with(sha) || sha.starts_with(&release.sha));
     !same && built.is_none_or(|b| release.published > b)
 }
 

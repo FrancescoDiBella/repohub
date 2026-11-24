@@ -24,7 +24,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
  && cp server/target/release/repohub-server /out/ \
  && mkdir -p /out/data
 
-FROM debian:bookworm-slim
+FROM gcr.io/distroless/cc-debian12:nonroot
 # CA certificates for HTTPS to GitHub, taken from the build image (no package manager needed).
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /out/web /app/web
@@ -36,5 +36,5 @@ ENV REPOHUB_ADDR=0.0.0.0:8080 \
     DATA_DIR=/data
 VOLUME /data
 EXPOSE 8080
-USER nobody
+USER 65534:65534
 CMD ["/app/repohub-server"]

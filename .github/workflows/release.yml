@@ -109,7 +109,7 @@ jobs:
           mkdir -p dist/RepoHub
           cp target/dist/repohub.exe dist/RepoHub/RepoHub.exe
           cp .env.example dist/RepoHub/
-          cd dist && 7z a "RepoHub-$VERSION-windows.zip" RepoHub
+          cd dist && 7z a -mx=9 "RepoHub-$VERSION-windows.zip" RepoHub
 
       - name: Linux archive
         if: matrix.name == 'linux'
@@ -117,7 +117,7 @@ jobs:
           cargo build --profile dist --bin repohub
           mkdir -p "dist/repohub-$VERSION"
           cp target/dist/repohub packaging/linux/repohub.desktop packaging/linux/repohub.png packaging/linux/install.sh "dist/repohub-$VERSION/"
-          tar -C dist -czf "dist/RepoHub-$VERSION-linux-x86_64.tar.gz" "repohub-$VERSION"
+          tar -C dist -I 'gzip -9' -cf "dist/RepoHub-$VERSION-linux-x86_64.tar.gz" "repohub-$VERSION"
 
       - uses: actions/upload-artifact@v4
         with:
