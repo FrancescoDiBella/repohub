@@ -234,8 +234,8 @@ impl App {
             Ok(id) => {
                 let skipped = match skipped {
                     0 => String::new(),
-                    1 => " · 1 element RepoHub can't draw was skipped".into(),
-                    n => format!(" · {n} elements RepoHub can't draw were skipped"),
+                    1 => " · 1 element RepoHub can't draw (kept on save)".into(),
+                    n => format!(" · {n} elements RepoHub can't draw (kept on save)"),
                 };
                 let kept = if kept == 1 { "1 element".to_owned() } else { format!("{kept} elements") };
                 s.notify(format!("Imported {} ({kept}){skipped}", id.2));
@@ -300,14 +300,22 @@ mod tests {
     #[test]
     fn import_skips_what_it_cant_draw_and_says_so() {
         let src = serde_json::json!({ "type": "excalidraw", "elements": [
+            { "id": "i", "type": "image", "fileId": "f", "index": "a0" },
             { "id": "a", "type": "rectangle", "x": 1, "y": 2, "width": 3, "height": 4, "version": 3 },
-            { "id": "i", "type": "image", "fileId": "f" },
-            { "id": "f", "type": "frame" },
+            { "id": "f", "type": "frame", "index": "a2" },
             { "id": "gone", "type": "embeddable", "isDeleted": true },
-        ], "files": {} }).to_string();
+        ], "files": { "f": { "id": "f", "mimeType": "image/png", "dataURL": "data:image/png;base64,AA==" } } }).to_string();
         let (json, kept, skipped) = board::import(&src).unwrap();
         assert_eq!((kept, skipped), (1, 2));
         assert!(json.contains("\"version\": 3"));
+        let saved: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let els = saved["elements"].as_array().unwrap();
+        let img_pos = els.iter().position(|e| e["type"] == "image" && e["id"] == "i").expect("image preserved");
+        let rect_pos = els.iter().position(|e| e["type"] == "rectangle" && e["id"] == "a").expect("rect preserved");
+        assert!(img_pos < rect_pos, "background image stays behind drawn rectangle");
+        assert_ne!(els[img_pos]["index"], els[rect_pos]["index"], "synthetic index avoids colliding with extra element index");
+        assert!(els.iter().any(|e| e["type"] == "frame" && e["id"] == "f"));
+        assert_eq!(saved["files"]["f"]["mimeType"], "image/png", "attached files are preserved on save");
         assert!(board::import("not json").is_err());
         assert!(board::import("{\"type\":\"other\"}").is_err());
     }

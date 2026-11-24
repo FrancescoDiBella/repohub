@@ -16,6 +16,34 @@ pub(super) fn conditional_tag(method: &str, value: Option<&str>) -> Option<Strin
     ok.then(|| v.to_owned())
 }
 
+/// At most this many upstream GitHub requests in flight at once, leaving worker threads free
+/// for static assets and `/api/notes` even if GitHub is slow.
+pub(super) const MAX_IN_FLIGHT: usize = 16;
+
+pub(super) struct ProxySlot<'a>(&'a std::sync::atomic::AtomicUsize);
+
+impl<'a> ProxySlot<'a> {
+    pub(super) fn try_acquire(counter: &'a std::sync::atomic::AtomicUsize) -> Option<Self> {
+        use std::sync::atomic::Ordering;
+        let mut cur = counter.load(Ordering::Relaxed);
+        loop {
+            if cur >= MAX_IN_FLIGHT {
+                return None;
+            }
+            match counter.compare_exchange_weak(cur, cur + 1, Ordering::AcqRel, Ordering::Relaxed) {
+                Ok(_) => return Some(ProxySlot(counter)),
+                Err(actual) => cur = actual,
+            }
+        }
+    }
+}
+
+impl Drop for ProxySlot<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Release);
+    }
+}
+
 pub(super) fn proxy(cfg: &Cfg, mut req: Request) {
     let full_path = req.url()["/gh".len()..].to_owned();
     if full_path.chars().any(|c| c.is_control() || c == '\0') {
@@ -33,6 +61,15 @@ pub(super) fn proxy(cfg: &Cfg, mut req: Request) {
         let _ = req.respond(text(403, "Endpoint not allowed by the RepoHub proxy"));
         return;
     }
+    let Some(_slot) = ProxySlot::try_acquire(&cfg.proxy_in_flight) else {
+        let resp = Response::from_string(r#"{"message":"Too many GitHub requests in flight; retry shortly."}"#)
+            .with_status_code(503)
+            .with_header(h("Content-Type", "application/json"))
+            .with_header(h("Cache-Control", "no-store"))
+            .with_header(h("Retry-After", "1"));
+        let _ = req.respond(resp);
+        return;
+    };
     let accept = header(&req, "Accept").unwrap_or_else(|| "application/vnd.github+json".into());
     let method = req.method().as_str().to_owned();
     // A board (base64 in JSON) may be large; anything else is a short JSON body.

@@ -157,6 +157,8 @@ pub struct App {
     pub(crate) handle: Option<AppHandle<App>>,
     // Notes (Excalidraw drawings), keyed by repository full name.
     pub(crate) branches: HashMap<String, Load<Vec<String>>>,
+    /// When each repository's branch list was last read (Unix seconds), for short-TTL dedup.
+    pub(crate) branches_at: HashMap<String, i64>,
     /// The branch picked for each repository (Code and Notes tabs); absent: the default branch.
     pub(crate) branch_of: HashMap<String, String>,
     /// The open branch picker, and what it fills in.
@@ -434,6 +436,7 @@ pub(crate) fn init() -> App {
         load_gen: 0,
         handle: None,
         branches: HashMap::new(),
+        branches_at: HashMap::new(),
         branch_of: HashMap::new(),
         picker: None,
         branch_filter: TextEdit::new(""),

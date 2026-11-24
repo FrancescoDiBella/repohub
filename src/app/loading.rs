@@ -75,6 +75,7 @@ impl App {
                 // Details of repositories nobody pushed to since stay as they are; those of
                 // repositories pushed to stay on screen and are read again when opened. Branch
                 // lists stay too: opening a repository reads its list again behind it.
+                let was_partial = self.fresh.partial;
                 let kept = cache::keep_details(&self.data, &d, std::mem::take(&mut self.details), &mut self.fresh.stale);
                 self.fresh.from_copy = false;
                 self.fresh.partial = false;
@@ -106,9 +107,9 @@ impl App {
                             self.sync_tray();
                         }
                         self.load_detail(i);
-                        self.load_branches(i, true);
+                        self.load_branches(i, !was_partial);
                         if self.tab == RepoTab::Commits {
-                            self.load_history(i, true);
+                            self.load_history(i, !was_partial);
                         }
                     } else {
                         self.go(Page::Repos);
@@ -124,7 +125,9 @@ impl App {
                 {
                     self.go(Page::Overview);
                 }
-                self.releases_refreshed(self.repo_index());
+                if !was_partial {
+                    self.releases_refreshed(self.repo_index());
+                }
                 self.restore_place();
                 // With the lists, what's waiting for you.
                 self.load_inbox();
@@ -150,21 +153,27 @@ impl App {
     }
 
     pub(crate) fn apply_detail(&mut self, epoch: u64, key: (String, String), d: Detail) {
-        // Read again behind a page on screen: a failure keeps the page.
-        let shown = matches!(self.details.get(&key), Some(Load::Ready(_)));
-        if epoch == self.load_gen && !(shown && (d.error.is_some() || d.readme_error.is_some())) {
-            let load = if let Some(e) = &d.error
-                && d.files.is_empty()
-                && d.readme.is_none()
-                && d.languages.is_empty()
-                && d.commit.is_none()
-            {
-                Load::Failed(e.clone())
-            } else {
-                Load::Ready(d)
-            };
-            self.details.insert(key, load);
+        if epoch != self.load_gen {
+            return;
         }
+        // Read again behind a page on screen: a failure keeps the page, and marks it stale again
+        // so the next open retries instead of staying stale until the next global refresh.
+        let shown = matches!(self.details.get(&key), Some(Load::Ready(_)));
+        if shown && (d.error.is_some() || d.readme_error.is_some()) {
+            self.fresh.stale.insert(key);
+            return;
+        }
+        let load = if let Some(e) = &d.error
+            && d.files.is_empty()
+            && d.readme.is_none()
+            && d.languages.is_empty()
+            && d.commit.is_none()
+        {
+            Load::Failed(e.clone())
+        } else {
+            Load::Ready(d)
+        };
+        self.details.insert(key, load);
     }
 
     /// Loads files, README and last commit of repository `i` at its shown branch (once).
@@ -239,7 +248,16 @@ impl App {
                 }
             }
         }
+        if r.is_ok() {
+            self.branches_at.insert(key.clone(), net::now());
+        }
         self.branches.insert(key, r.into());
+    }
+
+    /// True when `full`'s branch list is already loaded and less than 30 seconds old.
+    pub(crate) fn branches_fresh(&self, full: &str) -> bool {
+        matches!(self.branches.get(full), Some(Load::Ready(_)))
+            && self.branches_at.get(full).is_some_and(|at| (0..30).contains(&net::now().saturating_sub(*at)))
     }
 
     /// Loads repository `i`'s branch list. The sample data has its default branch only.
@@ -333,17 +351,19 @@ impl App {
         self.loading_more_pulls = false;
         match r {
             Ok((items, total)) => {
-                if open {
-                    self.open_pulls_page = ask.page;
-                    self.data.open_pulls_total = Some(total);
-                } else {
-                    self.closed_pulls_page = ask.page;
-                    self.data.closed_pulls_total = Some(total);
-                }
                 for p in items {
                     if !self.data.pulls.iter().any(|existing| existing.number == p.number && existing.repo.eq_ignore_ascii_case(&p.repo)) {
                         self.data.pulls.push(p);
                     }
+                }
+                if open {
+                    self.open_pulls_page = ask.page;
+                    let loaded_open = self.data.pulls.iter().filter(|p| matches!(p.state, model::PullState::Open | model::PullState::Draft)).count();
+                    self.data.open_pulls_total = Some(total.max(loaded_open));
+                } else {
+                    self.closed_pulls_page = ask.page;
+                    let loaded_closed = self.data.pulls.iter().filter(|p| matches!(p.state, model::PullState::Closed | model::PullState::Merged)).count();
+                    self.data.closed_pulls_total = Some(total.max(loaded_closed));
                 }
                 self.data_changed();
                 self.sync_tray();
@@ -384,12 +404,12 @@ impl App {
         match r {
             Ok((items, total)) => {
                 self.issues_page = ask.page;
-                self.data.issues_total = Some(total);
                 for issue in items {
                     if !self.data.issues.iter().any(|existing| existing.number == issue.number && existing.repo.eq_ignore_ascii_case(&issue.repo)) {
                         self.data.issues.push(issue);
                     }
                 }
+                self.data.issues_total = Some(total.max(self.data.issues.len()));
                 self.data.issues.sort_by_key(|i| std::cmp::Reverse(i.created_at));
                 self.data_changed();
                 self.sync_tray();

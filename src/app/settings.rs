@@ -50,6 +50,7 @@ impl App {
         self.branch_filter.clear();
         self.details.clear();
         self.branches.clear();
+        self.branches_at.clear();
         self.branch_of.clear();
         self.local.clear();
         self.local_dir.clear();

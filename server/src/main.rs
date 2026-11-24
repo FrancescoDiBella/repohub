@@ -38,6 +38,7 @@ struct Cfg {
     secret: Option<String>,
     allow_writes: bool,
     notes_max_bytes: u64,
+    proxy_in_flight: std::sync::atomic::AtomicUsize,
 }
 
 fn env(k: &str) -> Option<String> {
@@ -152,6 +153,7 @@ impl Cfg {
             secret,
             allow_writes,
             notes_max_bytes,
+            proxy_in_flight: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 }
@@ -672,7 +674,9 @@ fn main() {
         if cfg.secret.is_some() { "secret required" } else { "none (loopback)" },
     );
     let server = std::sync::Arc::new(server);
-    let workers: Vec<_> = (0..8).map(|_| {
+    // 24 workers with at most 16 concurrent GitHub proxy calls (proxy::MAX_IN_FLIGHT) leaves at
+    // least 8 threads always free for static assets, config.json and /api/notes.
+    let workers: Vec<_> = (0..24).map(|_| {
         let (server, cfg) = (server.clone(), cfg.clone());
         std::thread::spawn(move || {
             for req in server.incoming_requests() {

@@ -217,6 +217,7 @@ mod tests {
             secret: None,
             allow_writes: false,
             notes_max_bytes: 1 << 20,
+            proxy_in_flight: std::sync::atomic::AtomicUsize::new(0),
         });
         let server = std::sync::Arc::new(tiny_http::Server::http("127.0.0.1:0").unwrap());
         let addr = format!("{}", server.server_addr());
