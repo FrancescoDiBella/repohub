@@ -91,3 +91,29 @@ fn details_of_repositories_pushed_to_are_kept_and_marked() {
     assert!(!kept.contains_key(&(gone, "main".into())), "a repository no longer listed");
     assert_eq!(stale, HashSet::from([(b, "main".to_owned())]), "only the one pushed to since is read again");
 }
+
+#[test]
+fn keep_details_preserves_in_flight_loading_entries() {
+    let data = Data::sample_at(1_790_000_000);
+    let a = data.repos[0].full_name.clone();
+    let mut details = HashMap::new();
+    details.insert((a.clone(), "main".into()), Load::Loading);
+    let mut stale = HashSet::new();
+    let kept = keep_details(&data, &data, details, &mut stale);
+    assert!(matches!(kept.get(&(a.clone(), "main".into())), Some(Load::Loading)), "in-flight apply_early load is not dropped");
+    assert!(stale.is_empty());
+}
+
+#[test]
+fn failed_detail_revalidation_re_marks_key_stale() {
+    let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut s = crate::init();
+    s.data = Data::sample_at(1_790_000_000);
+    s.data.sample = false;
+    let key = (s.data.repos[0].full_name.clone(), "main".to_owned());
+    s.details.insert(key.clone(), Load::Ready(crate::model::sample_detail(&s.data.repos[0])));
+    let failed = Detail { error: Some("temporary timeout".into()), ..Default::default() };
+    s.apply_detail(s.load_gen, key.clone(), failed);
+    assert!(matches!(s.details.get(&key), Some(Load::Ready(_))), "keeps shown detail on screen");
+    assert!(s.fresh.stale.contains(&key), "re-marks key stale so next open retries");
+}

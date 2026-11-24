@@ -153,6 +153,7 @@ fn static_path_validation() {
         secret: None,
         allow_writes: true,
         notes_max_bytes: 500 << 20,
+        proxy_in_flight: std::sync::atomic::AtomicUsize::new(0),
     };
 
     let canon_web = std::fs::canonicalize(&cfg.web_dir).unwrap();
@@ -261,6 +262,7 @@ fn end_to_end_http_server_tests() {
         secret: Some("p@ss;word=1 2".into()),
         allow_writes: true,
         notes_max_bytes: 100, // Small limit for testing
+        proxy_in_flight: std::sync::atomic::AtomicUsize::new(0),
     });
 
     let s_clone = server.clone();
@@ -569,6 +571,7 @@ fn the_proxy_forwards_conditional_requests() {
         secret: None,
         allow_writes: true,
         notes_max_bytes: 100,
+        proxy_in_flight: std::sync::atomic::AtomicUsize::new(0),
     });
     let (srv, c) = (server.clone(), cfg.clone());
     std::thread::spawn(move || {
@@ -630,6 +633,7 @@ fn the_proxy_compresses_large_responses_when_accepted() {
         secret: None,
         allow_writes: true,
         notes_max_bytes: 100,
+        proxy_in_flight: std::sync::atomic::AtomicUsize::new(0),
     });
     let (srv, c) = (server.clone(), cfg.clone());
     std::thread::spawn(move || {
@@ -662,4 +666,20 @@ fn the_proxy_compresses_large_responses_when_accepted() {
     assert_eq!(body_id, payload.as_bytes());
     server.unblock();
     upstream.unblock();
+}
+
+#[test]
+fn proxy_concurrency_limit_returns_json_503_and_frees_on_drop() {
+    let counter = std::sync::atomic::AtomicUsize::new(0);
+    let mut slots = Vec::new();
+    for _ in 0..proxy::MAX_IN_FLIGHT {
+        slots.push(proxy::ProxySlot::try_acquire(&counter).expect("slot available"));
+    }
+    assert!(proxy::ProxySlot::try_acquire(&counter).is_none(), "saturated at MAX_IN_FLIGHT");
+    // Drop one slot and verify capacity returns immediately.
+    slots.pop();
+    let reused = proxy::ProxySlot::try_acquire(&counter).expect("freed slot reusable");
+    drop(reused);
+    drop(slots);
+    assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 0);
 }

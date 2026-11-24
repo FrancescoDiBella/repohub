@@ -44,14 +44,32 @@ impl Board {
     pub fn json(&self) -> String {
         let live = self.elements.iter().map(|e| (e, false));
         let gone = self.deleted.iter().map(|e| (e, true));
-        let els: Vec<Value> = live.chain(gone).enumerate().map(|(i, (e, is_deleted))| {
+        let used_indices: HashSet<&str> = self
+            .extra_elements
+            .iter()
+            .filter_map(|(_, e)| e.get("index").and_then(Value::as_str))
+            .collect();
+        let mut seq = 0usize;
+        let mut next_index = || loop {
+            let candidate = format!("a{seq}");
+            seq += 1;
+            if !used_indices.contains(candidate.as_str()) {
+                return candidate;
+            }
+        };
+        let mut els: Vec<Value> = Vec::with_capacity(self.elements.len() + self.deleted.len() + self.extra_elements.len());
+        let mut extra_iter = self.extra_elements.iter().peekable();
+        for (i, (e, is_deleted)) in live.chain(gone).enumerate() {
+            while let Some((_, ex)) = extra_iter.next_if(|(at, _)| *at <= i) {
+                els.push(ex.clone());
+            }
             let m = self.meta.get(&e.id).copied().unwrap_or(Meta { version: 1, nonce: e.seed ^ 0x5bd1, updated: 0 });
             let mut v = json!({
                 "id": e.id, "type": e.kind.excalidraw(), "x": e.x, "y": e.y, "width": e.w, "height": e.h,
                 "angle": 0, "strokeColor": e.stroke, "backgroundColor": e.fill.clone().unwrap_or_else(|| "transparent".into()),
                 "fillStyle": "solid", "strokeWidth": e.width, "strokeStyle": "solid", "roughness": 1, "opacity": 100,
                 "groupIds": [], "frameId": null, "roundness": null, "seed": e.seed, "version": m.version, "versionNonce": m.nonce,
-                "isDeleted": is_deleted, "boundElements": null, "updated": m.updated, "link": null, "locked": false, "index": format!("a{i}"),
+                "isDeleted": is_deleted, "boundElements": null, "updated": m.updated, "link": null, "locked": false, "index": next_index(),
             });
             if e.kind.uses_points() {
                 v["points"] = json!(e.points);
@@ -81,16 +99,20 @@ impl Board {
                 }
                 _ => {}
             }
-            v
-        }).collect();
+            els.push(v);
+        }
+        for (_, ex) in extra_iter {
+            els.push(ex.clone());
+        }
         let doc = json!({
             "type": "excalidraw", "version": 2, "source": "https://github.com/FrancescoDiBella/repohub",
-            "elements": els, "appState": { "viewBackgroundColor": "#ffffff", "gridSize": null }, "files": {},
+            "elements": els, "appState": { "viewBackgroundColor": "#ffffff", "gridSize": null },
+            "files": if self.files.is_object() { self.files.clone() } else { json!({}) },
         });
         serde_json::to_string_pretty(&doc).unwrap_or_default()
     }
 
-    /// Reads an Excalidraw document; element types RepoHub doesn't draw are skipped.
+    /// Reads an Excalidraw document; element types RepoHub doesn't draw are kept intact on save.
     pub fn load_json(&mut self, src: &str) -> Result<(), String> {
         self.read_elements(src)?;
         self.undo.clear();
@@ -119,10 +141,17 @@ impl Board {
         let v: Value = serde_json::from_str(src).map_err(|e| format!("Not an Excalidraw file: {e}"))?;
         let f = |e: &Value, k: &str| e.get(k).and_then(Value::as_f64).unwrap_or(0.0) as f32;
         let st = |e: &Value, k: &str| e.get(k).and_then(Value::as_str).unwrap_or("").to_owned();
-        let (mut live, mut gone, mut meta) = (Vec::new(), Vec::new(), HashMap::new());
+        let (mut live, mut gone, mut extra, mut meta) = (Vec::new(), Vec::new(), Vec::new(), HashMap::new());
         let mut ids: HashSet<String> = HashSet::new();
         for (n, e) in v.get("elements").and_then(Value::as_array).into_iter().flatten().enumerate() {
-            let Some(kind) = Kind::from_excalidraw(&st(e, "type")) else { continue };
+            let Some(kind) = Kind::from_excalidraw(&st(e, "type")) else {
+                let ex_id = st(e, "id");
+                if !ex_id.is_empty() {
+                    ids.insert(ex_id);
+                }
+                extra.push((live.len() + gone.len(), e.clone()));
+                continue;
+            };
             let fill = Some(st(e, "backgroundColor")).filter(|c| !c.is_empty() && c != "transparent");
             let seed = e.get("seed").and_then(Value::as_u64).unwrap_or(1) as u32;
             // An element needs an id of its own, the same on every device: a missing one is made
@@ -168,6 +197,8 @@ impl Board {
         self.stamped = live.iter().map(|e: &Element| (e.id.clone(), e.clone())).collect();
         self.elements = live;
         self.deleted = gone;
+        self.extra_elements = extra;
+        self.files = v.get("files").filter(|x| x.is_object()).cloned().unwrap_or_else(|| json!({}));
         self.meta = meta;
         self.next = self.elements.len() as u32 + 1;
         Ok(())

@@ -282,6 +282,11 @@ pub struct Board {
     deleted: Vec<Element>,
     /// The elements as last written, to tell which changed since ([`Board::save_json`]).
     stamped: HashMap<String, Element>,
+    /// Excalidraw element types RepoHub doesn't draw (images, frames, embeds) with the number of
+    /// supported elements that preceded them, kept in place on save.
+    extra_elements: Vec<(usize, serde_json::Value)>,
+    /// Excalidraw `files` attachment map, preserved across edits.
+    files: serde_json::Value,
 }
 
 /// An element's Excalidraw bookkeeping.
@@ -328,6 +333,8 @@ impl Board {
             meta: HashMap::new(),
             deleted: Vec::new(),
             stamped: HashMap::new(),
+            extra_elements: Vec::new(),
+            files: serde_json::json!({}),
         }
     }
 

@@ -207,9 +207,10 @@ impl App {
             self.local_dir.clear();
             self.local_file = None;
         }
+        let force_branches = !self.branches_fresh(&full);
         self.go(Page::Repo(full));
         self.set_tab(i, RepoTab::Code);
-        self.load_branches(i, true);
+        self.load_branches(i, force_branches);
         self.load_detail(i);
         self.load_latest_release(i, false);
     }

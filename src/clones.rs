@@ -42,8 +42,34 @@ fn store() -> PathBuf {
     crate::notes::data_dir().join("clones.json")
 }
 
+type Stamp = Option<(std::time::SystemTime, u64)>;
+
+fn file_stamp(path: &Path) -> Stamp {
+    let m = std::fs::metadata(path).ok()?;
+    Some((m.modified().ok()?, m.len()))
+}
+
+struct CachedClones {
+    path: PathBuf,
+    stamp: Stamp,
+    map: BTreeMap<String, String>,
+}
+
+static CACHE: std::sync::Mutex<Option<CachedClones>> = std::sync::Mutex::new(None);
+
 fn load_map() -> BTreeMap<String, String> {
-    std::fs::read_to_string(store()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+    let path = store();
+    let mut g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let stamp = file_stamp(&path);
+    if let Some(c) = g.as_ref()
+        && c.path == path
+        && c.stamp == stamp
+    {
+        return c.map.clone();
+    }
+    let map: BTreeMap<String, String> = std::fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    *g = Some(CachedClones { path, stamp, map: map.clone() });
+    map
 }
 
 /// True when `p` is a git working tree.
@@ -142,14 +168,34 @@ pub fn lookalike(repo: &str) -> Option<PathBuf> {
 
 /// Remembers `path` as the clone of `repo`.
 pub fn remember(repo: &str, path: &Path) -> Result<(), String> {
-    let mut map = load_map();
-    map.insert(repo.to_ascii_lowercase(), path.display().to_string());
     let file = store();
+    let mut g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let stamp = file_stamp(&file);
+    let mut map: BTreeMap<String, String> = if let Some(c) = g.as_ref()
+        && c.path == file
+        && c.stamp == stamp
+    {
+        c.map.clone()
+    } else {
+        std::fs::read_to_string(&file).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+    };
+    map.insert(repo.to_ascii_lowercase(), path.display().to_string());
     if let Some(parent) = file.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let json = serde_json::to_string_pretty(&map).map_err(|e| e.to_string())?;
-    std::fs::write(file, json).map_err(|e| format!("Couldn't remember the folder: {e}"))
+    let tmp = file.with_extension(format!("json.tmp.{}", std::process::id()));
+    let res = std::fs::write(&tmp, json)
+        .and_then(|()| std::fs::rename(&tmp, &file))
+        .map_err(|e| format!("Couldn't remember the folder: {e}"));
+    if res.is_ok() {
+        let new_stamp = file_stamp(&file);
+        *g = Some(CachedClones { path: file, stamp: new_stamp, map });
+    } else {
+        let _ = std::fs::remove_file(&tmp);
+        *g = None;
+    }
+    res
 }
 
 #[cfg(test)]

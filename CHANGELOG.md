@@ -93,6 +93,16 @@ The sections are **Added**, **Changed** and **Fixed**.
   `/user/starred` and `/user/repos` on token-only warm starts; picking a branch in Notes no
   longer loads drawings twice; reloading a workflow run keeps cached job logs if the reload fails;
   update checks no longer treat an empty build SHA as matching every Preview release.
+- Opening a repository during start no longer triggers duplicate detail/branch/release fetches
+  between `apply_early` and `apply`, and recently loaded branch lists aren't re-fetched on every
+  re-open within 30 seconds; failed background detail revalidation now stays marked stale so the
+  next open retries; **Load more** on pull requests and issues never lowers totals below the
+  loaded items.
+- Editing and saving an imported `.excalidraw` drawing preserves unsupported element types (such as
+  images and frames) and its `"files"` attachments instead of discarding them.
+- `clones.json` writes atomically and caches reads in memory; `repohub-server` expands its worker
+  pool to 24 threads (with 16 max concurrent GitHub proxy calls) so slow GitHub requests can't
+  starve static assets or `/api/notes`.
 
 ## 0.2.0 — 2026-11-22
 

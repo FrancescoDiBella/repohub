@@ -774,12 +774,17 @@ impl App {
     }
 }
 
-/// The details kept through a refresh: every page read without errors, of a repository still
-/// listed; those of repositories pushed to since are marked to be read again when opened.
+/// The details kept through a refresh: every page read without errors (or currently loading from
+/// `apply_early`), of a repository still listed; those of repositories pushed to since are marked
+/// to be read again when opened.
 pub fn keep_details(old: &Data, new: &Data, details: HashMap<(String, String), Load<Detail>>, stale: &mut HashSet<(String, String)>) -> HashMap<(String, String), Load<Detail>> {
     let pushed = |data: &Data, full: &str| data.repos.iter().find(|r| r.full_name == full).map(|r| r.pushed);
     details.into_iter()
-        .filter(|((full, _), v)| matches!(v, Load::Ready(d) if d.error.is_none() && d.readme_error.is_none()) && pushed(new, full).is_some())
+        .filter(|((full, _), v)| {
+            pushed(new, full).is_some()
+                && (matches!(v, Load::Loading)
+                    || matches!(v, Load::Ready(d) if d.error.is_none() && d.readme_error.is_none()))
+        })
         .inspect(|(key, _)| {
             if pushed(old, &key.0) != pushed(new, &key.0) {
                 stale.insert(key.clone());
