@@ -420,6 +420,9 @@ pub struct Compare {
     pub asked_pull: bool,
 }
 
+/// Immutable commit details kept in memory for instant Back / parent navigation.
+const COMMITS_KEPT: usize = 32;
+
 /// The Commits section's state. It follows the repository and the branch on screen.
 pub struct Commits {
     pub history: Option<History>,
@@ -433,6 +436,8 @@ pub struct Commits {
     /// and the pull request's (`App::diff`, `App::pull_diff`).
     pub commit_diff: DiffState,
     pub compare_diff: DiffState,
+    /// Recently read full-SHA commit details, most recent last (commits are immutable).
+    cached: Vec<((String, String), Detail)>,
 }
 
 impl Default for Commits {
@@ -445,6 +450,7 @@ impl Default for Commits {
             compare: None,
             commit_diff: DiffState::new(Vec::new()),
             compare_diff: DiffState::new(Vec::new()),
+            cached: Vec::new(),
         }
     }
 }
@@ -453,6 +459,31 @@ impl Commits {
     fn next_epoch(&mut self) -> u64 {
         self.epoch = self.epoch.wrapping_add(1);
         self.epoch
+    }
+
+    /// A remembered full-SHA commit detail, promoted to most-recently-used.
+    pub(crate) fn cached_commit(&mut self, repo: &str, sha: &str) -> Option<Detail> {
+        if sha.len() < 40 || !valid_sha(sha) {
+            return None;
+        }
+        let pos = self.cached.iter().position(|((r, s), _)| same_repo(r, repo) && s.eq_ignore_ascii_case(sha))?;
+        let entry = self.cached.remove(pos);
+        let detail = entry.1.clone();
+        self.cached.push(entry);
+        Some(detail)
+    }
+
+    /// Remembers a full-SHA commit detail (evicting the least recently used beyond `COMMITS_KEPT`).
+    pub(crate) fn remember_commit(&mut self, repo: &str, detail: &Detail) {
+        if detail.sha.len() < 40 || !valid_sha(&detail.sha) {
+            return;
+        }
+        let key = (repo.to_ascii_lowercase(), detail.sha.to_ascii_lowercase());
+        self.cached.retain(|(k, _)| *k != key);
+        self.cached.push((key, detail.clone()));
+        if self.cached.len() > COMMITS_KEPT {
+            self.cached.remove(0);
+        }
     }
 
     /// The section is left: the commit and the comparison close; the history stays for next time.

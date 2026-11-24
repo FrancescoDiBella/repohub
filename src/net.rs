@@ -289,13 +289,26 @@ pub struct Transport {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl Transport {
-    pub fn new(cfg: &Config) -> Transport {
-        let agent = ureq::AgentBuilder::new()
-            .try_proxy_from_env(!bypass_proxy(&cfg.api))
+fn shared_agent(use_proxy: bool) -> ureq::Agent {
+    use std::sync::OnceLock;
+    static DIRECT: OnceLock<ureq::Agent> = OnceLock::new();
+    static PROXIED: OnceLock<ureq::Agent> = OnceLock::new();
+    let slot = if use_proxy { &PROXIED } else { &DIRECT };
+    slot.get_or_init(|| {
+        ureq::AgentBuilder::new()
+            .try_proxy_from_env(use_proxy)
+            .max_idle_connections_per_host(8)
             .timeout(std::time::Duration::from_secs(20))
             .user_agent("RepoHub (Rune)")
-            .build();
+            .build()
+    })
+    .clone()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Transport {
+    pub fn new(cfg: &Config) -> Transport {
+        let agent = shared_agent(!bypass_proxy(&cfg.api));
         Transport { agent, api: cfg.api.clone(), token: cfg.token.clone() }
     }
 

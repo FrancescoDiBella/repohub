@@ -599,3 +599,67 @@ fn the_proxy_forwards_conditional_requests() {
     server.unblock();
     upstream.unblock();
 }
+
+#[test]
+fn the_proxy_compresses_large_responses_when_accepted() {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let payload = format!("{{\"items\":[{}]}}", (0..80).map(|i| format!("{{\"name\":\"repo-{i}\",\"desc\":\"repeated text for compression\"}}")).collect::<Vec<_>>().join(","));
+    let payload_up = payload.clone();
+    let upstream = std::sync::Arc::new(Server::http("127.0.0.1:0").unwrap());
+    let upstream_addr = format!("http://{}", upstream.server_addr());
+    let up = upstream.clone();
+    std::thread::spawn(move || {
+        for req in up.incoming_requests() {
+            let resp = Response::from_string(payload_up.clone())
+                .with_status_code(200)
+                .with_header(Header::from_bytes("Content-Type", "application/json").unwrap());
+            let _ = req.respond(resp);
+        }
+    });
+    let server = std::sync::Arc::new(Server::http("127.0.0.1:0").unwrap());
+    let addr = format!("{}", server.server_addr());
+    let temp_dir = std::env::temp_dir().join(format!("repohub-gzip-{}", std::process::id()));
+    let cfg = std::sync::Arc::new(Cfg {
+        token: Some("gh_token_gzip".into()),
+        api: upstream_addr,
+        web_dir: temp_dir.join("web"),
+        data_dir: temp_dir.join("data"),
+        allowed_hosts: vec!["127.0.0.1".into()],
+        public_json: "{}".into(),
+        agent: ureq::AgentBuilder::new().try_proxy_from_env(false).build(),
+        secret: None,
+        allow_writes: true,
+        notes_max_bytes: 100,
+    });
+    let (srv, c) = (server.clone(), cfg.clone());
+    std::thread::spawn(move || {
+        for req in srv.incoming_requests() {
+            handle(&c, req);
+        }
+    });
+    // Raw TCP check so we observe the wire Content-Encoding and compressed byte length directly.
+    use std::io::Write;
+    let raw_get = |ae: &str| {
+        let mut s = std::net::TcpStream::connect(&addr).unwrap();
+        let req = format!("GET /gh/user/repos HTTP/1.1\r\nHost: {addr}\r\nOrigin: http://{addr}\r\nAccept-Encoding: {ae}\r\nConnection: close\r\n\r\n");
+        s.write_all(req.as_bytes()).unwrap();
+        let mut buf = Vec::new();
+        s.read_to_end(&mut buf).unwrap();
+        let split = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+        let head = String::from_utf8_lossy(&buf[..split]).to_ascii_lowercase();
+        (head, buf[split + 4..].to_vec())
+    };
+    let (head_gz, body_gz) = raw_get("gzip, br");
+    assert!(head_gz.contains("content-encoding: gzip"), "compressed when accepted: {head_gz}");
+    assert!(body_gz.len() < payload.len() / 2, "payload actually shrank ({} -> {})", payload.len(), body_gz.len());
+    let mut dec = flate2::read::GzDecoder::new(&body_gz[..]);
+    let mut plain = String::new();
+    dec.read_to_string(&mut plain).unwrap();
+    assert_eq!(plain, payload);
+
+    let (head_id, body_id) = raw_get("identity");
+    assert!(!head_id.contains("content-encoding: gzip"), "plain when gzip not accepted");
+    assert_eq!(body_id, payload.as_bytes());
+    server.unblock();
+    upstream.unblock();
+}

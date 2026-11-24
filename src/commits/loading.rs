@@ -163,6 +163,11 @@ impl App {
         if !matches!(o.load, Load::Ready(_)) {
             o.load = Load::Loading;
         }
+        // Full-SHA commits are immutable: serve from memory immediately when already read.
+        if let Some(cached) = self.commits.cached_commit(&repo, &sha) {
+            self.apply_commit(self.load_gen, epoch, Ok(cached));
+            return;
+        }
         let (cfg, account) = (self.cfg.clone(), self.load_gen);
         if !run(self, move || async move { github::load_commit(&cfg, &repo, &sha).await }, move |s: &mut App, r| s.apply_commit(account, epoch, r)) {
             self.apply_commit(account, epoch, Err(NOT_READY.into()));
@@ -177,8 +182,10 @@ impl App {
         let Some(o) = c.open.as_mut().filter(|o| o.epoch == epoch) else { return };
         match r {
             Ok(d) => {
+                let repo = o.repo.clone();
                 c.commit_diff.set_files(diffs::pull_files(&d.files));
-                o.load = Load::Ready(d);
+                o.load = Load::Ready(d.clone());
+                c.remember_commit(&repo, &d);
             }
             Err(e) if matches!(o.load, Load::Ready(_)) => self.notify_problem(e),
             Err(e) => o.load = Load::Failed(e),

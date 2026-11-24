@@ -70,7 +70,7 @@ pub(super) fn proxy(cfg: &Cfg, mut req: Request) {
         }
     };
     let status = resp.status();
-    let mut headers = vec![h("Cache-Control", "no-store")];
+    let mut headers = vec![h("Cache-Control", "no-store"), h("Vary", "Accept-Encoding")];
     for name in ["Content-Type", "x-ratelimit-remaining", "x-ratelimit-reset", "x-ratelimit-limit", "retry-after", "link", "etag"] {
         if let Some(v) = resp.header(name) {
             headers.push(h(name, v));
@@ -78,7 +78,26 @@ pub(super) fn proxy(cfg: &Cfg, mut req: Request) {
     }
     let mut data = Vec::new();
     let _ = resp.into_reader().take(32 << 20).read_to_end(&mut data);
-    let mut out = Response::from_data(data).with_status_code(status);
+    // Compress non-trivial payloads for browsers that accept gzip (typical GitHub JSON shrinks 5-10x).
+    let wants_gzip = data.len() >= 1024
+        && (200..300).contains(&status)
+        && header(&req, "Accept-Encoding").is_some_and(|a| files::accepts(&a, "gzip"));
+    let body = if wants_gzip {
+        use std::io::Write;
+        let mut enc = flate2::write::GzEncoder::new(Vec::with_capacity(data.len() / 4), flate2::Compression::fast());
+        if enc.write_all(&data).is_ok()
+            && let Ok(compressed) = enc.finish()
+            && compressed.len() < data.len()
+        {
+            headers.push(h("Content-Encoding", "gzip"));
+            compressed
+        } else {
+            data
+        }
+    } else {
+        data
+    };
+    let mut out = Response::from_data(body).with_status_code(status);
     for x in headers {
         out.add_header(x);
     }

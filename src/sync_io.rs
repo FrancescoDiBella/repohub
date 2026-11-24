@@ -112,7 +112,7 @@ pub fn raw_content(body: String) -> Result<String, String> {
 /// branch must be a simple name.
 pub async fn check(cfg: &Config, repo: &str) -> Result<RepoInfo, String> {
     let gh = Gh::new(cfg);
-    let r = gh.send("GET", &format!("/repos/{repo}"), JSON, "").await?;
+    let r = gh.fetch(&format!("/repos/{repo}"), JSON).await?;
     if r.status != 200 {
         return Err(explain(&gh, &r, repo));
     }
@@ -148,7 +148,7 @@ impl GhRemote {
 
 impl Remote for GhRemote {
     async fn list(&self) -> Result<Listing, String> {
-        let r = self.gh.send("GET", &format!("/repos/{}", self.repo), JSON, "").await?;
+        let r = self.gh.fetch(&format!("/repos/{}", self.repo), JSON).await?;
         if r.status != 200 {
             return Err(explain(&self.gh, &r, &self.repo));
         }
@@ -158,7 +158,7 @@ impl Remote for GhRemote {
             return Err(format!("{}'s default branch, {}, has characters sync can't use. Rename it to a simple name such as main.", self.repo, info.branch));
         }
         *self.branch.borrow_mut() = info.branch.clone();
-        let r = self.gh.send("GET", &format!("/repos/{}/git/trees/{}?recursive=1", self.repo, info.branch), JSON, "").await?;
+        let r = self.gh.fetch(&format!("/repos/{}/git/trees/{}?recursive=1", self.repo, info.branch), JSON).await?;
         match r.status {
             200 => parse_tree(&r.body),
             // A repository with no commit yet: nothing there.
@@ -168,7 +168,7 @@ impl Remote for GhRemote {
     }
 
     async fn read(&self, path: &str) -> Result<Option<String>, String> {
-        let r = self.gh.send("GET", &self.contents(path), RAW, "").await?;
+        let r = self.gh.fetch(&self.contents(path), RAW).await?;
         match r.status {
             200 => Ok(Some(raw_content(r.body)?)),
             404 => Ok(None),

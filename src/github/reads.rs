@@ -5,7 +5,7 @@
 use super::*;
 
 impl Gh {
-    fn repo(&self, v: &Value, starred: &HashSet<String>) -> Repo {
+    fn repo(&self, v: &Value) -> Repo {
         let full = s(v, "full_name");
         let language = Some(s(v, "language")).filter(|l| !l.is_empty()).unwrap_or_else(|| "—".into());
         let r = Repo {
@@ -24,7 +24,7 @@ impl Gh {
             branch: s(v, "default_branch"),
             topics: v.get("topics").and_then(Value::as_array).map(|a| a.iter().filter_map(|t| t.as_str().map(str::to_owned)).collect()).unwrap_or_default(),
             url: s(v, "html_url"),
-            starred: starred.contains(&full),
+            starred: false,
             full_name: full,
             keys: std::sync::OnceLock::new(),
         };
@@ -37,151 +37,201 @@ impl Gh {
     /// included; otherwise the public repositories of the user and of its public organizations.
     pub async fn repos(&self, cfg: &Config, login: &str, own: bool, warnings: &mut Vec<String>) -> Result<(Vec<Repo>, bool), String> {
         use crate::state::Orgs;
-        let starred: HashSet<String> = if self.t.has_token() {
-            let mut set = HashSet::new();
-            let mut next = Some("/user/starred?per_page=100".to_owned());
-            let mut pages = 0;
-            while let Some(path) = next {
-                if pages >= 10 {
-                    break;
-                }
-                pages += 1;
-                match self.get_resp(&path).await {
-                    Ok((v, resp)) => {
-                        let items = v.as_array().cloned().unwrap_or_default();
-                        let n = items.len();
-                        set.extend(items.iter().map(|r| s(r, "full_name")));
-                        if n < 100 {
-                            break;
-                        }
-                        next = next_page_path(resp.link.as_deref(), &self.api_base);
-                    }
-                    Err(e) => {
-                        warnings.push(format!("Starred repositories couldn't load: {e}"));
-                        break;
-                    }
-                }
-            }
-            set
-        } else {
-            HashSet::new()
-        };
         let wanted = |r: &Repo| (!r.fork || cfg.include_forks) && (!r.archived || cfg.include_archived)
             && (r.owner.eq_ignore_ascii_case(login) || cfg.orgs.includes(&r.owner));
-        let mut out = Vec::new();
-        let mut repos_capped = false;
-        if own {
-            // The token's owner also sees private repositories, and its organizations', here.
-            let affiliation = if cfg.orgs == Orgs::Off { "owner" } else { "owner,organization_member" };
-            let mut next = Some(format!("/user/repos?affiliation={affiliation}&sort=pushed&per_page=100"));
-            let mut page = 1;
-            while let Some(path) = next {
-                if out.len() >= cfg.max_repos || page > 10 {
-                    repos_capped = true;
-                    break;
-                }
-                page += 1;
-                let (v, resp) = self.get_resp(&path).await?;
-                let items = v.as_array().cloned().unwrap_or_default();
-                out.extend(items.iter().map(|r| self.repo(r, &starred)).filter(wanted));
-                if items.len() < 100 {
-                    break;
-                }
-                next = next_page_path(resp.link.as_deref(), &self.api_base);
-            }
-        } else {
-            let mut next = Some(format!("/users/{login}/repos?type=owner&sort=pushed&per_page=100"));
-            let mut page = 1;
-            while let Some(path) = next {
-                if out.len() >= cfg.max_repos || page > 10 {
-                    repos_capped = true;
-                    break;
-                }
-                page += 1;
-                let (v, resp) = self.get_resp(&path).await?;
-                let items = v.as_array().cloned().unwrap_or_default();
-                out.extend(items.iter().map(|r| self.repo(r, &starred)).filter(wanted));
-                if items.len() < 100 {
-                    break;
-                }
-                next = next_page_path(resp.link.as_deref(), &self.api_base);
-            }
-            // Public organizations, then their public repositories.
-            let orgs: Vec<String> = match &cfg.orgs {
-                Orgs::Off => Vec::new(),
-                Orgs::Only(list) => list.clone(),
-                Orgs::All => {
-                    let mut list = Vec::new();
-                    let mut next = Some(format!("/users/{login}/orgs?per_page=100"));
-                    let mut pages = 0;
-                    while let Some(path) = next {
-                        if pages >= 5 {
-                            break;
-                        }
-                        pages += 1;
-                        match self.get_resp(&path).await {
-                            Ok((v, resp)) => {
-                                let items = v.as_array().cloned().unwrap_or_default();
-                                let n = items.len();
-                                list.extend(items.iter().map(|o| s(o, "login")).filter(|o| !o.is_empty()));
-                                if n < 100 {
-                                    break;
-                                }
-                                next = next_page_path(resp.link.as_deref(), &self.api_base);
-                            }
-                            Err(e) => {
-                                warnings.push(format!("Organizations couldn't load: {e}"));
-                                break;
-                            }
-                        }
-                    }
-                    list
-                }
-            };
-            if orgs.len() > 50 {
-                repos_capped = true;
-            }
-            let mut org_errs = Vec::new();
-            for org in orgs.iter().take(50) {
-                let mut next = Some(format!("/orgs/{org}/repos?type=public&sort=pushed&per_page=100"));
+
+        let starred_fut = async move {
+            let mut set = HashSet::new();
+            let mut warn = None;
+            if self.t.has_token() {
+                let mut next = Some("/user/starred?per_page=100".to_owned());
                 let mut pages = 0;
                 while let Some(path) = next {
-                    if pages >= 5 {
-                        repos_capped = true;
+                    if pages >= 10 {
                         break;
                     }
                     pages += 1;
                     match self.get_resp(&path).await {
                         Ok((v, resp)) => {
-                            let items = v.as_array().cloned().unwrap_or_default();
-                            let n = items.len();
-                            out.extend(items.iter().map(|r| self.repo(r, &starred)).filter(wanted));
-                            if n < 100 {
+                            let items = v.as_array().map(Vec::as_slice).unwrap_or(&[]);
+                            set.extend(items.iter().map(|r| s(r, "full_name")));
+                            if items.len() < 100 {
                                 break;
                             }
                             next = next_page_path(resp.link.as_deref(), &self.api_base);
-                            if next.is_none() {
-                                break;
-                            }
-                            if pages == 5 && n == 100 {
-                                repos_capped = true;
-                            }
                         }
                         Err(e) => {
-                            org_errs.push((org.clone(), e));
+                            warn = Some(format!("Starred repositories couldn't load: {e}"));
                             break;
                         }
                     }
                 }
             }
-            if !org_errs.is_empty() {
-                if org_errs.len() == 1 {
-                    warnings.push(format!("Repositories for {} couldn't load: {}", org_errs[0].0, org_errs[0].1));
-                } else {
-                    warnings.push(format!("Repositories for {} organizations couldn't load: {}", org_errs.len(), org_errs[0].1));
+            (set, warn)
+        };
+
+        let repos_fut = async move {
+            let mut out = Vec::new();
+            let mut repos_capped = false;
+            let mut repo_warnings = Vec::new();
+            if own {
+                // The token's owner also sees private repositories, and its organizations', here.
+                let affiliation = if cfg.orgs == Orgs::Off { "owner" } else { "owner,organization_member" };
+                let mut next = Some(format!("/user/repos?affiliation={affiliation}&sort=pushed&per_page=100"));
+                let mut page = 1;
+                while let Some(path) = next {
+                    if out.len() >= cfg.max_repos || page > 10 {
+                        repos_capped = true;
+                        break;
+                    }
+                    page += 1;
+                    let (v, resp) = self.get_resp(&path).await?;
+                    let items = v.as_array().map(Vec::as_slice).unwrap_or(&[]);
+                    out.extend(items.iter().map(|r| self.repo(r)).filter(wanted));
+                    if items.len() < 100 {
+                        break;
+                    }
+                    next = next_page_path(resp.link.as_deref(), &self.api_base);
                 }
+            } else {
+                let user_repos_fut = async move {
+                    let mut list = Vec::new();
+                    let mut capped = false;
+                    let mut next = Some(format!("/users/{login}/repos?type=owner&sort=pushed&per_page=100"));
+                    let mut page = 1;
+                    while let Some(path) = next {
+                        if list.len() >= cfg.max_repos || page > 10 {
+                            capped = true;
+                            break;
+                        }
+                        page += 1;
+                        let (v, resp) = self.get_resp(&path).await?;
+                        let items = v.as_array().map(Vec::as_slice).unwrap_or(&[]);
+                        list.extend(items.iter().map(|r| self.repo(r)).filter(wanted));
+                        if items.len() < 100 {
+                            break;
+                        }
+                        next = next_page_path(resp.link.as_deref(), &self.api_base);
+                    }
+                    Ok::<_, String>((list, capped))
+                };
+                // Public organizations, then their public repositories.
+                let orgs_fut = async move {
+                    let mut orgs_warn = None;
+                    let orgs: Vec<String> = match &cfg.orgs {
+                        Orgs::Off => Vec::new(),
+                        Orgs::Only(list) => list.clone(),
+                        Orgs::All => {
+                            let mut list = Vec::new();
+                            let mut next = Some(format!("/users/{login}/orgs?per_page=100"));
+                            let mut pages = 0;
+                            while let Some(path) = next {
+                                if pages >= 5 {
+                                    break;
+                                }
+                                pages += 1;
+                                match self.get_resp(&path).await {
+                                    Ok((v, resp)) => {
+                                        let items = v.as_array().map(Vec::as_slice).unwrap_or(&[]);
+                                        list.extend(items.iter().map(|o| s(o, "login")).filter(|o| !o.is_empty()));
+                                        if items.len() < 100 {
+                                            break;
+                                        }
+                                        next = next_page_path(resp.link.as_deref(), &self.api_base);
+                                    }
+                                    Err(e) => {
+                                        orgs_warn = Some(format!("Organizations couldn't load: {e}"));
+                                        break;
+                                    }
+                                }
+                            }
+                            list
+                        }
+                    };
+                    (orgs, orgs_warn)
+                };
+                let (user_res, (orgs, orgs_warn)) = net::join(user_repos_fut, orgs_fut).await;
+                let (user_list, user_capped) = user_res?;
+                out.extend(user_list);
+                repos_capped |= user_capped;
+                if let Some(w) = orgs_warn {
+                    repo_warnings.push(w);
+                }
+                if orgs.len() > 50 {
+                    repos_capped = true;
+                }
+                let org_parts = net::join_all(
+                    orgs.iter()
+                        .take(50)
+                        .map(|org| async move {
+                            let mut list = Vec::new();
+                            let mut capped = false;
+                            let mut err = None;
+                            let mut next = Some(format!("/orgs/{org}/repos?type=public&sort=pushed&per_page=100"));
+                            let mut pages = 0;
+                            while let Some(path) = next {
+                                if pages >= 5 {
+                                    capped = true;
+                                    break;
+                                }
+                                pages += 1;
+                                match self.get_resp(&path).await {
+                                    Ok((v, resp)) => {
+                                        let items = v.as_array().map(Vec::as_slice).unwrap_or(&[]);
+                                        let n = items.len();
+                                        list.extend(items.iter().map(|r| self.repo(r)).filter(wanted));
+                                        if n < 100 {
+                                            break;
+                                        }
+                                        next = next_page_path(resp.link.as_deref(), &self.api_base);
+                                        if next.is_none() {
+                                            break;
+                                        }
+                                        if pages == 5 && n == 100 {
+                                            capped = true;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        err = Some((org.clone(), e));
+                                        break;
+                                    }
+                                }
+                            }
+                            (list, capped, err)
+                        })
+                        .collect(),
+                )
+                .await;
+                let mut org_errs = Vec::new();
+                for (list, capped, err) in org_parts {
+                    out.extend(list);
+                    repos_capped |= capped;
+                    if let Some(e) = err {
+                        org_errs.push(e);
+                    }
+                }
+                if !org_errs.is_empty() {
+                    if org_errs.len() == 1 {
+                        repo_warnings.push(format!("Repositories for {} couldn't load: {}", org_errs[0].0, org_errs[0].1));
+                    } else {
+                        repo_warnings.push(format!("Repositories for {} organizations couldn't load: {}", org_errs.len(), org_errs[0].1));
+                    }
+                }
+                out.sort_by_key(|r| std::cmp::Reverse(r.pushed));
             }
-            out.sort_by_key(|r| std::cmp::Reverse(r.pushed));
+            Ok::<_, String>((out, repos_capped, repo_warnings))
+        };
+
+        let ((starred, starred_warn), repos_res) = net::join(starred_fut, repos_fut).await;
+        if let Some(w) = starred_warn {
+            warnings.push(w);
+        }
+        let (mut out, mut repos_capped, repo_warnings) = repos_res?;
+        warnings.extend(repo_warnings);
+        if !starred.is_empty() {
+            for r in &mut out {
+                r.starred = starred.contains(&r.full_name);
+            }
         }
         if out.len() > cfg.max_repos {
             repos_capped = true;
@@ -192,9 +242,9 @@ impl Gh {
 
     pub async fn search_page(&self, q: &str, page: usize) -> Result<(Vec<Value>, usize), String> {
         let q = q.replace(' ', "+").replace(':', "%3A");
-        let v = self.get(&format!("/search/issues?q={q}&sort=updated&order=desc&per_page={}&page={page}", crate::model::SEARCH_CAP)).await?;
+        let mut v = self.get(&format!("/search/issues?q={q}&sort=updated&order=desc&per_page={}&page={page}", crate::model::SEARCH_CAP)).await?;
         let total = v.get("total_count").and_then(Value::as_u64).unwrap_or(0) as usize;
-        let items = v.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
+        let items = v.get_mut("items").and_then(Value::as_array_mut).map(std::mem::take).unwrap_or_default();
         Ok((items, total))
     }
 
@@ -210,9 +260,9 @@ impl Gh {
     }
 
     pub async fn pulls(&self, login: &str) -> Result<(Vec<Pull>, usize, usize), String> {
-        let (open_items, open_total) = self.pulls_page(login, true, 1).await?;
-        let (closed_items, closed_total) = self.pulls_page(login, false, 1).await?;
-        let mut pulls = open_items;
+        let (open_res, closed_res) = net::join(self.pulls_page(login, true, 1), self.pulls_page(login, false, 1)).await;
+        let (mut pulls, open_total) = open_res?;
+        let (closed_items, closed_total) = closed_res?;
         for p in closed_items {
             if !pulls.iter().any(|existing| existing.number == p.number && existing.repo.eq_ignore_ascii_case(&p.repo)) {
                 pulls.push(p);
@@ -228,16 +278,27 @@ impl Gh {
             let issues = items.iter().map(parse_issue).collect();
             return Ok((issues, total));
         }
+        let queries: Vec<String> = orgs
+            .chunks(20)
+            .enumerate()
+            .map(|(idx, chunk)| {
+                let owners: String = chunk.iter().map(|o| format!(" org:{o}")).collect();
+                if idx == 0 {
+                    format!("is:issue is:open archived:false user:{login}{owners}")
+                } else {
+                    format!("is:issue is:open archived:false{owners}")
+                }
+            })
+            .collect();
+        let results = if queries.len() == 1 {
+            vec![self.search_page(&queries[0], page).await]
+        } else {
+            net::join_all(queries.iter().map(|q| self.search_page(q, page)).collect()).await
+        };
         let mut all_issues: Vec<Issue> = Vec::new();
         let mut grand_total = 0;
-        for (idx, chunk) in orgs.chunks(20).enumerate() {
-            let owners: String = chunk.iter().map(|o| format!(" org:{o}")).collect();
-            let q = if idx == 0 {
-                format!("is:issue is:open archived:false user:{login}{owners}")
-            } else {
-                format!("is:issue is:open archived:false{owners}")
-            };
-            match self.search_page(&q, page).await {
+        for (idx, res) in results.into_iter().enumerate() {
+            match res {
                 Ok((items, total)) => {
                     grand_total += total;
                     for v in &items {
@@ -295,21 +356,34 @@ impl Gh {
     pub async fn detail(&self, full: &str, at: &str) -> Detail {
         let mut d = Detail::default();
         let at = enc(at);
-        match self.get(&format!("/repos/{full}/contents?ref={at}")).await {
+        let at = at.as_str();
+        let ((contents_res, readme_res), (langs_res, commit_res)) = net::join(
+            net::join(
+                self.get(&format!("/repos/{full}/contents?ref={at}")),
+                self.get_raw(&format!("/repos/{full}/readme?ref={at}")),
+            ),
+            net::join(
+                self.get(&format!("/repos/{full}/languages")),
+                self.get(&format!("/repos/{full}/commits?sha={at}&per_page=1")),
+            ),
+        )
+        .await;
+        match contents_res {
             Ok(v) => {
-                let mut files: Vec<(String, bool)> = v.as_array().cloned().unwrap_or_default().iter().map(|f| (s(f, "name"), s(f, "type") == "dir")).collect();
+                let items = v.as_array().map(Vec::as_slice).unwrap_or(&[]);
+                let mut files: Vec<(String, bool)> = items.iter().map(|f| (s(f, "name"), s(f, "type") == "dir")).collect();
                 files.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase())));
                 d.files = files;
             }
             Err(e) => d.error = Some(e),
         }
         // The whole README (up to 200 KB), so Copy copies all of it.
-        match self.get_raw(&format!("/repos/{full}/readme?ref={at}")).await {
+        match readme_res {
             Ok(Some(t)) => d.readme = Some(t.chars().take(200_000).collect()),
             Ok(None) => {}
             Err(e) => d.readme_error = Some(e),
         }
-        match self.get(&format!("/repos/{full}/languages")).await {
+        match langs_res {
             Ok(v) => {
                 let mut langs: Vec<(String, u64)> = v.as_object().map(|o| o.iter().map(|(k, v)| (k.clone(), v.as_u64().unwrap_or(0))).collect()).unwrap_or_default();
                 langs.sort_by_key(|l| std::cmp::Reverse(l.1));
@@ -321,15 +395,15 @@ impl Gh {
                 }
             }
         }
-        match self.get(&format!("/repos/{full}/commits?sha={at}&per_page=1")).await {
+        match commit_res {
             Ok(v) => {
                 if let Some(c) = v.as_array().and_then(|a| a.first()) {
-                    let commit = c.get("commit").cloned().unwrap_or(Value::Null);
-                    let author = commit.get("author").cloned().unwrap_or(Value::Null);
-                    let date = s(&author, "date");
+                    let commit = c.get("commit").unwrap_or(&Value::Null);
+                    let author = commit.get("author").unwrap_or(&Value::Null);
+                    let date = s(author, "date");
                     d.commit = Some(Commit {
-                        author: c.get("author").filter(|a| !a.is_null()).map(|a| s(a, "login")).unwrap_or_else(|| s(&author, "name")),
-                        message: s(&commit, "message").lines().next().unwrap_or("").to_owned(),
+                        author: c.get("author").filter(|a| !a.is_null()).map(|a| s(a, "login")).unwrap_or_else(|| s(author, "name")),
+                        message: s(commit, "message").lines().next().unwrap_or("").to_owned(),
                         sha: s(c, "sha").chars().take(7).collect(),
                         committed_at: parse_iso(&date).unwrap_or(0),
                     });
@@ -355,10 +429,9 @@ impl Gh {
             }
             pages += 1;
             let (v, resp) = self.get_resp(&path).await?;
-            let items = v.as_array().cloned().unwrap_or_default();
-            let n = items.len();
+            let items = v.as_array().map(Vec::as_slice).unwrap_or(&[]);
             names.extend(items.iter().map(|b| s(b, "name")).filter(|n| !n.is_empty()));
-            if n < 100 {
+            if items.len() < 100 {
                 break;
             }
             next = next_page_path(resp.link.as_deref(), &self.api_base);
@@ -374,12 +447,20 @@ impl Gh {
     /// The conversation of issue or pull request `number`: its description, comments and, for a
     /// pull request, reviews (the first 100 of each).
     pub async fn thread(&self, full: &str, number: u32) -> Result<Thread, String> {
-        let issue = self.get(&format!("/repos/{full}/issues/{number}")).await?;
-        let comments = self.get(&format!("/repos/{full}/issues/{number}/comments?per_page=100")).await?;
+        let (issue_res, comments_res) = net::join(
+            self.get(&format!("/repos/{full}/issues/{number}")),
+            self.get(&format!("/repos/{full}/issues/{number}/comments?per_page=100")),
+        )
+        .await;
+        let issue = issue_res?;
+        let comments = comments_res?;
         let pull = if issue.get("pull_request").is_some_and(|p| !p.is_null()) {
-            let detail = self.get(&format!("/repos/{full}/pulls/{number}")).await?;
-            let reviews = self.get(&format!("/repos/{full}/pulls/{number}/reviews?per_page=100")).await?;
-            Some((detail, reviews))
+            let (detail_res, reviews_res) = net::join(
+                self.get(&format!("/repos/{full}/pulls/{number}")),
+                self.get(&format!("/repos/{full}/pulls/{number}/reviews?per_page=100")),
+            )
+            .await;
+            Some((detail_res?, reviews_res?))
         } else {
             None
         };
@@ -404,9 +485,14 @@ impl Gh {
     /// The commit pull request `number` shows, and the comments on lines of its diff (the
     /// first 100). A comment on a line that changed since (`line` is null) is left out.
     pub async fn line_comments(&self, full: &str, number: u32) -> Result<LineComments, String> {
-        let detail = self.get(&format!("/repos/{full}/pulls/{number}")).await?;
+        let (detail_res, comments_res) = net::join(
+            self.get(&format!("/repos/{full}/pulls/{number}")),
+            self.get_resp(&format!("/repos/{full}/pulls/{number}/comments?per_page=100")),
+        )
+        .await;
+        let detail = detail_res?;
         let head = detail.get("head").map(|h| s(h, "sha")).unwrap_or_default();
-        let (list, resp) = self.get_resp(&format!("/repos/{full}/pulls/{number}/comments?per_page=100")).await?;
+        let (list, resp) = comments_res?;
         Ok(parse_line_comments(head, &list, resp.link.as_deref(), &self.api_base))
     }
 
@@ -431,13 +517,12 @@ impl Gh {
         let mut out = Vec::new();
         for page in 1..=3 {
             let v = self.get(&format!("/repos/{full}/pulls/{number}/files?per_page=100&page={page}")).await?;
-            let list = v.as_array().cloned().unwrap_or_default();
-            let n = list.len();
+            let list = v.as_array().map(Vec::as_slice).unwrap_or(&[]);
             out.extend(list.iter().map(|f| {
                 let s = |k: &str| f.get(k).and_then(Value::as_str).map(str::to_owned);
                 PullFile { path: s("filename").unwrap_or_default(), previous: s("previous_filename"), status: s("status").unwrap_or_default(), patch: s("patch") }
             }));
-            if n < 100 {
+            if list.len() < 100 {
                 break;
             }
         }
@@ -516,7 +601,7 @@ impl Gh {
 
     /// The release GitHub shows as the latest; `None` when there's none (GitHub answers 404).
     pub async fn latest_release(&self, full: &str) -> Result<Option<crate::releases::Release>, String> {
-        let r = self.t.send("GET", &format!("/repos/{full}/releases/latest"), JSON).await?;
+        let r = self.fetch(&format!("/repos/{full}/releases/latest"), JSON).await?;
         match r.status {
             200..=299 => serde_json::from_str::<Value>(&r.body).map(|v| crate::releases::parse_release(&v)).map_err(|e| format!("Invalid response from GitHub: {e}")),
             404 => Ok(None),
@@ -527,9 +612,14 @@ impl Gh {
     /// The first read of the Releases section: the first page of releases (and whether there
     /// are more), the tags, and the latest release.
     pub async fn release_listing(&self, full: &str) -> Result<(crate::releases::Listing, bool, Option<crate::releases::Latest>), String> {
-        let (releases, more) = self.releases(full, 1).await?;
-        let (tags, tags_more) = self.tags(full).await?;
-        let latest = self.latest_release(full).await?.map(|l| crate::releases::Latest { id: l.id, tag: l.tag });
+        let (releases_res, (tags_res, latest_res)) = net::join(
+            self.releases(full, 1),
+            net::join(self.tags(full), self.latest_release(full)),
+        )
+        .await;
+        let (releases, more) = releases_res?;
+        let (tags, tags_more) = tags_res?;
+        let latest = latest_res?.map(|l| crate::releases::Latest { id: l.id, tag: l.tag });
         Ok((crate::releases::Listing { releases, tags, tags_more }, more, latest))
     }
 

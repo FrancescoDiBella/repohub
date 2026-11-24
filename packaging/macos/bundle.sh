@@ -39,6 +39,7 @@ ln -s /Applications "$STAGE/Applications"
 # hdiutil's own guess at the size can come out too small ("No space left on device"): give it
 # the folder's size plus room for the file system.
 SIZE_MB=$(( $(du -sm "$STAGE" | cut -f1) + 40 ))
-hdiutil create -volname RepoHub -srcfolder "$STAGE" -size "${SIZE_MB}m" -ov -format UDZO "dist/RepoHub-$VERSION-macos.dmg"
+# ULFO (LZFSE, supported since macOS 10.11; we target 11.0) is ~20-25% smaller than default UDZO.
+hdiutil create -volname RepoHub -srcfolder "$STAGE" -size "${SIZE_MB}m" -ov -format ULFO "dist/RepoHub-$VERSION-macos.dmg"
 rm -rf "$STAGE"
 echo "Built dist/RepoHub-$VERSION-macos.dmg"

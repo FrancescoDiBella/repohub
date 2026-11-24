@@ -34,9 +34,27 @@ impl App {
         // The profile and the repositories show as soon as they're in (on a first start).
         let early = to.clone();
         // With only a token, whose it is: the saved copy shows once that's known (see `cache`).
+        // Hand its ETags to the load so they're imported before `repos()` runs, avoiding a race
+        // with the UI thread's `profile_known`.
         let who = to.clone();
+        let held_tags = std::sync::Mutex::new(self.fresh.held.as_ref().map(|(c, _)| {
+            (c.data.profile.login.clone(), c.etags.clone(), crate::etag::generation())
+        }));
         let work = move || async move {
-            github::load_all_reporting(&cfg, move |login| who.post(move |s: &mut App| s.profile_known(epoch, &login)), move |d| early.post(move |s: &mut App| s.apply_early(epoch, d))).await
+            github::load_all_reporting(
+                &cfg,
+                move |login| {
+                    if let Some((expected, tags, tag_gen)) = held_tags.lock().unwrap_or_else(|e| e.into_inner()).take()
+                        && !login.is_empty()
+                        && expected.eq_ignore_ascii_case(&login)
+                    {
+                        crate::etag::import(tag_gen, tags);
+                    }
+                    who.post(move |s: &mut App| s.profile_known(epoch, &login));
+                },
+                move |d| early.post(move |s: &mut App| s.apply_early(epoch, d)),
+            )
+            .await
         };
         let done = move |s: &mut App, r| s.apply(epoch, r);
         #[cfg(not(target_arch = "wasm32"))]

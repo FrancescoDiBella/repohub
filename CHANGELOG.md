@@ -58,6 +58,16 @@ The sections are **Added**, **Changed** and **Fixed**.
   account's lists.
 - The Android back button closes things in the order Esc does: pickers, editors, the branch
   picker, questions and forms first.
+- Smaller downloads and packages across platforms: dropped unused `rune` features (`svg`/`resvg`
+  and `metal-backend`), switched the Docker runtime image to `distroless`, tuned macOS `.dmg`
+  (LZFSE), Linux/Windows release archives (level 9), Android APK packaging and `repohub-server`
+  release optimization (`opt-level = "z"`, `panic = "abort"`).
+- Faster GitHub loading and lower bandwidth: enabled `gzip` on the desktop client and
+  `repohub-server` (including on-the-fly gzip for `/gh/*` proxy responses), shared pooled HTTP
+  keep-alive connections (`8` idle per host), parallelized repository/star/org, pull request,
+  detail, conversation, line-comment and release reads (`AT_ONCE = 6`), enabled conditional
+  `ETag`/`304` reads on `latest_release` and board sync, cached full-SHA commit details in memory
+  and cached `prefs.json` reads.
 
 ### Fixed
 - On a phone the theme editor puts each label above its field and its title above its buttons,
@@ -79,6 +89,10 @@ The sections are **Added**, **Changed** and **Fixed**.
 - Starring on the sample data says that nothing was sent to GitHub.
 - Lists read across several pages follow GitHub's `Link` header exactly, also when an address
   holds a comma.
+- Saved-copy `ETag` import no longer overwrites fresher live entries and no longer races with
+  `/user/starred` and `/user/repos` on token-only warm starts; picking a branch in Notes no
+  longer loads drawings twice; reloading a workflow run keeps cached job logs if the reload fails;
+  update checks no longer treat an empty build SHA as matching every Preview release.
 
 ## 0.2.0 — 2026-11-22
 

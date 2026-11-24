@@ -23,6 +23,13 @@ android {
         targetSdk 34
         versionCode appBuild
         versionName appVersion
+        resourceConfigurations += ["en"]
+    }
+
+    packaging {
+        resources {
+            excludes += ["/META-INF/{AL2.0,LGPL2.1}", "/META-INF/*.kotlin_module", "/META-INF/*.version"]
+        }
     }
 
     signingConfigs {

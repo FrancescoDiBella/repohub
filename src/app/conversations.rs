@@ -249,7 +249,6 @@ impl App {
     /// Reloads jobs and cached logs for the open workflow run.
     pub(crate) fn reload_open_run(&mut self) {
         if let Some(o) = self.open_run.as_mut() {
-            o.logs.clear();
             o.write_error = None;
         }
         self.load_run_jobs();
@@ -296,6 +295,7 @@ impl App {
                         .or_else(|| jobs.iter().find(|j| j.checks == model::Checks::Failing).map(|j| j.id))
                         .or_else(|| jobs.first().map(|j| j.id));
                     o.selected_job = pick;
+                    o.logs.clear();
                     o.jobs = Load::Ready(jobs);
                     if let Some(jid) = pick {
                         s.load_job_log(jid);
