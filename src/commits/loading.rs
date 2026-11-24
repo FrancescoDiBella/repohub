@@ -178,14 +178,19 @@ impl App {
         if self.load_gen != account {
             return;
         }
+        let sample = self.data.sample;
         let c = &mut self.commits;
         let Some(o) = c.open.as_mut().filter(|o| o.epoch == epoch) else { return };
         match r {
             Ok(d) => {
                 let repo = o.repo.clone();
                 c.commit_diff.set_files(diffs::pull_files(&d.files));
-                o.load = Load::Ready(d.clone());
-                c.remember_commit(&repo, &d);
+                if sample {
+                    o.load = Load::Ready(d);
+                } else {
+                    o.load = Load::Ready(d.clone());
+                    c.remember_commit(&repo, &d);
+                }
             }
             Err(e) if matches!(o.load, Load::Ready(_)) => self.notify_problem(e),
             Err(e) => o.load = Load::Failed(e),

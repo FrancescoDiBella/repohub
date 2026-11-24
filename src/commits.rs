@@ -422,6 +422,19 @@ pub struct Compare {
 
 /// Immutable commit details kept in memory for instant Back / parent navigation.
 const COMMITS_KEPT: usize = 32;
+/// Maximum total bytes of commit messages and patches kept in memory.
+const COMMITS_MAX_BYTES: usize = 8 << 20;
+
+fn detail_bytes(d: &Detail) -> usize {
+    d.sha.len()
+        + d.title.len()
+        + d.body.len()
+        + d.url.len()
+        + d.files
+            .iter()
+            .map(|f| f.path.len() + f.previous.as_ref().map_or(0, String::len) + f.patch.as_ref().map_or(0, String::len))
+            .sum::<usize>()
+}
 
 /// The Commits section's state. It follows the repository and the branch on screen.
 pub struct Commits {
@@ -437,7 +450,8 @@ pub struct Commits {
     pub commit_diff: DiffState,
     pub compare_diff: DiffState,
     /// Recently read full-SHA commit details, most recent last (commits are immutable).
-    cached: Vec<((String, String), Detail)>,
+    cached: Vec<((String, String), Detail, usize)>,
+    cached_bytes: usize,
 }
 
 impl Default for Commits {
@@ -451,6 +465,7 @@ impl Default for Commits {
             commit_diff: DiffState::new(Vec::new()),
             compare_diff: DiffState::new(Vec::new()),
             cached: Vec::new(),
+            cached_bytes: 0,
         }
     }
 }
@@ -466,23 +481,33 @@ impl Commits {
         if sha.len() < 40 || !valid_sha(sha) {
             return None;
         }
-        let pos = self.cached.iter().position(|((r, s), _)| same_repo(r, repo) && s.eq_ignore_ascii_case(sha))?;
+        let pos = self.cached.iter().position(|((r, s), _, _)| same_repo(r, repo) && s.eq_ignore_ascii_case(sha))?;
         let entry = self.cached.remove(pos);
         let detail = entry.1.clone();
         self.cached.push(entry);
         Some(detail)
     }
 
-    /// Remembers a full-SHA commit detail (evicting the least recently used beyond `COMMITS_KEPT`).
+    /// Remembers a full-SHA commit detail (evicting the least recently used beyond `COMMITS_KEPT`
+    /// or `COMMITS_MAX_BYTES`).
     pub(crate) fn remember_commit(&mut self, repo: &str, detail: &Detail) {
         if detail.sha.len() < 40 || !valid_sha(&detail.sha) {
             return;
         }
+        let bytes = detail_bytes(detail);
+        if bytes > COMMITS_MAX_BYTES / 2 {
+            return;
+        }
         let key = (repo.to_ascii_lowercase(), detail.sha.to_ascii_lowercase());
-        self.cached.retain(|(k, _)| *k != key);
-        self.cached.push((key, detail.clone()));
-        if self.cached.len() > COMMITS_KEPT {
-            self.cached.remove(0);
+        if let Some(pos) = self.cached.iter().position(|(k, _, _)| *k == key) {
+            let (_, _, old_bytes) = self.cached.remove(pos);
+            self.cached_bytes -= old_bytes;
+        }
+        self.cached.push((key, detail.clone(), bytes));
+        self.cached_bytes += bytes;
+        while self.cached.len() > COMMITS_KEPT || self.cached_bytes > COMMITS_MAX_BYTES {
+            let (_, _, evicted) = self.cached.remove(0);
+            self.cached_bytes -= evicted;
         }
     }
 

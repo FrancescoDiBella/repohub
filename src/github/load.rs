@@ -193,7 +193,7 @@ pub async fn load_more_pulls(cfg: &Config, login: &str, open: bool, page: usize)
 }
 
 pub async fn load_more_issues(cfg: &Config, login: &str, orgs: &[String], page: usize) -> Result<(Vec<Issue>, usize), String> {
-    Gh::new(cfg).issues_page(login, orgs, page).await
+    Gh::new(cfg).limited(AT_ONCE).issues_page(login, orgs, page).await
 }
 
 pub async fn load_notifications(cfg: &Config) -> Result<Vec<Notification>, String> {

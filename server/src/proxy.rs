@@ -72,12 +72,19 @@ pub(super) fn proxy(cfg: &Cfg, mut req: Request) {
     let status = resp.status();
     let mut headers = vec![h("Cache-Control", "no-store"), h("Vary", "Accept-Encoding")];
     for name in ["Content-Type", "x-ratelimit-remaining", "x-ratelimit-reset", "x-ratelimit-limit", "retry-after", "link", "etag"] {
-        if let Some(v) = resp.header(name) {
-            headers.push(h(name, v));
+        if let Some(v) = resp.header(name)
+            && let Ok(hdr) = tiny_http::Header::from_bytes(name.as_bytes(), v.as_bytes())
+        {
+            headers.push(hdr);
         }
     }
     let mut data = Vec::new();
-    let _ = resp.into_reader().take(32 << 20).read_to_end(&mut data);
+    if !matches!(status, 204 | 304)
+        && let Err(e) = resp.into_reader().take(32 << 20).read_to_end(&mut data)
+    {
+        let _ = req.respond(text(502, &format!("GitHub's answer couldn't be read: {e}")));
+        return;
+    }
     // Compress non-trivial payloads for browsers that accept gzip (typical GitHub JSON shrinks 5-10x).
     let wants_gzip = data.len() >= 1024
         && (200..300).contains(&status)

@@ -60,8 +60,8 @@ The sections are **Added**, **Changed** and **Fixed**.
   picker, questions and forms first.
 - Smaller downloads and packages across platforms: dropped unused `rune` features (`svg`/`resvg`
   and `metal-backend`), switched the Docker runtime image to `distroless`, tuned macOS `.dmg`
-  (LZFSE), Linux/Windows release archives (level 9), Android APK packaging and `repohub-server`
-  release optimization (`opt-level = "z"`, `panic = "abort"`).
+  (LZFSE), Linux/Windows release archives (level 9) and `repohub-server` release optimization
+  (`opt-level = "z"`).
 - Faster GitHub loading and lower bandwidth: enabled `gzip` on the desktop client and
   `repohub-server` (including on-the-fly gzip for `/gh/*` proxy responses), shared pooled HTTP
   keep-alive connections (`8` idle per host), parallelized repository/star/org, pull request,

@@ -295,7 +295,7 @@ impl App {
                         .or_else(|| jobs.iter().find(|j| j.checks == model::Checks::Failing).map(|j| j.id))
                         .or_else(|| jobs.first().map(|j| j.id));
                     o.selected_job = pick;
-                    o.logs.clear();
+                    o.logs.retain(|id, _| Some(*id) == pick);
                     o.jobs = Load::Ready(jobs);
                     if let Some(jid) = pick {
                         s.load_job_log(jid);

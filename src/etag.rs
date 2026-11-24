@@ -130,29 +130,25 @@ pub fn export(budget: usize) -> Vec<(String, Entry)> {
 }
 
 /// Takes the answers of a saved copy (only for keys not already present in the current
-/// generation: a load that already ran knows better).
+/// generation: a load that already ran knows better, and imported entries never evict live ones).
 pub fn import(generation: u64, entries: Vec<(String, Entry)>) {
     with(|s| {
         if s.generation != generation {
             return;
         }
-        for (k, entry) in entries.into_iter().rev() {
+        // `export` orders most-recently-used first; walk in that order so the hottest saved
+        // answers fit first, and mark them with `used = 0` so live entries (`clock >= 1`) always
+        // outrank them in LRU eviction.
+        for (k, entry) in entries {
             if s.entries.contains_key(&k) {
                 continue;
             }
             let size = k.len() + entry.body.len() + entry.etag.len();
-            if size > MAX_BYTES / 4 {
+            if size > MAX_BYTES / 4 || s.bytes + size > MAX_BYTES {
                 continue;
             }
-            s.clock += 1;
-            s.entries.insert(k, (entry, s.clock));
+            s.entries.insert(k, (entry, 0));
             s.bytes += size;
-            while s.bytes > MAX_BYTES {
-                let Some(oldest) = s.entries.iter().min_by_key(|(_, (_, used))| *used).map(|(k, _)| k.clone()) else { break };
-                if let Some((e, _)) = s.entries.remove(&oldest) {
-                    s.bytes -= oldest.len() + e.body.len() + e.etag.len();
-                }
-            }
         }
     });
 }

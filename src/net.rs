@@ -189,10 +189,32 @@ where
 {
     #[cfg(not(target_arch = "wasm32"))]
     {
+        const MAX_WORKERS: usize = 8;
+        let total = all.len();
+        if total <= 1 {
+            return all.into_iter().map(pollster::block_on).collect();
+        }
+        let workers = total.min(MAX_WORKERS);
+        let queue: std::sync::Mutex<std::collections::VecDeque<(usize, F)>> =
+            std::sync::Mutex::new(all.into_iter().enumerate().collect());
+        let results: std::sync::Mutex<Vec<Option<F::Output>>> =
+            std::sync::Mutex::new((0..total).map(|_| None).collect());
         std::thread::scope(|sc| {
-            let running: Vec<_> = all.into_iter().map(|f| sc.spawn(move || pollster::block_on(f))).collect();
-            running.into_iter().map(|h| h.join().unwrap_or_else(|p| std::panic::resume_unwind(p))).collect()
-        })
+            let handles: Vec<_> = (0..workers)
+                .map(|_| {
+                    sc.spawn(|| loop {
+                        let next = queue.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
+                        let Some((idx, fut)) = next else { break };
+                        let val = pollster::block_on(fut);
+                        results.lock().unwrap_or_else(|e| e.into_inner())[idx] = Some(val);
+                    })
+                })
+                .collect();
+            for h in handles {
+                h.join().unwrap_or_else(|p| std::panic::resume_unwind(p));
+            }
+        });
+        results.into_inner().unwrap_or_else(|e| e.into_inner()).into_iter().map(Option::unwrap).collect()
     }
     #[cfg(target_arch = "wasm32")]
     {
@@ -289,20 +311,41 @@ pub struct Transport {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn build_agent(use_proxy: bool) -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .try_proxy_from_env(use_proxy)
+        .max_idle_connections_per_host(8)
+        .timeout(std::time::Duration::from_secs(20))
+        .user_agent("RepoHub (Rune)")
+        .build()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn shared_agent(use_proxy: bool) -> ureq::Agent {
-    use std::sync::OnceLock;
-    static DIRECT: OnceLock<ureq::Agent> = OnceLock::new();
-    static PROXIED: OnceLock<ureq::Agent> = OnceLock::new();
-    let slot = if use_proxy { &PROXIED } else { &DIRECT };
-    slot.get_or_init(|| {
-        ureq::AgentBuilder::new()
-            .try_proxy_from_env(use_proxy)
-            .max_idle_connections_per_host(8)
-            .timeout(std::time::Duration::from_secs(20))
-            .user_agent("RepoHub (Rune)")
-            .build()
-    })
-    .clone()
+    use std::sync::{Mutex, OnceLock};
+    if !use_proxy {
+        static DIRECT: OnceLock<ureq::Agent> = OnceLock::new();
+        return DIRECT.get_or_init(|| build_agent(false)).clone();
+    }
+    type ProxyKey = [Option<String>; 6];
+    let key: ProxyKey = [
+        std::env::var("HTTPS_PROXY").ok(),
+        std::env::var("https_proxy").ok(),
+        std::env::var("HTTP_PROXY").ok(),
+        std::env::var("http_proxy").ok(),
+        std::env::var("ALL_PROXY").ok(),
+        std::env::var("all_proxy").ok(),
+    ];
+    static PROXIED: Mutex<Option<(ProxyKey, ureq::Agent)>> = Mutex::new(None);
+    let mut guard = PROXIED.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((cached_key, agent)) = guard.as_ref()
+        && *cached_key == key
+    {
+        return agent.clone();
+    }
+    let agent = build_agent(true);
+    *guard = Some((key, agent.clone()));
+    agent
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -357,11 +400,17 @@ impl Transport {
         let retry_after = resp.header("retry-after").and_then(|v| v.trim().parse().ok());
         let link = resp.header("link").map(str::to_owned);
         let etag = resp.header("etag").map(str::to_owned);
-        // The client reads at most 10 MB of an answer (a very long job log can be more).
-        let body = resp.into_string().map_err(|e| match e.kind() {
-            std::io::ErrorKind::Other if e.to_string().contains("too big") => "GitHub's answer is larger than RepoHub reads (10 MB): open it on GitHub instead.".to_owned(),
-            _ => format!("GitHub's answer couldn't be read: {e}"),
-        })?;
+        // Bodiless responses (204/304) may still carry Content-Encoding: gzip; skip decoding them
+        // so ureq's gzip wrapper never tries to read a gzip header from an empty stream.
+        // Otherwise the client reads at most 10 MB (a very long job log can be more).
+        let body = if matches!(status, 204 | 304) {
+            String::new()
+        } else {
+            resp.into_string().map_err(|e| match e.kind() {
+                std::io::ErrorKind::Other if e.to_string().contains("too big") => "GitHub's answer is larger than RepoHub reads (10 MB): open it on GitHub instead.".to_owned(),
+                _ => format!("GitHub's answer couldn't be read: {e}"),
+            })?
+        };
         Ok(Resp { status, body, remaining, reset, retry_after, link, etag })
     }
 }
@@ -539,5 +588,28 @@ mod tests {
         cfg.token = Some("t".into());
         let e = pollster::block_on(crate::github::load_job_log(&cfg, "octo/app", 7)).unwrap_err();
         assert!(e.contains("larger than RepoHub reads") && !e.contains("into_string"), "{e}");
+    }
+
+    /// A 304 Not Modified response carrying `Content-Encoding: gzip` and no body must not fail
+    /// inside the gzip decoder.
+    #[test]
+    fn bodiless_304_with_gzip_header_succeeds() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let api = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            if let Some(Ok(mut stream)) = listener.incoming().next() {
+                let _ = stream.read(&mut [0u8; 2048]);
+                let _ = write!(stream, "HTTP/1.1 304 Not Modified\r\nContent-Encoding: gzip\r\nETag: \"abc\"\r\nConnection: close\r\n\r\n");
+            }
+        });
+        let mut cfg = crate::config::Config::from_json("{}").unwrap();
+        cfg.api = api;
+        cfg.token = Some("t".into());
+        let t = super::Transport::new(&cfg);
+        let r = pollster::block_on(t.send_if("/user", "application/vnd.github+json", Some("\"abc\""))).expect("304 with gzip header succeeds");
+        assert_eq!(r.status, 304);
+        assert!(r.body.is_empty());
+        assert_eq!(r.etag.as_deref(), Some("\"abc\""));
     }
 }

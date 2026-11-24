@@ -63,10 +63,10 @@ struct CachedPrefs {
 static CACHE: std::sync::Mutex<Option<CachedPrefs>> = std::sync::Mutex::new(None);
 
 #[cfg(not(target_arch = "wasm32"))]
-fn with_map<R>(f: impl FnOnce(&mut serde_json::Map<String, Value>, &std::path::Path) -> R) -> R {
+fn read_key(key: &str) -> Option<Value> {
     let path = file();
-    let stamp = file_stamp(&path);
     let mut g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let stamp = file_stamp(&path);
     let hit = g.as_ref().is_some_and(|c| c.path == path && c.stamp == stamp);
     if !hit {
         let map = std::fs::read_to_string(&path)
@@ -74,32 +74,40 @@ fn with_map<R>(f: impl FnOnce(&mut serde_json::Map<String, Value>, &std::path::P
             .and_then(|s| serde_json::from_str::<Value>(&s).ok())
             .and_then(|v| v.as_object().cloned())
             .unwrap_or_default();
-        *g = Some(CachedPrefs { path: path.clone(), stamp, map });
+        *g = Some(CachedPrefs { path, stamp, map });
     }
-    let entry = g.as_mut().unwrap();
-    let res = f(&mut entry.map, &path);
-    entry.stamp = file_stamp(&path);
-    res
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn read_key(key: &str) -> Option<Value> {
-    with_map(|map, _| map.get(key).cloned())
+    g.as_ref().and_then(|c| c.map.get(key).cloned())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn write_key(key: &str, value: Value) {
-    with_map(|map, path| {
-        map.insert(key.to_owned(), value);
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        // Written aside and moved in place, so a crash never leaves half a file.
-        let tmp = path.with_extension("json.tmp");
-        if std::fs::write(&tmp, Value::Object(map.clone()).to_string()).is_ok() {
-            let _ = std::fs::rename(tmp, path);
-        }
-    });
+    let path = file();
+    let mut g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let stamp = file_stamp(&path);
+    let hit = g.as_ref().is_some_and(|c| c.path == path && c.stamp == stamp);
+    let mut map = if hit {
+        g.as_ref().unwrap().map.clone()
+    } else {
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default()
+    };
+    map.insert(key.to_owned(), value);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    // Written aside and moved in place, so a crash never leaves half a file.
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, Value::Object(map.clone()).to_string()).is_ok()
+        && std::fs::rename(&tmp, &path).is_ok()
+    {
+        let new_stamp = file_stamp(&path);
+        *g = Some(CachedPrefs { path, stamp: new_stamp, map });
+    } else {
+        *g = None;
+    }
 }
 
 // ------------------------------------------------------------------ web: localStorage

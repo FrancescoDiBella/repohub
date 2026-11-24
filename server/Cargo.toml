@@ -11,11 +11,10 @@ ureq = { version = "2.12", default-features = false, features = ["tls", "native-
 # Already pulled in by ureq's `gzip` feature; also used to compress large /gh/* JSON responses to browsers.
 flate2 = "1"
 
-# Optimized for size as one unit: the server only forwards requests and sends files, and never
-# catches panics, so panic = "abort" and opt-level = "z" keep its Docker image layer small.
+# Optimized for size as one unit: the server only forwards requests and sends files, so
+# opt-level = "z" keeps its Docker image layer small while preserving worker panic isolation.
 [profile.release]
 strip = true
 opt-level = "z"
 lto = "fat"
 codegen-units = 1
-panic = "abort"
